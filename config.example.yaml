@@ -1,0 +1,5 @@
+# Example config for forgectl. Location: ~/.config/forgectl/config.yaml (drop-ins: config.d/*.yaml). Keys are defined in docs/interface.md once designed.
+# hosts:
+#   <host>:
+#     token_env: ...
+hooks: {}
