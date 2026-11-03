@@ -1,0 +1,292 @@
+"""Append-only JSONL files in the state directory (interface: Files, Audit and log).
+
+One record is one ASCII line written with a single ``write`` on an ``O_APPEND`` descriptor, so
+concurrent processes never interleave lines. The state directory and the file are opened without
+following a final symlink, and must be what they should be: a directory (or regular file) owned
+by the caller, a directory nobody else can write, a file with one link. Nothing here changes the
+mode of something that exists; creation is 0700 for the directory and 0600 for a file.
+
+There is no rotation: the interface defines none. The only size cap is per line.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import pwd
+import re
+import stat
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+MAX_LINE_BYTES = 64 * 1024  # a line, newline included; above it nothing is written
+
+# The patterns of schemas/defs.json, audit.json and log.json, matched with ``fullmatch`` (so a
+# trailing newline never passes). A test compares them with the schema files.
+PATTERNS: dict[str, str] = {
+    "host": r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?$",  # noqa: E501
+    "pr": r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\.\.?(?:/|#))[A-Za-z0-9._-]+)+#[1-9][0-9]{0,9}$",  # noqa: E501
+    "ts": r"^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})$",  # noqa: E501
+    "id": r"^(?:gh:(?:ic|rc|rt|r):[A-Za-z0-9_=-]{1,100}|gl:d:[0-9a-f]{40}|gl:n:[1-9][0-9]{0,18})$",
+    "actor": r"^(human|auto):[A-Za-z0-9._@-]{1,64}$",
+    "decision_id": r"^[A-Za-z0-9._:@/-]{1,128}$",
+    "sha": r"^[0-9a-f]{40}$",
+    "sha256": r"^[0-9a-f]{64}$",
+    "attempt_id": r"^[A-Za-z0-9_-]{8,64}$",
+    "event": r"^[a-z][a-z0-9_]*$",
+}
+_COMPILED = {name: re.compile(pattern) for name, pattern in PATTERNS.items()}
+
+
+def matches(name: str, value: object) -> bool:
+    """Whether ``value`` is a string matching the named schema pattern in full."""
+    return isinstance(value, str) and _COMPILED[name].fullmatch(value) is not None
+
+
+def parse_ts(value: object) -> datetime | None:
+    """An RFC 3339 ``ts`` as an aware datetime; None when it is not one (or not a real time)."""
+    if not matches("ts", value):
+        return None
+    assert isinstance(value, str)
+    try:
+        return datetime.fromisoformat(value.upper())
+    except ValueError:
+        return None
+
+
+def now_ts() -> str:
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+class JsonlError(OSError):
+    """The file could not be appended to or read, for any reason (the message is fixed text)."""
+
+
+def state_dir(env: Mapping[str, str]) -> Path:
+    """``$XDG_STATE_HOME/forgectl`` when absolute, else ``~/.local/state/forgectl``."""
+    xdg = env.get("XDG_STATE_HOME", "")
+    if xdg and os.path.isabs(xdg):
+        return Path(xdg) / "forgectl"
+    home = env.get("HOME", "")
+    if not (home and os.path.isabs(home)):
+        try:
+            home = pwd.getpwuid(os.getuid()).pw_dir
+        except (KeyError, OSError):
+            raise JsonlError("cannot locate the home directory") from None
+    return Path(home) / ".local" / "state" / "forgectl"
+
+
+def encode_line(record: Mapping[str, Any]) -> bytes:
+    """The record as one ASCII line, checked against the line cap."""
+    try:
+        text = json.dumps(record, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        raise JsonlError("record is not JSON") from None
+    data = text.encode("ascii") + b"\n"
+    if len(data) > MAX_LINE_BYTES:
+        raise JsonlError("record is over the line cap")
+    return data
+
+
+def _check_dir(fd: int) -> None:
+    info = os.fstat(fd)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+        raise JsonlError("state directory is not a directory of this user")
+    if info.st_mode & 0o022:
+        raise JsonlError("state directory is writable by others")
+
+
+def open_dir(directory: Path, *, create: bool) -> int | None:
+    """A descriptor for the state directory; None when it is absent and ``create`` is false."""
+    try:
+        try:
+            fd = os.open(directory, _DIR_FLAGS)
+        except FileNotFoundError:
+            if not create:
+                return None
+            directory.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.mkdir(directory, 0o700)
+            except FileExistsError:
+                pass
+            fd = os.open(directory, _DIR_FLAGS)
+        try:
+            _check_dir(fd)
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+    except JsonlError:
+        raise
+    except OSError as err:
+        raise JsonlError(f"state directory: {os.strerror(err.errno or 0)}") from None
+
+
+def _check_file(fd: int) -> None:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        raise JsonlError("not a regular file")
+    if info.st_uid != os.geteuid() or info.st_nlink != 1:
+        raise JsonlError("file is not this user's single-link file")
+
+
+def _open_append(directory: Path, name: str) -> int:
+    dfd = open_dir(directory, create=True)
+    assert dfd is not None
+    try:
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+        fd = os.open(name, flags | os.O_CLOEXEC, 0o600, dir_fd=dfd)
+    except OSError as err:
+        raise JsonlError(f"{name}: {os.strerror(err.errno or 0)}") from None
+    finally:
+        os.close(dfd)
+    try:
+        _check_file(fd)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def check_appendable(directory: Path, name: str) -> None:
+    """Open (creating) the file for appending and close it, writing nothing."""
+    os.close(_open_append(directory, name))
+
+
+def append(directory: Path, name: str, record: Mapping[str, Any]) -> None:
+    """Append ``record`` as one line; raises ``JsonlError`` (nothing partial that it knows of)."""
+    data = encode_line(record)
+    fd = _open_append(directory, name)
+    try:
+        try:
+            written = os.write(fd, data)
+        except OSError as err:
+            raise JsonlError(f"{name}: {os.strerror(err.errno or 0)}") from None
+        if written != len(data):
+            raise JsonlError(f"{name}: short write")
+    finally:
+        os.close(fd)
+
+
+def open_read(directory: Path, name: str) -> int | None:
+    """A read descriptor for the file; None when the directory or file is absent."""
+    dfd = open_dir(directory, create=False)
+    if dfd is None:
+        return None
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dfd)
+    except FileNotFoundError:
+        return None
+    except OSError as err:
+        raise JsonlError(f"{name}: {os.strerror(err.errno or 0)}") from None
+    finally:
+        os.close(dfd)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+            raise JsonlError(f"{name}: not a regular file of this user")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+# --- log.jsonl ----------
+
+LOG_FILE = "log.jsonl"
+LEVELS = ("error", "warn", "info", "debug")
+_MAX_STRING = 2048
+_MAX_DEPTH = 6
+_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/?#@]*@")
+_TOKEN_SHAPES = re.compile(
+    r"(?:gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}|glpat-[A-Za-z0-9_-]{8,})"
+)
+
+
+def scrub_text(text: str) -> str:
+    """Drop userinfo from URLs and mask token-shaped words; cap the length."""
+    text = _URL_USERINFO.sub(r"\1", text)
+    text = _TOKEN_SHAPES.sub("<redacted>", text)
+    return text if len(text) <= _MAX_STRING else text[:_MAX_STRING] + "..."
+
+
+def scrub_details(value: Any, depth: int = 0) -> Any:
+    """``details`` for the log: JSON-safe, no URL userinfo, no token shapes, bounded."""
+    if isinstance(value, str):
+        return scrub_text(value)
+    if value is None or isinstance(value, bool | int):
+        return value
+    if isinstance(value, float):
+        return value if value == value and abs(value) != float("inf") else None
+    if depth >= _MAX_DEPTH:
+        return "<too deep>"
+    if isinstance(value, Mapping):
+        return {
+            scrub_text(str(k)): scrub_details(v, depth + 1) for k, v in list(value.items())[:64]
+        }
+    if isinstance(value, list | tuple):
+        return [scrub_details(v, depth + 1) for v in list(value)[:64]]
+    return "<unserializable>"
+
+
+def log_problem(record: object) -> str | None:
+    """Why ``record`` is not a valid ``log.json`` record, or None."""
+    keys = {"ts", "level", "event", "pr", "host", "details"}
+    if not isinstance(record, dict) or set(record) != keys:
+        return "not a log record"
+    if parse_ts(record["ts"]) is None:
+        return "ts"
+    if record["level"] not in LEVELS:
+        return "level"
+    if not matches("event", record["event"]):
+        return "event"
+    if record["pr"] is not None and not matches("pr", record["pr"]):
+        return "pr"
+    if record["host"] is not None and not matches("host", record["host"]):
+        return "host"
+    if record["details"] is not None and not isinstance(record["details"], dict):
+        return "details"
+    return None
+
+
+def log_event(
+    directory: Path,
+    level: str,
+    event: str,
+    *,
+    pr: str | None = None,
+    host: str | None = None,
+    details: Mapping[str, Any] | None = None,
+) -> str | None:
+    """Append one log record. Returns a warning text when it could not be written, else None.
+
+    A log failure never raises: it must not change a command's result. ``pr`` and ``host`` that
+    do not match the schema are recorded as null rather than as raw text.
+    """
+    record: dict[str, Any] = {
+        "ts": now_ts(),
+        "level": level,
+        "event": event,
+        "pr": pr if matches("pr", pr) else None,
+        "host": host if matches("host", host) else None,
+        "details": None if details is None else scrub_details(details),
+    }
+    problem = log_problem(record)
+    if problem is not None:
+        return f"log record not written: invalid {problem}"
+    try:
+        try:
+            append(directory, LOG_FILE, record)
+        except JsonlError as err:
+            if "line cap" not in str(err):
+                raise
+            record["details"] = {"truncated": True}
+            append(directory, LOG_FILE, record)
+    except JsonlError as err:
+        return f"log not written: {err}"
+    return None

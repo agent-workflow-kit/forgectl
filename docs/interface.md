@@ -797,7 +797,7 @@ A list and a detail pane with facts, CI, reviews, comments and diff. The default
 | `log.jsonl` | 0600 | public contract |
 | private temporary directories | 0700 | empty cwd and config dirs per process, under `TMPDIR`, removed on exit |
 
-`audit.jsonl` gets mode 0600 on creation; an existing file's mode is not changed. There is no `state.db`.
+`audit.jsonl` gets mode 0600 on creation; an existing file's mode is not changed. There is no `state.db`. Neither file is rotated. Each record is one ASCII line (non-ASCII is escaped) of at most 64 KiB, written with a single append, so concurrent runs never interleave lines. The state directory must be a real directory (not a symlink) owned by the user and not writable by others, and a file must be a regular file owned by the user with one link; otherwise it is not used (an audit append fails as `audit_unavailable`, a log write warns). `export` skips a line over 256 KiB.
 
 ## Audit and log
 
@@ -807,7 +807,7 @@ A list and a detail pane with facts, CI, reviews, comments and diff. The default
 
 **Fields.** `merge_unverified` is recorded as `merged_unexpected` when the PR merged at another head or base, with `observed: {head_sha, base_ref}` in the outcome record, else as `outcome_unknown`; `observed` is null otherwise. A post's `quick_action_ran` as itself; `approved_stale_head` as `approved`, since the approval exists. `config_hash` is the sha256 hex digest of the canonical JSON of the effective config, after files, environment overrides and defaults but not flags: every key present, each with its default when unset (null only where the default is null, such as `me.name`), keys sorted, compact separators (`,` and `:`), non-ASCII characters as `\u` escapes, encoded as UTF-8, durations as JSON numbers of seconds always written with a fraction part, as Python's float repr does (`60.0`, `0.009`), keys spelled as in the schema (such as `pre-merge` and a hook's `async`), and `me.name` as configured (null when unset, not the OS username). `config_path` is null for the default. `actor_source` is `flag`, `tty` or `default`. `human:` with `stdin_tty: false` is expected from a dashboard, and is checkable, not refused.
 
-**Log** (`schemas/log.json`): `ts`, `level`, `event`, `pr`, `host`, `details`. `error` for exit 1; `warn` for refusals, vetoes, escalations, exit 12 and an unmatched instance note; `info` otherwise; `debug` for `--verbose`. Reads log only at `--verbose` or on failure, so polling does not grow the file. A log write failure warns only. URLs are recorded without userinfo. Secrets never appear in either file.
+**Log** (`schemas/log.json`): `ts`, `level`, `event`, `pr`, `host`, `details`. `error` for exit 1; `warn` for refusals, vetoes, escalations, exit 12 and an unmatched instance note; `info` otherwise; `debug` for `--verbose`. Reads log only at `--verbose` or on failure, so polling does not grow the file. A log write failure warns only, and never changes the exit code. `export` prints each record with its untrusted fields (`base_ref`, `host_login`, `observed.base_ref`) sanitized, and skips, with a warning that does not repeat the line, any line that is not valid against `schemas/audit.json`. URLs are recorded without userinfo. Secrets never appear in either file.
 
 ## Upgrades
 
