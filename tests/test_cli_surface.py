@@ -4,6 +4,7 @@ import json
 import os
 import signal
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -324,9 +325,11 @@ def test_parse_error_never_echoes_raw_control_characters(
     ],
 )
 def test_global_flags_parse_in_either_position(
-    argv: list[str], capsys: pytest.CaptureFixture[str]
+    argv: list[str], capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    reaches_handler(capsys, argv, "show")
+    config = tmp_path / "c.yaml"  # `--config` must name a file that exists
+    config.write_text("", encoding="utf-8")
+    reaches_handler(capsys, [str(config) if a == "c.yaml" else a for a in argv], "show")
 
 
 def test_a_positional_after_double_dash_is_not_a_flag(

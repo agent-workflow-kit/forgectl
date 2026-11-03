@@ -5,7 +5,10 @@ description = "Normalized access to pull/merge requests across GitHub and GitLab
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-dependencies = []
+dependencies = [
+    "pydantic>=2.9",
+    "pyyaml>=6.0",
+]
 
 [project.scripts]
 forgectl = "forgectl.cli:main"
@@ -25,6 +28,7 @@ dev = [
     "pymarkdownlnt>=0.9.41",
     "jsonschema>=4.26.0",
     "referencing>=0.36",
+    "types-pyyaml>=6.0",
 ]
 
 [tool.ruff]
