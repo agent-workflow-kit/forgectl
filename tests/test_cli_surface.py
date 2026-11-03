@@ -66,6 +66,15 @@ def run(
     return code, captured.out, captured.err
 
 
+def reaches_handler(
+    capsys: pytest.CaptureFixture[str], argv: list[str], command: str, tty: Tty = NO_TTY
+) -> None:
+    """The command line parsed, passed the gate and found no handler for ``command``."""
+    code, _, err = run(capsys, argv, tty)
+    assert code == 1, err
+    assert f"{command}: not implemented yet" in err
+
+
 def envelope(out: str) -> dict[str, Any]:
     body = json.loads(out)
     validate(body, "forgectl/cli/error.json")
@@ -83,7 +92,7 @@ def test_every_command_parses_and_returns_the_envelope(
     assert code == 1
     error = envelope(out)
     assert error["code"] == "internal"
-    assert command in error["message"]
+    assert error["message"] == f"{command}: not implemented yet"
     assert "internal" in err
 
 
@@ -93,7 +102,7 @@ def test_json_flag_after_the_command_works(
 ) -> None:
     code, out, _ = run(capsys, [*VALID[command], "--json"])
     assert code == 1
-    envelope(out)
+    assert envelope(out)["message"] == f"{command}: not implemented yet"
 
 
 def test_without_json_stdout_stays_empty_and_stderr_has_text(
@@ -181,6 +190,25 @@ HOSTILE: list[tuple[str, list[str]]] = [
     ("prs host only", ["prs", "--host", "github.com"]),
     ("prs repo with host", ["prs", "--repo", "github.com/o/r", "--host", "github.com"]),
     ("prs draft and no-draft", ["prs", "--author", "me", "--draft", "--no-draft"]),
+    ("prs draft twice", ["prs", "--author", "me", "--draft", "--draft"]),
+    ("prs no-draft twice", ["prs", "--author", "me", "--no-draft", "--no-draft"]),
+    ("prs no-draft after draft", ["prs", "--author", "me", "--draft", "--no-draft"]),
+    ("timeout over a hundred years", ["--timeout", "36501d", "show", PR]),
+    ("huge duration unit", ["--timeout", "99999999999999d", "show", PR]),
+    ("export huge since", ["export", "--since", "99999999999d"]),
+    ("prs huge updated-since", ["prs", "--author", "me", "--updated-since", "1e9999999d"]),
+    (
+        "merge 64 hex expected head",
+        ["merge", PR, "--expected-head", "a" * 64, "--expected-base", "m"],
+    ),
+    (
+        "merge 41 hex expected head",
+        ["merge", PR, "--expected-head", "a" * 41, "--expected-base", "m"],
+    ),
+    ("abbreviated write flag", ["merge", PR, *EXPECTED, "--dry"]),
+    ("duplicate dry-run across positions", ["merge", PR, *EXPECTED, "--dry-run", "--dry-run"]),
+    ("verbose after the command with quiet", ["show", PR, "--verbose", "--quiet"]),
+    ("zoneless time with fraction", ["export", "--since", "2026-01-01T00:00:00.5"]),
     ("prs bad updated-since", ["prs", "--author", "me", "--updated-since", "yesterday"]),
     ("prs date without zone", ["prs", "--author", "me", "--updated-since", "2026-01-01T00:00:00"]),
     ("prs date only", ["prs", "--author", "me", "--updated-since", "2026-01-01"]),
@@ -231,6 +259,10 @@ HOSTILE: list[tuple[str, list[str]]] = [
     ("resolve without thread", ["resolve", PR]),
     ("access one arg", ["access", "github.com/o/r"]),
     ("browse positional", ["browse", PR]),
+    (
+        "comment allow-self",
+        ["comment", PR, "--body-file", "b", "--allow-self", "--actor", "human:b"],
+    ),
     ("double dash then flag as pr", ["show", "--", "--json", PR]),
 ]
 
@@ -294,8 +326,7 @@ def test_parse_error_never_echoes_raw_control_characters(
 def test_global_flags_parse_in_either_position(
     argv: list[str], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    code, _, _ = run(capsys, argv)
-    assert code == 1
+    reaches_handler(capsys, argv, "show")
 
 
 def test_a_positional_after_double_dash_is_not_a_flag(
@@ -303,7 +334,7 @@ def test_a_positional_after_double_dash_is_not_a_flag(
 ) -> None:
     code, out, _ = run(capsys, ["--json", "show", "--", "--not-a-flag"])
     assert code == 1
-    assert envelope(out)["code"] == "internal"
+    assert envelope(out)["message"] == "show: not implemented yet"
 
 
 @pytest.mark.parametrize(
@@ -323,13 +354,12 @@ def test_a_positional_after_double_dash_is_not_a_flag(
     ],
 )
 def test_prs_options_parse(extra: list[str], capsys: pytest.CaptureFixture[str]) -> None:
-    code, _, _ = run(capsys, ["prs", "--author", "bob", *extra])
-    assert code == 1
+    reaches_handler(capsys, ["prs", "--author", "bob", *extra], "prs")
 
 
 def test_prs_with_repo_needs_no_person(capsys: pytest.CaptureFixture[str]) -> None:
-    assert run(capsys, ["prs", "--repo", "github.com/o/r"])[0] == 1
-    assert run(capsys, ["prs", "--host", "github.com", "--author", "me"])[0] == 1
+    reaches_handler(capsys, ["prs", "--repo", "github.com/o/r"], "prs")
+    reaches_handler(capsys, ["prs", "--host", "github.com", "--author", "me"], "prs")
 
 
 def test_uppercase_expected_head_is_lowered(capsys: pytest.CaptureFixture[str]) -> None:
@@ -351,11 +381,11 @@ def test_human_only_flag_with_human_actor_reaches_the_handler(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     argv = ["merge", PR, *EXPECTED, "--auto", "--actor", "human:bob"]
-    assert run(capsys, argv)[0] == 1
+    reaches_handler(capsys, argv, "merge")
 
 
 def test_human_only_flag_on_a_tty_reaches_the_handler(capsys: pytest.CaptureFixture[str]) -> None:
-    assert run(capsys, ["merge", PR, *EXPECTED, "--override-blocks"], tty=TTY)[0] == 1
+    reaches_handler(capsys, ["merge", PR, *EXPECTED, "--override-blocks"], "merge", TTY)
 
 
 def test_explicit_actor_beats_the_tty_through_the_cli(capsys: pytest.CaptureFixture[str]) -> None:
@@ -367,7 +397,7 @@ def test_explicit_actor_beats_the_tty_through_the_cli(capsys: pytest.CaptureFixt
 
 
 def test_interactive_merge_needs_no_expected_values(capsys: pytest.CaptureFixture[str]) -> None:
-    assert run(capsys, ["merge", PR], tty=TTY)[0] == 1
+    reaches_handler(capsys, ["merge", PR], "merge", TTY)
 
 
 def test_dash_with_stdin_tty_is_usage_through_the_cli(capsys: pytest.CaptureFixture[str]) -> None:
@@ -378,7 +408,7 @@ def test_dash_with_stdin_tty_is_usage_through_the_cli(capsys: pytest.CaptureFixt
 
 def test_dash_without_tty_reaches_the_handler(capsys: pytest.CaptureFixture[str]) -> None:
     argv = ["comment", PR, "--body-file", "-", "--actor", "auto:x"]
-    assert run(capsys, argv)[0] == 1
+    reaches_handler(capsys, argv, "comment")
 
 
 def test_handler_sees_the_human_context(capsys: pytest.CaptureFixture[str]) -> None:
@@ -440,7 +470,9 @@ def test_yes_lets_a_stdin_body_proceed(capsys: pytest.CaptureFixture[str]) -> No
 
     registry.HANDLERS["comment"] = handler
     argv = ["comment", PR, "--body-file", "-", "--actor", "human:bob", "--yes"]
-    assert run(capsys, argv)[0] == 1
+    code, _, err = run(capsys, argv)
+    assert code == 1
+    assert "reached" in err
 
 
 # --- success, exit codes, output by exit code ---------------------------------------------
@@ -722,3 +754,305 @@ def test_signal_handlers_are_restored_after_a_normal_run(
     before = (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM))
     run(capsys, ["show", PR])
     assert (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)) == before
+
+
+# --- misplaced write flags, branch names, durations, JSON detection -----------------------------
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [["--yes"], ["--dry-run"], ["--actor", "human:bob"], ["--decision-id", "d"], ["--actor=auto:x"]]
+    + [["--override-escalation"]],
+    ids=lambda f: f[0],
+)
+def test_a_write_flag_before_the_command_says_it_must_follow_it(
+    flag: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _, err = run(capsys, [*flag, "merge", PR, *EXPECTED])
+    assert code == 2
+    assert f"{flag[0].split('=')[0]} must follow the command" in err
+
+
+def test_write_flags_after_the_command_still_parse(capsys: pytest.CaptureFixture[str]) -> None:
+    argv = ["merge", PR, *EXPECTED, "--dry-run", "--yes", "--actor", "auto:x", "--decision-id", "d"]
+    reaches_handler(capsys, argv, "merge")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "a//b",
+        "a/.b",
+        ".a",
+        "a.lock",
+        "a/b.lock",
+        "a.lock/b",
+        "@",
+        "HEAD",
+        "a@{b",
+        "a..b",
+        "a/",
+        "/a",
+        "a.",
+        "a b",
+        "a~b",
+        "a^b",
+        "a:b",
+        "a?b",
+        "a*b",
+        "a[b",
+        "a\\b",
+        "a\nb",
+        "a\tb",
+        "a\x7fb",
+        "a\x85b",
+        "a\u202eb",
+        "a\u200bb",
+        "a\u2028b",
+        "a\u2029b",
+        "a\ud800b",
+    ],
+    ids=repr,
+)
+def test_invalid_branch_names_are_usage(name: str, capsys: pytest.CaptureFixture[str]) -> None:
+    code, _, _ = run(capsys, ["merge", PR, "--expected-head", H1, f"--expected-base={name}"])
+    assert code == 2
+
+
+@pytest.mark.parametrize(
+    "name", ["main", "feature/x-1", "release/1.2", "é/ü", "a./b", "@x", "x@", "a.lock.b", "日本"]
+)
+def test_valid_branch_names_parse(name: str, capsys: pytest.CaptureFixture[str]) -> None:
+    argv = ["merge", PR, "--expected-head", H1, f"--expected-base={name}"]
+    reaches_handler(capsys, argv, "merge")
+
+
+def test_a_duration_of_exactly_a_hundred_years_parses(capsys: pytest.CaptureFixture[str]) -> None:
+    reaches_handler(capsys, ["--timeout", "36500d", "show", PR], "show")
+    reaches_handler(capsys, ["export", "--since", "36500d"], "export")
+
+
+@pytest.mark.parametrize("flag", ["--json=x", "--json="])
+@pytest.mark.parametrize("position", ["before", "after"])
+def test_a_json_flag_with_a_value_is_still_json_mode_for_the_usage_error(
+    flag: str, position: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    argv = [flag, "show", PR] if position == "before" else ["show", PR, flag]
+    code, out, _ = run(capsys, argv)
+    assert code == 2
+    assert envelope(out)["code"] == "usage"
+
+
+def test_signal_handlers_stay_installed_while_an_error_is_printed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from forgectl import cli
+
+    seen: list[object] = []
+    real = cli.emit_error
+
+    def spy(*args: Any, **kwargs: Any) -> int:
+        seen.append(signal.getsignal(signal.SIGTERM))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "emit_error", spy)
+    run(capsys, ["show", PR])
+    assert seen
+    assert seen[0] not in (signal.SIG_DFL, signal.SIG_IGN)
+
+
+def test_a_signal_while_the_error_is_printed_still_exits_128_plus_n(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from forgectl import cli
+
+    def killed(*args: Any, **kwargs: Any) -> int:
+        os.kill(os.getpid(), signal.SIGTERM)
+        raise AssertionError("signal handler did not run")
+
+    monkeypatch.setattr(cli, "emit_error", killed)
+    assert run(capsys, ["show", PR])[0] == 143
+
+
+# --- one line per field ---------------------------------------------------------------------
+
+
+def test_an_argv_with_a_newline_cannot_forge_a_stderr_line(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, _, err = run(capsys, ["show", PR, "x\nforgectl: error: internal: fake"])
+    assert code == 2
+    assert err.count("\n") == 1
+    assert "<U+000A>" in err
+
+
+def test_a_handler_message_with_a_newline_stays_on_one_stderr_line(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def handler(inv: Invocation) -> dict[str, Any]:
+        raise ForgectlError("not_found", "gone\r\nforgectl: error: fake\tx")
+
+    registry.HANDLERS["show"] = handler
+    code, out, err = run(capsys, ["--json", "show", PR])
+    assert code == 10
+    assert err.count("\n") == 1
+    assert envelope(out)["message"] == "gone\nforgectl: error: fake\tx"
+
+
+def test_human_output_is_one_line_per_field(capsys: pytest.CaptureFixture[str]) -> None:
+    registry.HANDLERS["show"] = lambda inv: {
+        "title": "a\nforged: yes",
+        "ke\ny": "v",
+        "labels": ["x\ny"],
+    }
+    code, out, _ = run(capsys, ["show", PR])
+    assert code == 0
+    lines = out.splitlines()
+    assert len(lines) == 3
+    assert lines[0] == "title: a<U+000A>forged: yes"
+    assert lines[1].startswith("ke<U+000A>y: ")
+
+
+# --- would_refuse echoes argv, so it sanitizes it --------------------------------------------
+
+
+def test_dry_run_would_refuse_sanitizes_the_echoed_input(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    registry.HANDLERS["resolve"] = refusing("not_open", details={"state": "closed"})
+    argv = ["--json", "resolve", "x\x1b[31m\u202e\udcff\nz", "--thread", "t\x07\ud800", "--dry-run"]
+    code, out, _ = run(capsys, argv)
+    assert code == 20
+    result = json.loads(out)
+    assert result["pr"] == "x<U+001B>[31m<U+202E><U+DCFF><U+000A>z"
+    assert result["thread_id"] == "t<U+0007><U+D800>"
+    assert "\x1b" not in out and "\u202e" not in out
+
+
+def test_dry_run_plan_values_from_the_handler_are_sanitized(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    registry.HANDLERS["merge"] = refusing(
+        "no_head_match", plan={"base_ref": "m\x1bain"}, fields={"method": "sq\u202e"}
+    )
+    code, out, _ = run(capsys, ["--json", *DRY_ARGV["merge"]])
+    result = json.loads(out)
+    assert result["plan"]["base_ref"] == "m<U+001B>ain"
+    assert result["method"] == "sq<U+202E>"
+
+
+@pytest.mark.parametrize("command", ["resolve", "unresolve"])
+def test_dry_run_refusal_with_a_handler_plan_is_would_refuse_only(
+    command: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    registry.HANDLERS[command] = refusing(
+        "not_resolvable", plan={"body_bytes": 3}, fields={"thread_id": "gh:rt:zzz"}
+    )
+    code, out, err = run(capsys, ["--json", *DRY_ARGV[command]])
+    assert code == 20, err
+    result = json.loads(out)
+    validate(result, f"forgectl/cli/{command}.json")
+    assert "plan" not in result
+    assert result["thread_id"] == "gh:rt:zzz"
+
+
+# --- stdin spellings and parse-only coverage --------------------------------------------------
+
+
+@pytest.mark.parametrize("spelling", ["-", "/dev/stdin", "/dev/fd/0"])
+@pytest.mark.parametrize(
+    ("command", "flag"),
+    [("comment", "--body-file"), ("review", "--file"), ("approve", "--body-file")],
+)
+def test_every_spelling_of_stdin_with_a_stdin_tty_is_usage(
+    spelling: str, command: str, flag: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _, err = run(capsys, [command, PR, flag, spelling], tty=TTY)
+    assert code == 2
+    assert "stdin" in err
+
+
+def test_the_version_is_the_installed_packages(capsys: pytest.CaptureFixture[str]) -> None:
+    from importlib.metadata import version
+
+    from forgectl import __version__
+
+    assert __version__ == version("forgectl")
+    with pytest.raises(SystemExit):
+        main(["--version"], tty=NO_TTY)
+    assert capsys.readouterr().out.strip() == f"forgectl {__version__}"
+
+
+def test_export_whoami_and_browse_flags_parse(capsys: pytest.CaptureFixture[str]) -> None:
+    reaches_handler(capsys, ["export", "--since", "2026-01-01T00:00:00Z"], "export")
+    reaches_handler(capsys, ["export", "--since", "7d"], "export")
+    reaches_handler(capsys, ["whoami", "--host", "github.com"], "whoami")
+    reaches_handler(capsys, ["browse", "--focus", PR], "browse")
+    reaches_handler(capsys, ["browse", "--result-file", "out.json"], "browse")
+    reaches_handler(capsys, ["browse", "--focus", PR, "--result-file", "out.json"], "browse")
+
+
+@pytest.mark.parametrize(
+    ("argv", "command"),
+    [
+        (
+            ["review", PR, "--file", "r.json", *EXPECTED, "--allow-self", "--actor", "human:b"],
+            "review",
+        ),
+        (
+            [
+                "review",
+                PR,
+                "--file",
+                "r.json",
+                *EXPECTED,
+                "--override-escalation",
+                "--actor",
+                "human:b",
+            ],
+            "review",
+        ),
+        (
+            ["comment", PR, "--body-file", "b", "--override-escalation", "--actor", "human:b"],
+            "comment",
+        ),
+        (
+            ["resolve", PR, "--thread", "gh:rt:a", "--override-escalation", "--actor", "human:b"],
+            "resolve",
+        ),
+        (
+            ["unresolve", PR, "--thread", "gh:rt:a", "--override-escalation", "--actor", "human:b"],
+            "unresolve",
+        ),
+    ],
+)
+def test_human_only_flags_parse_with_a_human_actor(
+    argv: list[str], command: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    reaches_handler(capsys, argv, command)
+
+
+def test_a_human_actor_with_decision_ids_on_a_dry_run_reaches_the_handler(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    seen: list[Invocation] = []
+
+    def handler(inv: Invocation) -> dict[str, Any]:
+        seen.append(inv)
+        raise refused("stale_head", "moved")
+
+    registry.HANDLERS["merge"] = handler
+    argv = [
+        *DRY_ARGV["merge"],
+        "--actor",
+        "human:bob",
+        "--decision-id",
+        "d1",
+        "--decision-id",
+        "d2",
+    ]
+    code, _, _ = run(capsys, ["--json", *argv])
+    assert code == 20
+    assert seen[0].human is not None
+    assert seen[0].human.decision_ids == ("d1", "d2")
+    assert seen[0].human.dry_run is True

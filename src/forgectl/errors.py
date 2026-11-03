@@ -59,7 +59,9 @@ REFUSAL_REASONS: frozenset[str] = frozenset(
 
 HOOK_STDERR_LIMIT = 4096
 
-# `details` keys the error schema requires, by code or (for exit 20) by reason.
+# `details` keys the interface's Error envelope table lists without a condition, by code or (for
+# exit 20) by reason. `stale_head.head_sha` (when known), `auth_required.variable` and
+# `host_rejected.leftover_drafts` are conditional and so not required.
 REQUIRED_DETAILS_BY_CODE: dict[str, tuple[str, ...]] = {
     "method_required": ("allowed",),
     "invalid_position": ("invalid",),
@@ -69,11 +71,19 @@ REQUIRED_DETAILS_BY_CODE: dict[str, tuple[str, ...]] = {
     "approved_stale_head": ("ids",),
     "audit_failed": ("outcome",),
     "body_too_large": ("index", "limit"),
+    "config_invalid": ("key",),
+    "tool_missing": ("install",),
+    "wrong_host_response": ("observed",),
+    "merge_unverified": ("observed", "head_sha"),
 }
 REQUIRED_DETAILS_BY_REASON: dict[str, tuple[str, ...]] = {
     "not_ready": ("blocked_by",),
     "drafts_present": ("count",),
     "stale_base": ("base_ref",),
+    "not_open": ("state",),
+    "self_approval": ("basis",),
+    "method_not_allowed": ("allowed",),
+    "auto_merge_unavailable": ("observed",),
 }
 
 
@@ -166,7 +176,7 @@ class ForgectlError(Exception):
             body["retry_after"] = self.retry_after
         if self.hook is not None:
             body["hook"] = self.hook
-        if self.hook_stderr is not None:
+        if self.hook_stderr:
             body["hook_stderr"] = truncate_utf8(sanitize_text(self.hook_stderr), HOOK_STDERR_LIMIT)
         if self.decision_ids:
             body["decision_ids"] = list(self.decision_ids)

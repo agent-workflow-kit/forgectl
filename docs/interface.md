@@ -608,6 +608,14 @@ See [TUI](#tui).
 | `--actor`, `--decision-id` | writes only, for audit |
 | `--override-escalation` | human-only: counts exit 13 from a `pre-` hook as allow; a veto still vetoes |
 
+- A flag that takes one value or none, given twice, exits 2, also when one use is before the command and the other after it.
+- Flags and commands are matched in full: abbreviations are not accepted (exit 2).
+- `--verbose` with `--quiet` exits 2.
+- A time given as RFC 3339 needs an offset or `Z` (`--updated-since`, `--since`): a zoneless time exits 2.
+- The write-only flags (`--yes`, `--dry-run`, `--actor`, `--decision-id`, `--override-escalation`) follow the command; before it they exit 2.
+- Repeated `--decision-id` values are deduplicated, keeping first-seen order, before the limit of 32 applies.
+- `--body-file -` or `--file -` (stdin) without `--yes` is accepted at parse time and exits 13 at the confirmation step; `--dry-run` skips it.
+
 **`--dry-run`** skips confirmation and needs no `--yes` or TTY. It needs the same flags as a real run. An exit 20 result is reported as `would_refuse` `{reason, message, details}` with exit 20; any other failure prints the error envelope. `pr` is the normalized input. Plans: merge `{head_sha, expected_head, expected_base, base_ref, auto, override_blocks, blocked_by, method}`; post `{event, body_sha256, body_bytes, inline_comments}`; `resolve` and `unresolve` report `would_refuse` only. `head_sha`, `base_ref`, `blocked_by` and `resolved` are null when the refusal came before any read (`unknown_host`, `no_head_match`); so are `expected_head` and `expected_base` when no value was given. `merge --auto` shows `auto: true` in its plan, and `reply`'s `threaded` is computed.
 
 ## Exit codes

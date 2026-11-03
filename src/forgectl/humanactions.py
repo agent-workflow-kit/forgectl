@@ -7,7 +7,8 @@ them; ``require_confirmation`` says whether one is needed or the run must stop.
 
 from __future__ import annotations
 
-import getpass
+import os
+import pwd
 import re
 from argparse import Namespace
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from .errors import ForgectlError, usage
 ACTOR_RE = re.compile(r"(?:human|auto):[A-Za-z0-9._@-]{1,64}", re.ASCII)
 DECISION_ID_RE = re.compile(r"[A-Za-z0-9._:@/-]{1,128}", re.ASCII)
 MAX_DECISION_IDS = 32
+STDIN_SPELLINGS = ("-", "/dev/stdin", "/dev/fd/0")
 _ME_NAME_RE = re.compile(r"[A-Za-z0-9._@-]{1,64}", re.ASCII)
 
 HUMAN_ONLY_FLAGS = ("auto", "override_blocks", "allow_self", "override_escalation")
@@ -45,9 +47,9 @@ def default_me_name() -> str:
 
     TODO(#4): `me.name` from the loaded config takes precedence.
     """
-    try:
-        name = getpass.getuser()
-    except (KeyError, OSError, ImportError):
+    try:  # the account database, never LOGNAME or USER: the environment is the caller's to set
+        name = pwd.getpwuid(os.getuid()).pw_name
+    except (KeyError, OSError):
         return "unknown"
     return name if _ME_NAME_RE.fullmatch(name) else "unknown"
 
@@ -76,14 +78,12 @@ def build_context(args: Namespace, tty: Tty, *, me_name: str) -> HumanContext:
             if getattr(args, name, False):
                 raise usage(f"{_flag(name)} is human-only: it needs --actor human:<user> or a TTY")
 
-    stdin_input = body_file == "-" or input_file == "-"
-    if stdin_input and tty.stdin:
+    if tty.stdin and (body_file in STDIN_SPELLINGS or input_file in STDIN_SPELLINGS):
         raise usage("'-' reads the body from stdin, which is a terminal; pass a file")
 
     yes: bool = args.yes
-    interactive = (
-        tty.stdin and tty.stderr and not actor.startswith("auto:") and not yes and not stdin_input
-    )
+    # A stdin body with a stdin terminal was refused above, so it never reaches here interactive.
+    interactive = tty.stdin and tty.stderr and not actor.startswith("auto:") and not yes
 
     if command in NEEDS_EXPECTED and not interactive:
         missing = [
@@ -105,12 +105,12 @@ def build_context(args: Namespace, tty: Tty, *, me_name: str) -> HumanContext:
     if command == "approve" and dedupe_key is not None and body_file is None:
         raise usage("--dedupe-key needs --body-file")
 
-    ids: list[str] = []
+    distinct: dict[str, None] = {}  # first-seen order, duplicates dropped
     for decision in args.decision_id or []:
-        if decision not in ids:
-            ids.append(decision)
-    if len(ids) > MAX_DECISION_IDS:
-        raise usage(f"at most {MAX_DECISION_IDS} --decision-id values are allowed")
+        distinct[decision] = None
+        if len(distinct) > MAX_DECISION_IDS:
+            raise usage(f"at most {MAX_DECISION_IDS} distinct --decision-id values are allowed")
+    ids = list(distinct)
 
     return HumanContext(
         actor=actor,

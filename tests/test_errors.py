@@ -71,11 +71,19 @@ DETAILS_BY_CODE = {
     "approved_stale_head": {"ids": ["gh:r:abc"]},
     "audit_failed": {"outcome": "merged"},
     "body_too_large": {"index": None, "limit": 262144},
+    "config_invalid": {"key": "timeout"},
+    "tool_missing": {"install": "brew install gh"},
+    "wrong_host_response": {"observed": "an html page"},
+    "merge_unverified": {"observed": "open", "head_sha": "a" * 40},
 }
 DETAILS_BY_REASON = {
     "not_ready": {"blocked_by": [{"code": "draft"}]},
     "drafts_present": {"count": 2},
     "stale_base": {"base_ref": "main"},
+    "not_open": {"state": "closed"},
+    "self_approval": {"basis": "authenticated"},
+    "method_not_allowed": {"allowed": ["squash"]},
+    "auto_merge_unavailable": {"observed": "not enabled"},
 }
 
 
@@ -149,6 +157,34 @@ def test_code_missing_required_details_is_rejected(code: str) -> None:
         ForgectlError(code, "x")
 
 
+def _each_required_key() -> list[tuple[str, str, str]]:
+    cases = [("code", c, k) for c, d in DETAILS_BY_CODE.items() for k in d]
+    return cases + [("reason", r, k) for r, d in DETAILS_BY_REASON.items() for k in d]
+
+
+@pytest.mark.parametrize(
+    ("kind", "name", "missing"),
+    _each_required_key(),
+    ids=lambda v: str(v),
+)
+def test_each_required_details_key_is_enforced_on_its_own(
+    kind: str, name: str, missing: str
+) -> None:
+    table = DETAILS_BY_CODE if kind == "code" else DETAILS_BY_REASON
+    partial = {k: v for k, v in table[name].items() if k != missing}
+    with pytest.raises(ValueError, match=missing):
+        if kind == "code":
+            ForgectlError(name, "x", details=partial)
+        else:
+            refused(name, "x", details=partial)
+
+
+def test_stale_head_and_auth_required_details_stay_optional() -> None:
+    refused("stale_head", "moved")
+    ForgectlError("auth_required", "no token")
+    ForgectlError("host_rejected", "no", details={"status": 422})
+
+
 def test_unknown_code_is_rejected() -> None:
     with pytest.raises(ValueError):
         ForgectlError("nonsense", "x")
@@ -176,10 +212,10 @@ def test_envelope_keeps_set_fields() -> None:
     assert body["decision_ids"] == ["d1"]
 
 
-def test_veto_envelope_carries_empty_hook_stderr() -> None:
+def test_veto_envelope_omits_an_empty_hook_stderr() -> None:
     body = ForgectlError("vetoed", "x", hook="pre-merge", hook_stderr="").envelope()["error"]
     assert body["hook"] == "pre-merge"
-    assert body["hook_stderr"] == ""
+    assert "hook_stderr" not in body
 
 
 def test_hook_stderr_is_cut_to_4096_bytes_on_a_code_point_boundary() -> None:

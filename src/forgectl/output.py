@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from argparse import Namespace
-from typing import Any
+from typing import Any, TextIO
 
 from .errors import ForgectlError, sanitize_tree
-from .textsafe import sanitize_text
+from .textsafe import sanitize_line, sanitize_text
 
 PARTIAL_RESULT_COMMANDS = frozenset({"prs", "whoami"})
 POST_COMMANDS = frozenset({"review", "comment", "reply", "approve"})
@@ -20,17 +21,22 @@ def dumps(data: Any) -> str:
 
 
 def format_human(data: dict[str, Any]) -> str:
-    """`key: value` lines, never raw: every string passes through the sanitizer."""
+    """`key: value` lines, never raw: every string passes through the sanitizer.
+
+    One line per field: a tab or LF inside a key or a value becomes a marker, so untrusted text
+    cannot forge a line of its own.
+    """
     lines: list[str] = []
     for key, value in data.items():
         text = value if isinstance(value, str) else dumps(sanitize_tree(value))
-        lines.append(f"{sanitize_text(str(key))}: {sanitize_text(text)}")
+        lines.append(f"{sanitize_line(str(key))}: {sanitize_line(text)}")
     return "\n".join(lines)
 
 
 def error_text(err: ForgectlError) -> str:
+    """The one stderr line for an error; the message is untrusted and stays on that line."""
     label = err.code if err.reason is None else f"{err.code} ({err.reason})"
-    return f"forgectl: error: {label}: {sanitize_text(err.message)}"
+    return f"forgectl: error: {label}: {sanitize_line(err.message)}"
 
 
 def would_refuse_result(command: str, args: Namespace, err: ForgectlError) -> dict[str, Any]:
@@ -39,7 +45,9 @@ def would_refuse_result(command: str, args: Namespace, err: ForgectlError) -> di
     Fields the refusal came too early to know are null. A handler fills in what it did read
     through ``err.plan`` (the plan) and ``err.fields`` (the other output fields).
     """
-    pr = args.pr  # TODO(#5): the normalized `host/path#N` form.
+    # TODO(#5): `pr` is the normalized `host/path#N` form once identifiers.py parses it. Until
+    # then it is raw argv text, so it is sanitized like every other echoed input.
+    pr = sanitize_line(args.pr)
     refusal = {
         "reason": err.reason,
         "message": sanitize_text(err.message),
@@ -50,7 +58,7 @@ def would_refuse_result(command: str, args: Namespace, err: ForgectlError) -> di
         result = {
             "pr": pr,
             "action": command,
-            "thread_id": args.thread,
+            "thread_id": sanitize_line(args.thread),
             "resolved": None,
             "dry_run": True,
             "would_refuse": refusal,
@@ -69,7 +77,9 @@ def would_refuse_result(command: str, args: Namespace, err: ForgectlError) -> di
             "plan": {
                 "head_sha": None,
                 "expected_head": args.expected_head,
-                "expected_base": args.expected_base,
+                "expected_base": None
+                if args.expected_base is None
+                else sanitize_line(args.expected_base),
                 "base_ref": None,
                 "auto": args.auto,
                 "override_blocks": args.override_blocks,
@@ -98,15 +108,49 @@ def would_refuse_result(command: str, args: Namespace, err: ForgectlError) -> di
             result["head_verified"] = None
         if command == "reply":
             result["threaded"] = False
-    if err.plan:
-        result["plan"].update(err.plan)
+    if err.plan and "plan" in result:  # resolve and unresolve report `would_refuse` only
+        result["plan"].update(sanitize_tree(err.plan))
     if err.fields:
-        result.update(err.fields)
+        result.update(sanitize_tree(err.fields))
     return result
 
 
+def _discard(stream: TextIO) -> None:
+    """Point a failed stream's descriptor at /dev/null.
+
+    Whatever the stream still buffers then flushes there at interpreter shutdown, so a failed
+    stdout or stderr cannot turn the exit code into 120.
+    """
+    try:
+        fd = stream.fileno()
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, fd)
+        finally:
+            os.close(devnull)
+    except (OSError, ValueError, AttributeError):  # no descriptor behind it, or already closed
+        pass
+
+
+def write_line(stream: TextIO | None, text: str) -> bool:
+    """Write ``text`` and a newline, flushed; False when the stream is missing or failed.
+
+    A failure (closed or absent stream, broken pipe, full disk) never raises: the exit code is
+    already decided and an output problem must not change it.
+    """
+    if stream is None:
+        return False
+    try:
+        stream.write(text + "\n")
+        stream.flush()
+    except (OSError, ValueError):
+        _discard(stream)
+        return False
+    return True
+
+
 def emit_success(data: dict[str, Any], *, json_mode: bool) -> None:
-    print(dumps(data) if json_mode else format_human(data))
+    write_line(sys.stdout, dumps(data) if json_mode else format_human(data))
 
 
 def emit_error(
@@ -116,7 +160,8 @@ def emit_error(
 
     Output by exit code: exit 12 `partial_results` from `prs` or `whoami` prints the command's
     result, exit 20 from a `--dry-run` prints the plan with `would_refuse`, and everything else
-    prints the error envelope. The error text always goes to stderr.
+    prints the error envelope. The error text always goes to stderr, and only there: if stderr
+    is unusable it is dropped, never moved to stdout.
     """
     printable: dict[str, Any] | None = None
     if err.code == "partial_results" and command in PARTIAL_RESULT_COMMANDS:
@@ -131,6 +176,6 @@ def emit_error(
     if printable is not None:
         emit_success(printable, json_mode=json_mode)
     elif json_mode:
-        print(dumps(err.envelope()))
-    print(error_text(err), file=sys.stderr)
+        write_line(sys.stdout, dumps(err.envelope()))
+    write_line(sys.stderr, error_text(err))
     return err.exit_code

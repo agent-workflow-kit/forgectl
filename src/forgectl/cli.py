@@ -72,20 +72,24 @@ def _run(args: Namespace, tty: Tty) -> dict[str, object]:
     return handler(Invocation(command=command, args=args, json=args.json, human=human))
 
 
-def main(argv: list[str] | None = None, *, tty: Tty | None = None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
-    # Until parsing succeeds we cannot know `--json` for sure; a bad command line still gets
-    # the envelope when the flag is anywhere before a `--`.
-    json_mode = "--json" in (argv[: argv.index("--")] if "--" in argv else argv)
+def _wants_json(argv: list[str]) -> bool:
+    """Whether ``--json`` (or ``--json=...``) is on the command line before any ``--``.
+
+    Until parsing succeeds we cannot know for sure, so a bad command line still gets the
+    envelope when the flag is there, even with a value that parsing would reject.
+    """
+    head = argv[: argv.index("--")] if "--" in argv else argv
+    return any(arg == "--json" or arg.startswith("--json=") for arg in head)
+
+
+def _dispatch(argv: list[str], tty: Tty | None) -> int:
+    json_mode = _wants_json(argv)
     args: Namespace | None = None
     try:
-        with _signals():
-            args = parse(argv)
-            json_mode = args.json
-            emit_success(_run(args, tty or _tty()), json_mode=json_mode)
-            return 0
-    except SignalExit as signalled:
-        return 128 + signalled.signum
+        args = parse(argv)
+        json_mode = args.json
+        emit_success(_run(args, tty or _tty()), json_mode=json_mode)
+        return 0
     except ForgectlError as err:
         return emit_error(
             err, command=getattr(args, "command", None), args=args, json_mode=json_mode
@@ -95,3 +99,14 @@ def main(argv: list[str] | None = None, *, tty: Tty | None = None) -> int:
         return emit_error(
             internal, command=getattr(args, "command", None), args=args, json_mode=json_mode
         )
+
+
+def main(argv: list[str] | None = None, *, tty: Tty | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # The signal handlers stay installed while an error is printed, so a signal then still ends
+    # the run as 128+N rather than a default-handler death in the middle of the output.
+    with _signals():
+        try:
+            return _dispatch(argv, tty)
+        except SignalExit as signalled:
+            return 128 + signalled.signum

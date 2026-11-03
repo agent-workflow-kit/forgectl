@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from forgectl.errors import ForgectlError
-from forgectl.humanactions import Tty, build_context, require_confirmation
+from forgectl.humanactions import Tty, build_context, default_me_name, require_confirmation
 
 HEAD = "a" * 40
 TTY = Tty(stdin=True, stderr=True)
@@ -108,14 +108,15 @@ def test_auto_actor_is_never_interactive() -> None:
     assert not build_context(ns(actor="auto:x"), TTY, me_name="jo").interactive
 
 
-def test_stdin_body_is_never_interactive() -> None:
-    args = ns(actor="human:bob", body_file="-")
-    assert not build_context(args, NO_TTY, me_name="jo").interactive
-
-
+@pytest.mark.parametrize("spelling", ["-", "/dev/stdin", "/dev/fd/0"])
 @pytest.mark.parametrize(("command", "field"), [("comment", "body_file"), ("review", "file")])
-def test_dash_with_stdin_a_tty_is_usage(command: str, field: str) -> None:
-    assert "stdin" in usage_message(ns(command, **{field: "-"}), TTY)
+def test_dash_with_stdin_a_tty_is_usage(command: str, field: str, spelling: str) -> None:
+    assert "stdin" in usage_message(ns(command, **{field: spelling}), TTY)
+
+
+def test_a_file_that_only_looks_like_stdin_is_a_file() -> None:
+    assert build_context(ns(body_file="/dev/stdin2"), TTY, me_name="jo").interactive
+    assert build_context(ns(body_file="dev/stdin"), TTY, me_name="jo").interactive
 
 
 def test_dash_with_stdin_a_tty_is_usage_even_with_yes_and_dry_run() -> None:
@@ -201,6 +202,16 @@ def test_more_than_32_decision_ids_is_usage() -> None:
     assert "32" in usage_message(ns(decision_id=ids), NO_TTY)
 
 
+def test_many_repeats_of_a_few_decision_ids_pass() -> None:
+    ctx = build_context(ns(decision_id=["a", "b"] * 5000), NO_TTY, me_name="jo")
+    assert ctx.decision_ids == ("a", "b")
+
+
+def test_the_33rd_distinct_decision_id_fails_even_among_repeats() -> None:
+    ids = [f"id{i}" for i in range(32)] * 3 + ["one-more"]
+    assert "32" in usage_message(ns(decision_id=ids), NO_TTY)
+
+
 def test_32_decision_ids_pass() -> None:
     ids = [f"id{i}" for i in range(32)]
     assert len(build_context(ns(decision_id=ids), NO_TTY, me_name="jo").decision_ids) == 32
@@ -225,3 +236,33 @@ def test_require_confirmation_yes_skips_the_dialog() -> None:
 
 def test_require_confirmation_interactive_asks_for_a_dialog() -> None:
     assert require_confirmation(build_context(ns(), TTY, me_name="jo")) is True
+
+
+class _Entry:
+    def __init__(self, name: str) -> None:
+        self.pw_name = name
+
+
+def test_default_me_name_is_the_account_name_not_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("forgectl.humanactions.pwd.getpwuid", lambda uid: _Entry("alice"))
+    for var in ("LOGNAME", "USER", "LNAME", "USERNAME"):
+        monkeypatch.setenv(var, "mallory")
+    assert default_me_name() == "alice"
+
+
+def test_default_me_name_is_unknown_without_an_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing(uid: int) -> _Entry:
+        raise KeyError(uid)
+
+    monkeypatch.setattr("forgectl.humanactions.pwd.getpwuid", missing)
+    monkeypatch.setenv("USER", "mallory")
+    assert default_me_name() == "unknown"
+
+
+def test_default_me_name_is_unknown_when_the_name_fails_the_pattern(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("forgectl.humanactions.pwd.getpwuid", lambda uid: _Entry("a b"))
+    assert default_me_name() == "unknown"

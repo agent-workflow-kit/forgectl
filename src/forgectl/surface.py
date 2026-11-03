@@ -1,8 +1,9 @@
 """The frozen command and flag set (interface: Commands, Global flags).
 
-Parsing only: argparse never exits or prints on its own account. A bad command line raises a
-``usage`` error (exit 2) that ``cli.main`` turns into the envelope. Flag values are checked for
-their own grammar here; rules that span flags and the human-only gate are in ``humanactions``.
+Parsing only: a bad command line raises a ``usage`` error (exit 2) that ``cli.main`` turns into
+the envelope, and argparse prints and exits only for ``--help`` and ``--version`` (exit 0).
+Flag values are checked for their own grammar here; rules that span flags and the human-only
+gate are in ``humanactions``.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import argparse
 import math
 import re
+import unicodedata
 from argparse import Namespace
 from contextvars import ContextVar
 from datetime import datetime
@@ -48,7 +50,10 @@ _RFC3339_RE = re.compile(
 _SHA_RE = re.compile(r"[0-9a-fA-F]{40}", re.ASCII)
 _DEDUPE_KEY_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}", re.ASCII)
 _LIMIT_RE = re.compile(r"[0-9]{1,4}", re.ASCII)
-_BRANCH_FORBIDDEN_RE = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]|\.\.|@\{")
+_BRANCH_FORBIDDEN_CHARS = frozenset(" ~^:?*[\\\x7f")
+_BRANCH_FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
+# The longest duration accepted, so that `now - duration` can never overflow: 100 years.
+_MAX_DURATION_SECONDS = 100 * 365 * 86400.0
 
 # --- value types ---------------------------------------------------------------------------
 
@@ -69,6 +74,8 @@ def duration(value: str) -> float:
     seconds = float(match[1]) * _UNIT_SECONDS[match[2]] if match else math.nan
     if not math.isfinite(seconds) or seconds <= 0:
         _bad(f"not a positive duration (seconds, or a number with ms, s, m, h or d): {value!r}")
+    if seconds > _MAX_DURATION_SECONDS:
+        _bad(f"longer than 100 years: {value!r}")
     return seconds
 
 
@@ -91,12 +98,28 @@ def sha(value: str) -> str:
     return value.lower()
 
 
-def branch(value: str) -> str:
-    """A branch name by the main `check-ref-format` rules.
+def _valid_branch(name: str) -> bool:
+    """`git check-ref-format --branch` rules, self-contained (no subprocess)."""
+    if not name or name in ("@", "HEAD") or name[0] in "-/" or name[-1] in "/.":
+        return False
+    if ".." in name or "@{" in name or "//" in name:
+        return False
+    for ch in name:
+        if (
+            ch in _BRANCH_FORBIDDEN_CHARS
+            or unicodedata.category(ch) in _BRANCH_FORBIDDEN_CATEGORIES
+        ):
+            return False
+    return not any(part.startswith(".") or part.endswith(".lock") for part in name.split("/"))
 
-    TODO(#5): replace with the full parser in `identifiers.py`.
+
+def branch(value: str) -> str:
+    """A branch name: the `check-ref-format` rules, plus no control, format, surrogate or
+    line-separator characters (so U+0085 and bidi marks are out too).
+
+    TODO(#5): replace with the full parser in `identifiers.py` (refspecs, `refs/heads/` forms).
     """
-    if not value or value[0] in "-/" or value[-1] in "/." or _BRANCH_FORBIDDEN_RE.search(value):
+    if not _valid_branch(value):
         _bad(f"not a valid branch name: {value!r}")
     return value
 
@@ -174,6 +197,49 @@ class _OnceFlag(_Once):
         option_string: str | None = None,
     ) -> None:
         super().__call__(parser, namespace, True, option_string)
+
+
+class _OnceConst(_Once):
+    """A flag that stores ``const``; like ``_OnceFlag`` but for a shared ``dest``."""
+
+    def __init__(
+        self,
+        option_strings: list[str],
+        dest: str,
+        const: Any = None,
+        default: Any = None,
+        help: str | None = None,
+    ) -> None:
+        super().__init__(option_strings, dest, nargs=0, const=const, default=default, help=help)
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: Namespace,
+        values: Any,
+        option_string: str | None = None,
+    ) -> None:
+        super().__call__(parser, namespace, self.const, option_string)
+
+
+class _MustFollowCommand(argparse.Action):
+    """A write flag given before the command: say where it goes instead of a vague error."""
+
+    def __init__(self, option_strings: list[str], dest: str, **kw: Any) -> None:
+        super().__init__(
+            option_strings, dest, nargs="?", default=argparse.SUPPRESS, help=argparse.SUPPRESS
+        )
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: Namespace,
+        values: Any,
+        option_string: str | None = None,
+    ) -> None:
+        parser.error(
+            f"{option_string} must follow the command (forgectl <command> ... {option_string})"
+        )
 
 
 class _Parser(argparse.ArgumentParser):
@@ -261,6 +327,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(prog=PROG, description=DESCRIPTION, allow_abbrev=False)
     parser.add_argument("--version", action="version", version=f"{PROG} {__version__}")
     _globals(parser, sub=False)
+    for flag in ("--yes", "--dry-run", "--actor", "--decision-id", "--override-escalation"):
+        parser.add_argument(flag, action=_MustFollowCommand)
     subs = parser.add_subparsers(dest="command", metavar="<command>", required=True)
 
     def add(name: str, summary: str) -> argparse.ArgumentParser:
@@ -278,8 +346,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _once(p, "--state", choices=["open", "closed", "merged", "all"], default="open")
     draft = p.add_mutually_exclusive_group()
-    draft.add_argument("--draft", dest="draft", action="store_const", const=True, default=None)
-    draft.add_argument("--no-draft", dest="draft", action="store_const", const=False)
+    draft.add_argument("--draft", dest="draft", action=_OnceConst, const=True, default=None)
+    draft.add_argument("--no-draft", dest="draft", action=_OnceConst, const=False)
     _once(p, "--updated-since", dest="updated_since", type=time_or_duration, metavar="TIME")
     _once(p, "--limit", type=limit, default=100, metavar="N")
 
