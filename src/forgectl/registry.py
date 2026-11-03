@@ -11,13 +11,16 @@ A command's module registers itself with ``@register("show")`` and is listed in
 from __future__ import annotations
 
 import importlib
+import math
 from argparse import Namespace
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from .config import DEFAULT_TIMEOUT, LoadedConfig
+from .config import LoadedConfig
 from .humanactions import HumanContext
+
+_FROM_CONFIG = math.nan  # the timeout default: take it from the config (no real timeout is NaN)
 
 
 @dataclass(frozen=True)
@@ -29,7 +32,12 @@ class Invocation:
     json: bool
     human: HumanContext | None  # set for the write commands only
     config: LoadedConfig = field(default_factory=LoadedConfig.defaults)
-    timeout: float = DEFAULT_TIMEOUT  # seconds: --timeout, else FORGECTL_TIMEOUT, else config
+    # Seconds: --timeout, else FORGECTL_TIMEOUT, else the config. Left out, it is the config's.
+    timeout: float = _FROM_CONFIG
+
+    def __post_init__(self) -> None:
+        if math.isnan(self.timeout):
+            object.__setattr__(self, "timeout", self.config.timeout_for(None))
 
 
 Handler = Callable[[Invocation], dict[str, Any]]

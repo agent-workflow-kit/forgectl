@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from argparse import Namespace
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ import pytest
 
 from forgectl import registry
 from forgectl.cli import main
+from forgectl.config import load_config
 from forgectl.humanactions import Tty
 from forgectl.registry import Invocation
 
@@ -196,3 +198,38 @@ def test_the_config_hash_reaches_the_handler(handlers: dict[str, Any]) -> None:
     default_config("retries: 4\n")
     main(["show", PR, "--timeout", "1s"], tty=NO_TTY)
     assert seen[1].config.config_hash != first
+
+
+@pytest.mark.parametrize("json_flag", [True, False])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "gh_bin: !SECRETXYZ x\n",
+        "gh_bin: !SECRETXYZ!x y\n",
+        "%TAG !e! tag:SECRETXYZ,2000:\n---\ngh_bin: !e!x y\n",
+        "retries: !!int SECRETXYZ\n",
+    ],
+)
+def test_a_yaml_error_never_echoes_file_content_to_either_stream(
+    handlers: dict[str, Any], capsys: pytest.CaptureFixture[str], text: str, json_flag: bool
+) -> None:
+    seen = capture(handlers)
+    default_config(text)
+    argv = (["--json"] if json_flag else []) + ["show", PR]
+    assert main(argv, tty=NO_TTY) == 2
+    captured = capsys.readouterr()
+    assert "SECRETXYZ" not in captured.out + captured.err
+    assert "config_invalid" in captured.out + captured.err
+    assert seen == []
+
+
+def test_an_invocation_timeout_defaults_to_its_config(tmp_path: Path) -> None:
+    path = tmp_path / "c.yaml"
+    path.write_text("timeout: 5s\n", encoding="utf-8")
+    loaded = load_config(str(path), env=os.environ)
+    args = Namespace()
+    assert Invocation("show", args, False, None, loaded).timeout == 5.0
+    keywords = Invocation(command="show", args=args, json=False, human=None, config=loaded)
+    assert keywords.timeout == 5.0
+    assert Invocation("show", args, False, None, loaded, 2.0).timeout == 2.0
+    assert Invocation("show", args, False, None).timeout == 60.0

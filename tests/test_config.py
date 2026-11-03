@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,8 @@ from jsonschema import Draft202012Validator
 
 from forgectl.config import (
     DEFAULT_TIMEOUT,
+    MAX_FILE_BYTES,
+    MAX_NODES,
     Config,
     LoadedConfig,
     config_hash,
@@ -115,11 +118,11 @@ def test_the_commented_examples_in_the_example_file_are_valid(home: Path) -> Non
     config = load(home, text).config
     assert config.hosts["gitlab.example.com"].backend == "gitlab"
     assert config.hosts["gitlab.example.com"].api_prefix == "/gitlab"
-    assert config.hosts["gitlab.example.com"].token_command == [
+    assert config.hosts["gitlab.example.com"].token_command == (
         "example-secret-tool",
         "lookup",
         "{host}",
-    ]
+    )
     assert config.repos["gitlab.example.com/group/project"].merge_method == "squash"
     assert [h.cmd for h in config.hooks.post_merge] == ["example-notify"]
     assert config.hooks.post_merge[0].async_ is True
@@ -218,6 +221,36 @@ def test_a_symlink_to_a_directory_or_a_dangling_link_is_refused(home: Path, tmp_
     (drop / "a.yaml").unlink()
     (drop / "a.yaml").symlink_to(tmp_path / "gone.yaml")
     invalid(home, None)
+
+
+def test_a_dangling_default_config_file_is_refused_not_absent(home: Path, tmp_path: Path) -> None:
+    link = default_file(home)
+    link.parent.mkdir(parents=True)
+    link.symlink_to(tmp_path / "gone.yaml")
+    assert invalid(home, None).details == {"key": str(link)}
+
+
+def test_a_dangling_config_d_is_refused(home: Path, tmp_path: Path) -> None:
+    drop = default_file(home).parent / "config.d"
+    drop.parent.mkdir(parents=True)
+    drop.symlink_to(tmp_path / "gone")
+    assert invalid(home, None).details == {"key": str(drop)}
+
+
+def test_a_config_d_that_is_a_file_or_a_fifo_is_refused(home: Path) -> None:
+    drop = default_file(home).parent / "config.d"
+    write(drop, "retries: 2\n")
+    assert invalid(home, None).details == {"key": str(drop)}
+    drop.unlink()
+    os.mkfifo(drop)
+    assert invalid(home, None).details == {"key": str(drop)}
+
+
+def test_a_config_home_that_is_a_file_means_defaults(home: Path, tmp_path: Path) -> None:
+    xdg = write(tmp_path / "xdg-file", "not a directory\n")
+    assert load_config(None, env=env_for(home, XDG_CONFIG_HOME=str(xdg))).config == Config()
+    write(home / ".config", "not a directory\n")
+    assert load_config(None, env=env_for(home)).config == Config()
 
 
 def test_a_directory_named_like_a_drop_in_is_refused(home: Path) -> None:
@@ -327,7 +360,7 @@ def test_hook_lists_append_in_file_order(home: Path) -> None:
 def test_other_lists_replace(home: Path) -> None:
     write(default_file(home), "hosts:\n  h.example.com: {backend: gitlab, token_command: [a, b]}\n")
     dropins(home, {"a.yaml": "hosts:\n  h.example.com: {token_command: [c]}\n"})
-    assert load(home).config.hosts["h.example.com"].token_command == ["c"]
+    assert load(home).config.hosts["h.example.com"].token_command == ("c",)
 
 
 def test_a_later_null_replaces_an_earlier_value(home: Path) -> None:
@@ -361,41 +394,121 @@ def test_a_partial_drop_in_is_valid_only_with_the_main_file(home: Path) -> None:
 
 # --- hostile YAML --------------------------------------------------------------------------------
 
-HOSTILE_YAML = {
-    "anchor": "me: &a {name: jo}\n",
-    "alias": "x: &a 1\nretries: *a\n",
-    "alias bomb": "a: &a [1,1]\nb: &b [*a,*a]\nc: &c [*b,*b]\nd: [*c,*c]\n",
-    "python tag": "gh_bin: !!python/object/apply:os.system ['id']\n",
-    "custom tag": "gh_bin: !secret x\n",
-    "binary": "gh_bin: !!binary aGk=\n",
-    "set": "me: !!set {name}\n",
-    "timestamp value": "me: {name: 2024-01-01}\n",
-    "merge key": "me: {<<: {name: jo}}\n",
-    "duplicate key": "retries: 1\nretries: 2\n",
-    "nested duplicate key": "me:\n  name: a\n  name: b\n",
-    "duplicate hook name": "hooks:\n  pre-merge: []\n  pre-merge: []\n",
-    "integer key": "1: x\n",
-    "bool key": "yes: x\n",
-    "null key": "~: x\n",
-    "complex key": "? [a]\n: x\n",
-    "two documents": "retries: 1\n---\nretries: 2\n",
-    "top-level list": "- a\n- b\n",
-    "top-level scalar": "just text\n",
-    "syntax error": "me: {name: jo\n",
-    "tab indent": "me:\n\tname: jo\n",
-    "nul escape": 'me: {name: "a\\0b"}\n',
-    "nul in command": 'hooks:\n  pre-merge:\n    - cmd: "a\\0b"\n',
-    "directive abuse": "%TAG ! tag:evil,2000:\n---\nretries: !x 1\n",
-    "deep nesting": "a: " + "[" * 5000 + "]" * 5000 + "\n",
-    "control character": "me: {name: \x01}\n",
+FILE = None  # the refusal names the file, not a key
+BIG_INT = "9" * 5000  # beyond Python's int digit limit
+
+HOSTILE_YAML: dict[str, tuple[str, str | None]] = {
+    "anchor": ("me: &a {name: jo}\n", FILE),
+    "alias": ("x: &a 1\nretries: *a\n", FILE),
+    "alias bomb": ("a: &a [1,1]\nb: &b [*a,*a]\nc: &c [*b,*b]\nd: [*c,*c]\n", FILE),
+    "python tag": ("gh_bin: !!python/object/apply:os.system ['id']\n", FILE),
+    "custom tag": ("gh_bin: !secret x\n", FILE),
+    "binary": ("gh_bin: !!binary aGk=\n", FILE),
+    "set": ("me: !!set {name}\n", FILE),
+    "timestamp tag": ("me: {name: !!timestamp 2024-01-01}\n", FILE),
+    "merge key": ("me: {<<: {name: jo}}\n", FILE),
+    "explicit merge tag": ("me: {!!merge x: {name: jo}}\n", FILE),
+    "duplicate key": ("retries: 1\nretries: 2\n", "retries"),
+    "nested duplicate key": ("me:\n  name: a\n  name: b\n", "me.name"),
+    "duplicate hook name": ("hooks:\n  pre-merge: []\n  pre-merge: []\n", "hooks.pre-merge"),
+    "integer key": ("1: x\n", FILE),
+    "bool key": ("true: x\n", FILE),
+    "null key": ("~: x\n", FILE),
+    "complex key": ("? [a]\n: x\n", FILE),
+    "two documents": ("retries: 1\n---\nretries: 2\n", FILE),
+    "top-level list": ("- a\n- b\n", FILE),
+    "top-level scalar": ("just text\n", FILE),
+    "syntax error": ("me: {name: jo\n", FILE),
+    "tab indent": ("me:\n\tname: jo\n", FILE),
+    "nul escape": ('me: {name: "a\\0b"}\n', "me.name"),
+    "nul in command": ('hooks:\n  pre-merge:\n    - cmd: "a\\0b"\n', "hooks.pre-merge.0.cmd"),
+    "nul in a nested key": ('me: {"a\\0": 1}\n', "me"),
+    "nul in a top-level key": ('"a\\0": 1\n', FILE),
+    "surrogate in command": (
+        'hooks:\n  pre-merge:\n    - cmd: "echo \\ud800"\n',
+        "hooks.pre-merge.0.cmd",
+    ),
+    "surrogate in gh_bin": ('gh_bin: "\\ud800"\n', "gh_bin"),
+    "surrogate in a top-level key": ('"\\udfff": 1\n', FILE),
+    "directive abuse": ("%TAG ! tag:evil,2000:\n---\nretries: !x 1\n", FILE),
+    "deep nesting": ("a: " + "[" * 5000 + "]" * 5000 + "\n", FILE),
+    "control character": ("me: {name: \x01}\n", FILE),
+    "int tag on text": ("retries: !!int abc\n", FILE),
+    "int tag on 0x": ("retries: !!int 0x\n", FILE),
+    "int tag on sexagesimal": ("retries: !!int '1::'\n", FILE),
+    "int tag on empty": ("retries: !!int ''\n", FILE),
+    "int tag on a sign": ("retries: !!int '-'\n", FILE),
+    "int tag on an underscore": ("retries: !!int '_'\n", FILE),
+    "int tag on hex": ("retries: !!int 0x3\n", FILE),
+    "int tag on a list": ("retries: !!int [1]\n", FILE),
+    "float tag on text": ("timeout: !!float abc\n", FILE),
+    "float tag on a unit": ("timeout: !!float 30s\n", FILE),
+    "float tag on empty": ("timeout: !!float ''\n", FILE),
+    "bool tag on maybe": (
+        "hooks:\n  post-merge:\n    - cmd: x\n      async: !!bool maybe\n",
+        FILE,
+    ),
+    "bool tag on empty": ("hooks:\n  post-merge:\n    - {cmd: x, async: !!bool ''}\n", FILE),
+    "huge int": (f"retries: {BIG_INT}\n", FILE),
+    "huge int nested": (f"hooks:\n  pre-merge:\n    - {{cmd: x, timeout: {BIG_INT}}}\n", FILE),
+    "huge int as a key": (f"{BIG_INT}: x\n", FILE),
 }
 
 
-@pytest.mark.parametrize("text", HOSTILE_YAML.values(), ids=HOSTILE_YAML.keys())
-def test_hostile_yaml_is_config_invalid_never_a_traceback(home: Path, text: str) -> None:
+@pytest.mark.parametrize(("text", "key"), HOSTILE_YAML.values(), ids=HOSTILE_YAML.keys())
+def test_hostile_yaml_is_config_invalid_never_a_traceback(
+    home: Path, text: str, key: str | None
+) -> None:
     err = invalid(home, text)
-    assert isinstance(err.details, dict)
-    assert err.details["key"] == str(default_file(home)) or err.details["key"]
+    assert err.details == {"key": str(default_file(home)) if key is FILE else key}
+
+
+def test_a_yaml_error_names_the_line(home: Path) -> None:
+    err = invalid(home, "retries: 1\nretries: !!int abc\n")
+    assert "line 2" in err.message
+    assert "abc" not in err.message
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "gh_bin: !SECRETXYZ x\n",
+        "gh_bin: !SECRETXYZ!x y\n",
+        "%TAG !e! tag:SECRETXYZ,2000:\n---\ngh_bin: !e!x y\n",
+        "retries: !!int SECRETXYZ\n",
+        "a: &SECRETXYZ 1\n",
+    ],
+)
+def test_a_yaml_error_never_echoes_tags_handles_or_directives(home: Path, text: str) -> None:
+    err = invalid(home, text)
+    assert err.details == {"key": str(default_file(home))}
+    assert "SECRETXYZ" not in err.message
+
+
+def test_too_many_nodes_are_refused_quickly(home: Path) -> None:
+    items = MAX_NODES - 3  # the root map, the key, the list: exactly at the cap
+    at_cap = invalid(home, "x: [" + "1," * (items - 1) + "1]\n")
+    assert at_cap.details == {"key": "x"}  # parsed; refused only as an unknown key
+    started = time.monotonic()
+    over = invalid(home, "x: [" + "1," * items + "1]\n")
+    assert over.details == {"key": str(default_file(home))}
+    assert "too many nodes" in over.message
+    assert time.monotonic() - started < 2.0
+    huge = invalid(home, "x: [" + "1," * (MAX_FILE_BYTES // 2 - 10) + "1]\n")
+    assert "too many nodes" in huge.message
+
+
+def test_the_example_file_is_far_under_the_node_cap() -> None:
+    def count(node: yaml.Node) -> int:
+        if isinstance(node, yaml.MappingNode):
+            return 1 + sum(count(k) + count(v) for k, v in node.value)
+        if isinstance(node, yaml.SequenceNode):
+            return 1 + sum(count(item) for item in node.value)
+        return 1
+
+    examples = "".join(uncommented(key) for key in ("hosts", "repos", "hooks"))
+    for text in (EXAMPLE.read_text(encoding="utf-8"), examples):
+        assert count(yaml.compose(text)) * 20 < MAX_NODES
 
 
 def test_a_yaml_error_names_the_file_and_the_line_but_never_echoes_content(home: Path) -> None:
@@ -408,6 +521,48 @@ def test_a_yaml_error_names_the_file_and_the_line_but_never_echoes_content(home:
 def test_a_duplicate_key_message_names_the_key(home: Path) -> None:
     err = invalid(home, "retries: 1\nretries: 2\n")
     assert "retries" in err.message and "duplicate" in err.message
+
+
+# YAML 1.2 core schema: only true/false are booleans, integers are decimal, the rest is text.
+ASYNC = "hooks.post-merge.0.async"
+RESOLVES_AS_TEXT_AND_IS_REFUSED: dict[str, tuple[str, str]] = {
+    "sexagesimal timeout": ("timeout: 1:30\n", "timeout"),
+    "binary retries": ("retries: 0b11\n", "retries"),
+    "hex retries": ("retries: 0x3\n", "retries"),
+    "octal retries": ("retries: 0o3\n", "retries"),
+    "leading-zero retries": ("retries: 010\n", "retries"),
+    "underscore retries": ("retries: 1_0\n", "retries"),
+    "yes async": ("hooks:\n  post-merge:\n    - {cmd: x, async: yes}\n", ASYNC),
+    "on async": ("hooks:\n  post-merge:\n    - {cmd: x, async: on}\n", ASYNC),
+    "y async": ("hooks:\n  post-merge:\n    - {cmd: x, async: y}\n", ASYNC),
+    "a YAML 1.2 directive": ("%YAML 1.2\n---\nretries: 0x3\n", "retries"),
+    "underscore timeout": ("timeout: 1_000\n", "timeout"),
+}
+
+
+@pytest.mark.parametrize(
+    ("text", "key"),
+    RESOLVES_AS_TEXT_AND_IS_REFUSED.values(),
+    ids=RESOLVES_AS_TEXT_AND_IS_REFUSED.keys(),
+)
+def test_yaml_1_1_spellings_are_text_and_then_refused(home: Path, text: str, key: str) -> None:
+    assert invalid(home, text).details == {"key": key}
+
+
+def test_yaml_1_2_core_resolution(home: Path) -> None:
+    assert load(home, "timeout: 010\n").config.timeout == 10.0  # a numeric string: seconds
+    assert load(home, "retries: +3\n").config.retries == 3
+    assert load(home, "timeout: 1e2\n").config.timeout == 100.0
+    for name in ("yes", "on", "off", "no", "0x1f", "010", "1_0", "2024-01-01", "1.5e3x"):
+        assert load(home, f"me: {{name: {name}}}\n").config.me.name == name
+    for spelling in ("true", "True", "TRUE"):
+        text = f"hooks:\n  post-merge:\n    - {{cmd: x, async: {spelling}}}\n"
+        assert load(home, text).config.hooks.post_merge[0].async_ is True
+    for spelling in ("null", "Null", "NULL", "~", ""):
+        assert load(home, f"me: {{name: {spelling}}}\n").config.me.name is None
+    assert load(home, "me: {name: !!str 12}\n").config.me.name == "12"
+    assert load(home, "retries: !!int 4\n").config.retries == 4
+    assert load(home, "timeout: !!float 2\n").config.timeout == 2.0
 
 
 def test_yaml_scalar_typing_is_not_coerced_into_validity(home: Path) -> None:
@@ -453,6 +608,9 @@ INVALID: dict[str, tuple[str, str]] = {
     "timeout list": ("timeout: [5]\n", "timeout"),
     "timeout over a century": ("timeout: 9999999999999\n", "timeout"),
     "timeout huge int": ("timeout: " + "9" * 400 + "\n", "timeout"),
+    "timeout huge float": ("timeout: 1.0e+400\n", "timeout"),
+    "timeout huge numeric string": ("timeout: '" + "9" * 5000 + "s'\n", "timeout"),
+    "timeout negative inf": ("timeout: -.inf\n", "timeout"),
     "me.name space": ("me: {name: 'a b'}\n", "me.name"),
     "me.name newline": ('me: {name: "ab\\n"}\n', "me.name"),
     "me.name empty": ("me: {name: ''}\n", "me.name"),
@@ -466,6 +624,11 @@ INVALID: dict[str, tuple[str, str]] = {
     "gh_bin dot": ("gh_bin: .\n", "gh_bin"),
     "gh_bin dotdot": ("gh_bin: ..\n", "gh_bin"),
     "gh_bin control": ('gh_bin: "g\\x1bh"\n', "gh_bin"),
+    "gh_bin delete": ('gh_bin: "gh\\x7f"\n', "gh_bin"),
+    "gh_bin C1 control": ('gh_bin: "gh\\x9b2J"\n', "gh_bin"),
+    "glab_bin next line": ('glab_bin: "\\x85"\n', "glab_bin"),
+    "gh_bin NUL": ('gh_bin: "a\\0b"\n', "gh_bin"),
+    "gh_bin surrogate": ('gh_bin: "\\ud800"\n', "gh_bin"),
     "glab_bin list": ("glab_bin: [glab]\n", "glab_bin"),
     "hosts not a map": ("hosts: [a]\n", "hosts"),
     "undeclared host without backend": (HOST + "    token_env: X\n", "hosts.h.example.com.backend"),
@@ -473,6 +636,10 @@ INVALID: dict[str, tuple[str, str]] = {
     "host null entry": ("hosts:\n  h.example.com:\n", "hosts.h.example.com"),
     "built-in github.com wrong backend": (
         "hosts:\n  github.com: {backend: gitlab}\n",
+        "hosts.github.com.backend",
+    ),
+    "built-in github.com null backend": (
+        "hosts:\n  github.com: {backend: null}\n",
         "hosts.github.com.backend",
     ),
     "built-in gitlab.com wrong backend": (
@@ -531,6 +698,14 @@ INVALID: dict[str, tuple[str, str]] = {
         HOST + "    backend: gitlab\n    token_command: ['x', '']\n",
         "hosts.h.example.com.token_command.1",
     ),
+    "token_command C0 control": (
+        HOST + '    backend: gitlab\n    token_command: ["a\\x01"]\n',
+        "hosts.h.example.com.token_command.0",
+    ),
+    "token_command C1 control": (
+        HOST + '    backend: gitlab\n    token_command: [x, "a\\x9b"]\n',
+        "hosts.h.example.com.token_command.1",
+    ),
     "token_command a string": (
         HOST + "    backend: gitlab\n    token_command: 'x y'\n",
         "hosts.h.example.com.token_command",
@@ -563,6 +738,15 @@ INVALID: dict[str, tuple[str, str]] = {
     "repo null entry": ("repos:\n  h.example.com/a/b:\n", "repos.h.example.com/a/b"),
     "hook empty cmd": ("hooks:\n  pre-merge:\n    - cmd: ''\n", "hooks.pre-merge.0.cmd"),
     "hook blank cmd": ("hooks:\n  pre-merge:\n    - cmd: '   '\n", "hooks.pre-merge.0.cmd"),
+    "hook unicode-blank cmd": (
+        'hooks:\n  pre-merge:\n    - cmd: "\\u2003\\u3000"\n',
+        "hooks.pre-merge.0.cmd",
+    ),
+    "hook cmd NUL": ('hooks:\n  pre-merge:\n    - cmd: "a\\0b"\n', "hooks.pre-merge.0.cmd"),
+    "hook cmd surrogate": (
+        'hooks:\n  pre-merge:\n    - cmd: "echo \\ud800"\n',
+        "hooks.pre-merge.0.cmd",
+    ),
     "hook missing cmd": ("hooks:\n  pre-merge:\n    - timeout: 5s\n", "hooks.pre-merge.0.cmd"),
     "hook cmd a list": ("hooks:\n  pre-merge:\n    - cmd: [a, b]\n", "hooks.pre-merge.0.cmd"),
     "hook async on a pre hook": (
@@ -647,6 +831,42 @@ def test_value_semantics(home: Path) -> None:
     assert load(home, "timeout: 0.5h\n").config.timeout == 1800.0
 
 
+@pytest.mark.parametrize(
+    ("text", "phrase"),
+    [
+        ("timeout: .inf\n", "100 years"),
+        ("timeout: 1e400\n", "100 years"),
+        ("timeout: " + "9" * 400 + "\n", "100 years"),
+        ("timeout: '" + "9" * 5000 + "'\n", "100 years"),
+        ("timeout: .nan\n", "not a duration"),
+        ("timeout: 0\n", "must be positive"),
+        ("timeout: -2.5\n", "must be positive"),
+        ("timeout: '0ms'\n", "must be positive"),
+    ],
+)
+def test_duration_refusals_say_why(home: Path, text: str, phrase: str) -> None:
+    assert phrase in invalid(home, text).message
+
+
+def test_an_overflowing_environment_timeout_says_over_100_years(home: Path) -> None:
+    err = invalid(home, None, FORGECTL_TIMEOUT="9" * 5000)
+    assert err.details == {"key": "FORGECTL_TIMEOUT"}
+    assert "100 years" in err.message
+
+
+@pytest.mark.parametrize(
+    ("spelled", "plain"),
+    [("'9ms'", "0.009"), ("'4.1m'", "246"), ("'1m'", "60"), ("'60s'", "60"), ("'0.1s'", "0.1")],
+)
+def test_equal_durations_are_equal_values_and_hash_alike(
+    home: Path, spelled: str, plain: str
+) -> None:
+    a = load(home, f"timeout: {spelled}\n")
+    b = load(home, f"timeout: {plain}\n")
+    assert a.config.timeout == b.config.timeout == float(plain)
+    assert a.config_hash == b.config_hash
+
+
 def test_the_error_message_does_not_echo_the_offending_value(home: Path) -> None:
     err = invalid(home, "me: {name: 'SECRET VALUE'}\n")
     assert "SECRET" not in err.message
@@ -654,19 +874,38 @@ def test_the_error_message_does_not_echo_the_offending_value(home: Path) -> None
 
 # --- the schema and the models agree -------------------------------------------------------------
 
-# Documented cases where the models are stricter than schemas/config.json, which cannot express
-# them: a blank command, a bare "." or ".." executable, control characters, an unreasonably large
-# duration, repo keys that differ only by case.
+# The models' refusals beyond schemas/config.json, which cannot express them; interface.md
+# "Reading files" lists the same rules. (YAML-level refusals, such as non-string keys and the node
+# cap, are in HOSTILE_YAML: JSON has no such documents.)
 STRICTER_THAN_SCHEMA = {
-    "hook blank cmd",
-    "gh_bin dot",
+    "hook blank cmd",  # only whitespace, Unicode whitespace included
+    "hook unicode-blank cmd",
+    "gh_bin dot",  # an executable named . or ..
     "gh_bin dotdot",
-    "gh_bin control",
-    "timeout over a century",
+    "gh_bin control",  # control characters (Unicode Cc) in an executable or a token_command arg
+    "gh_bin delete",
+    "gh_bin C1 control",
+    "glab_bin next line",
+    "token_command C0 control",
+    "token_command C1 control",
+    "gh_bin NUL",  # NUL in any string
+    "hook cmd NUL",
+    "gh_bin surrogate",  # a lone surrogate in any string
+    "hook cmd surrogate",
+    "retries float",  # a number with a fraction part: JSON Schema counts 3.0 as an integer
+    "timeout inf",  # non-finite durations
+    "timeout nan",
+    "timeout over a century",  # a duration over 100 years
     "timeout huge int",
+    "timeout huge float",
+    "timeout huge numeric string",
     "repo keys differing only by case",
-    "retries float",  # JSON Schema counts 3.0 as an integer
-    "timeout trailing newline",  # Python's `$` matches before a final newline
+}
+
+# Refused by both under ECMA-262, whose `$` does not match before a final newline; the Python
+# `re` that jsonschema uses here does, so this test's validator accepts them.
+PYTHON_REGEX_NEWLINE = {
+    "timeout trailing newline",
     "me.name newline",
     "gh_bin newline",
 }
@@ -683,11 +922,16 @@ def test_schema_rejects_what_the_models_reject(text: str, key: str, request: Any
         data = yaml.safe_load(text)
     except yaml.YAMLError:
         pytest.skip("not YAML")
-    if not isinstance(data, dict) or name in STRICTER_THAN_SCHEMA:
+    if not isinstance(data, dict) or name in STRICTER_THAN_SCHEMA | PYTHON_REGEX_NEWLINE:
         pytest.skip("stricter than the schema, or not a mapping")
-    if name in {"timeout nan", "timeout inf"}:
-        pytest.skip("covered by type checks in the schema")
     assert not SCHEMA_VALIDATOR.is_valid(data), name
+
+
+@pytest.mark.parametrize("name", sorted(STRICTER_THAN_SCHEMA | PYTHON_REGEX_NEWLINE))
+def test_every_stricter_case_is_schema_valid_and_model_invalid(home: Path, name: str) -> None:
+    text, key = INVALID[name]
+    assert schema_accepts(text), name
+    assert invalid(home, text).details == {"key": key}
 
 
 @pytest.mark.parametrize("text", VALID.values(), ids=VALID.keys())
@@ -758,6 +1002,9 @@ BAD_ENV = [
     ("FORGECTL_GH_BIN", ""),
     ("FORGECTL_GH_BIN", "bin/gh"),
     ("FORGECTL_GH_BIN", "gh\n"),
+    ("FORGECTL_GH_BIN", "gh\u009b"),
+    ("FORGECTL_GLAB_BIN", "glab\x7f"),
+    ("FORGECTL_TIMEOUT", "9" * 5000),
     ("FORGECTL_GLAB_BIN", ""),
     ("FORGECTL_GLAB_BIN", "./glab"),
     ("FORGECTL_GLAB_BIN", ".."),
@@ -831,6 +1078,13 @@ def test_the_repo_key_matches_the_canonical_path_ignoring_case(home: Path) -> No
 def test_a_null_repo_override_leaves_the_method_open(home: Path) -> None:
     loaded = load(home, "repos:\n  h.example.com/a/b: {merge_method: null}\n")
     assert loaded.merge_method_for("h.example.com/a/b", flag=None) is None
+
+
+def test_the_hooks_and_token_command_are_tuples(home: Path) -> None:
+    text = "hosts:\n  h.example.com: {backend: gitlab, token_command: [a, b]}\n"
+    config = load(home, text).config
+    assert config.hosts["h.example.com"].token_command == ("a", "b")
+    assert Config().hooks.pre_merge == ()
 
 
 # --- the config hash -----------------------------------------------------------------------------
@@ -912,9 +1166,28 @@ def test_hash_does_not_depend_on_the_path_the_config_came_from(home: Path, tmp_p
 
 
 def test_the_loaded_config_is_immutable(home: Path) -> None:
-    config = load(home).config
+    config = load(
+        home,
+        "hosts:\n  h.example.com: {backend: gitlab, token_command: [a]}\n"
+        "repos:\n  h.example.com/a/b: {merge_method: squash}\n"
+        "hooks:\n  pre-merge:\n    - cmd: x\n",
+    ).config
+    before = config_hash(config)
     with pytest.raises(Exception):  # noqa: B017 - pydantic's frozen-instance error
         config.retries = 1  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        config.hosts["x.example.com"] = config.hosts["h.example.com"]  # type: ignore[index]
+    with pytest.raises(TypeError):
+        del config.repos["h.example.com/a/b"]  # type: ignore[attr-defined]
+    token_command = config.hosts["h.example.com"].token_command
+    assert token_command is not None
+    with pytest.raises(AttributeError):
+        token_command.append("b")  # type: ignore[attr-defined]
+    with pytest.raises(AttributeError):
+        config.hooks.pre_merge.append(config.hooks.pre_merge[0])  # type: ignore[attr-defined]
+    assert config_hash(config) == before
+    assert list(config.hosts) == ["h.example.com"]
+    assert [h.cmd for h in config.hooks.pre_merge] == ["x"]
 
 
 def test_loading_does_not_mutate_its_inputs(home: Path) -> None:
