@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/cli/snapshot.json",
+  "title": "snapshot output",
+  "description": "The PR object plus the parts below. Lists have a fixed order, so two snapshots compare directly, excluding fetched_at and rate_limit.",
+  "type": "object",
+  "allOf": [
+    {
+      "$ref": "../defs.json#/$defs/pr_fields"
+    },
+    {
+      "if": {
+        "properties": {
+          "complete": {
+            "const": true
+          }
+        },
+        "required": [
+          "complete"
+        ]
+      },
+      "then": {
+        "properties": {
+          "incomplete": {
+            "maxItems": 0
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "incomplete": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ],
+  "unevaluatedProperties": false,
+  "properties": {
+    "review_requests": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/review_request"
+      }
+    },
+    "teams_visible": {
+      "type": "boolean",
+      "description": "false when the account cannot see team requests, so the absence of a team means nothing."
+    },
+    "reviews": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/review"
+      }
+    },
+    "latest_by_reviewer": {
+      "$ref": "../defs.json#/$defs/latest_by_reviewer"
+    },
+    "threads": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/thread"
+      }
+    },
+    "ci": {
+      "$ref": "../defs.json#/$defs/ci"
+    },
+    "rate_limit": {
+      "$ref": "../defs.json#/$defs/rate_limit"
+    },
+    "complete": {
+      "type": "boolean"
+    },
+    "incomplete": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "review_requests",
+          "reviews",
+          "threads",
+          "ci"
+        ]
+      },
+      "uniqueItems": true,
+      "description": "Names of the parts that are not complete."
+    },
+    "fetched_at": {
+      "$ref": "../defs.json#/$defs/ts"
+    }
+  },
+  "required": [
+    "pr",
+    "repo",
+    "pr_id",
+    "number",
+    "url",
+    "backend",
+    "title",
+    "body",
+    "author",
+    "state",
+    "draft",
+    "created_at",
+    "updated_at",
+    "closed_at",
+    "merged_at",
+    "merged_by",
+    "labels",
+    "author_association",
+    "head",
+    "base",
+    "merged_head_sha",
+    "merge_commit_sha",
+    "head_fetch_ref",
+    "mergeable",
+    "blocked_by",
+    "auto_merge",
+    "merge_queue",
+    "merge_methods_allowed",
+    "additions",
+    "deletions",
+    "changed_files",
+    "review_decision",
+    "approvals",
+    "approvals_at_head",
+    "review_requests",
+    "teams_visible",
+    "reviews",
+    "latest_by_reviewer",
+    "threads",
+    "ci",
+    "rate_limit",
+    "complete",
+    "incomplete",
+    "fetched_at"
+  ]
+}

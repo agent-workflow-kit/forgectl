@@ -1,13 +1,378 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "forgectl/config",
+  "$id": "forgectl/config.json",
   "title": "forgectl config",
+  "description": "~/.config/forgectl/config.yaml (XDG respected) plus config.d/*.yaml in lexical order: maps merge, hook lists append, other lists replace. Invalid config exits 2 (config_invalid). Precedence: flags, per-repo override, environment, global config, defaults.",
   "type": "object",
   "properties": {
+    "me": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._@-]{1,64}$",
+          "default": null,
+          "description": "The <user> in human:<user>; null: the OS username."
+        },
+        "github": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254})$",
+          "default": null,
+          "description": "Your login; null: the authenticated user."
+        },
+        "gitlab": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254})$",
+          "default": null,
+          "description": "Your login; null: the authenticated user."
+        }
+      },
+      "additionalProperties": false,
+      "required": [],
+      "default": {}
+    },
+    "gh_bin": {
+      "type": "string",
+      "pattern": "^(/.*|[^/]+)$",
+      "default": "gh",
+      "description": "A bare name, resolved only against absolute PATH entries, or an absolute path."
+    },
+    "glab_bin": {
+      "type": "string",
+      "pattern": "^(/.*|[^/]+)$",
+      "default": "glab",
+      "description": "A bare name, resolved only against absolute PATH entries, or an absolute path."
+    },
+    "timeout": {
+      "$ref": "#/$defs/duration",
+      "default": "60s",
+      "description": "Budget for the host calls of a command."
+    },
+    "retries": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10,
+      "default": 3,
+      "description": "Read retries."
+    },
+    "hosts": {
+      "type": "object",
+      "default": {},
+      "description": "github.com and gitlab.com are built in; any other host must be declared with a backend.",
+      "properties": {
+        "github.com": {
+          "type": "object",
+          "properties": {
+            "backend": {
+              "const": "github",
+              "description": "Built in."
+            },
+            "token_env": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/env_name"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Variable holding the token. Configured but yielding nothing: exit 12, never the stored login."
+            },
+            "token_command": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1,
+              "default": null,
+              "description": "argv producing the token, run with no shell; an argument equal to {host} becomes the host."
+            },
+            "me": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254})$",
+              "default": null,
+              "description": "Your login on this host."
+            }
+          },
+          "additionalProperties": false,
+          "required": []
+        },
+        "gitlab.com": {
+          "type": "object",
+          "properties": {
+            "backend": {
+              "const": "gitlab",
+              "description": "Built in."
+            },
+            "token_env": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/env_name"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Variable holding the token. Configured but yielding nothing: exit 12, never the stored login."
+            },
+            "token_command": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1,
+              "default": null,
+              "description": "argv producing the token, run with no shell; an argument equal to {host} becomes the host."
+            },
+            "me": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254})$",
+              "default": null,
+              "description": "Your login on this host."
+            }
+          },
+          "additionalProperties": false,
+          "required": []
+        }
+      },
+      "patternProperties": {
+        "^(?!(?:github\\.com|gitlab\\.com)$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?$": {
+          "type": "object",
+          "properties": {
+            "backend": {
+              "$ref": "#/$defs/backend"
+            },
+            "token_env": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/env_name"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Variable holding the token. Configured but yielding nothing: exit 12, never the stored login."
+            },
+            "token_command": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1,
+              "default": null,
+              "description": "argv producing the token, run with no shell; an argument equal to {host} becomes the host."
+            },
+            "me": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254})$",
+              "default": null,
+              "description": "Your login on this host."
+            },
+            "api_prefix": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+$",
+              "default": null,
+              "description": "GitLab under a path, such as /gitlab."
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "backend"
+          ],
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "backend": {
+                    "const": "github"
+                  }
+                },
+                "required": [
+                  "backend"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "api_prefix": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "repos": {
+      "type": "object",
+      "default": {},
+      "description": "Per-repo overrides hold only merge_method in v1: no setting lowers a safety rule.",
+      "patternProperties": {
+        "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+$": {
+          "type": "object",
+          "properties": {
+            "merge_method": {
+              "enum": [
+                "squash",
+                "merge",
+                "rebase",
+                null
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false,
+          "required": []
+        }
+      },
+      "additionalProperties": false
+    },
     "hooks": {
       "type": "object",
-      "description": "Hook name to list of hook entries."
+      "properties": {
+        "pre-merge": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/hook_entry_pre"
+          },
+          "default": []
+        },
+        "post-merge": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/hook_entry_post"
+          },
+          "default": []
+        },
+        "pre-post": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/hook_entry_pre"
+          },
+          "default": []
+        },
+        "post-post": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/hook_entry_post"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false,
+      "required": [],
+      "default": {}
     }
   },
-  "additionalProperties": true
+  "additionalProperties": false,
+  "required": [],
+  "$defs": {
+    "backend": {
+      "enum": [
+        "github",
+        "gitlab"
+      ]
+    },
+    "duration": {
+      "anyOf": [
+        {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^(?=.*[1-9])[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d)$"
+        },
+        {
+          "type": "string",
+          "pattern": "^(?=.*[1-9])[0-9]+(?:\\.[0-9]+)?$"
+        }
+      ],
+      "description": "Seconds as a positive number, a string <number><unit> with unit ms, s, m, h or d (e.g. '30s'), or a bare number string meaning seconds; zero is refused."
+    },
+    "env_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+    },
+    "hook_entry_post": {
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Run through sh -c in its own process group."
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "default": "30s"
+        },
+        "async": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run detached under a watchdog that enforces its timeout."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cmd"
+      ],
+      "description": "Failures are logged and warned, never fatal."
+    },
+    "hook_entry_pre": {
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Run through sh -c in its own process group."
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "default": "30s"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cmd"
+      ],
+      "description": "Exit 13 escalates; any other non-zero exit or a timeout vetoes."
+    }
+  }
 }

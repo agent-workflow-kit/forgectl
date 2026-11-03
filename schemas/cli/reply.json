@@ -1,0 +1,187 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/cli/reply.json",
+  "title": "reply output",
+  "description": "Printed on exit 0, and on exit 20 from a --dry-run with would_refuse set.",
+  "type": "object",
+  "properties": {
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "action": {
+      "const": "reply"
+    },
+    "ids": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/id"
+      },
+      "description": "Ids of the comments posted, or the existing ones with already_posted."
+    },
+    "thread_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/id"
+      }
+    },
+    "review_id": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/id"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The GitHub review; null on GitLab and for other actions."
+    },
+    "already_posted": {
+      "type": "boolean"
+    },
+    "follow_up_done": {
+      "type": "boolean",
+      "description": "true when this run performed a state step that was missing after a dedupe hit."
+    },
+    "neutralized_lines": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Lines given a leading space by neutralizing; a caller shows this count."
+    },
+    "markers_removed": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Marker-shaped text defused."
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]*$"
+      },
+      "description": "For example read_back_failed: ids are empty and the backstop did not run."
+    },
+    "head_sha": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/sha"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The head read; null only on a --dry-run refused before the read."
+    },
+    "threaded": {
+      "type": "boolean",
+      "description": "false when GitHub has no thread to join and the reply was posted as a new general comment."
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "would_refuse": {
+      "$ref": "../defs.json#/$defs/would_refuse"
+    },
+    "plan": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "enum": [
+            "comment",
+            "request_changes",
+            "approve",
+            null
+          ],
+          "description": "The input's event, for review; null otherwise."
+        },
+        "body_sha256": {
+          "oneOf": [
+            {
+              "$ref": "../defs.json#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Of the body as it would be posted; for a review, of canonical JSON {body, comments}. null only when nothing would be posted."
+        },
+        "body_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inline_comments": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "event",
+        "body_sha256",
+        "body_bytes",
+        "inline_comments"
+      ],
+      "description": "What a real run would post."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "pr",
+    "action",
+    "ids",
+    "thread_ids",
+    "review_id",
+    "already_posted",
+    "follow_up_done",
+    "neutralized_lines",
+    "markers_removed",
+    "warnings",
+    "head_sha",
+    "threaded",
+    "dry_run"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "dry_run": {
+            "const": true
+          }
+        },
+        "required": [
+          "dry_run"
+        ]
+      },
+      "then": {
+        "required": [
+          "would_refuse",
+          "plan"
+        ]
+      },
+      "else": {
+        "properties": {
+          "would_refuse": false,
+          "plan": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "dry_run": {
+            "const": false
+          }
+        },
+        "required": [
+          "dry_run"
+        ]
+      },
+      "then": {
+        "properties": {
+          "head_sha": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ]
+}

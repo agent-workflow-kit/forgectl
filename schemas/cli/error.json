@@ -1,0 +1,445 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/cli/error.json",
+  "title": "Error envelope (any command with --json)",
+  "description": "Printed on stdout for every non-zero exit except 12 from prs or whoami with partial results and 20 from a --dry-run. Errors also go to stderr as text.",
+  "type": "object",
+  "properties": {
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "../defs.json#/$defs/error_code"
+        },
+        "message": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: may hold a host's message, sanitized."
+        },
+        "reason": {
+          "oneOf": [
+            {
+              "$ref": "../defs.json#/$defs/refusal_reason"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "On exit 20."
+        },
+        "details": {
+          "$ref": "../defs.json#/$defs/error_details"
+        },
+        "retry_after": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Seconds, when known."
+        },
+        "hook": {
+          "enum": [
+            "pre-merge",
+            "pre-post",
+            null
+          ],
+          "description": "The pre-hook that vetoed or escalated."
+        },
+        "hook_stderr": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-untrusted": true,
+          "description": "Untrusted: the hook's stderr, sanitized, cut to 4096 bytes (maxLength counts code points and approximates it).",
+          "maxLength": 4096
+        },
+        "decision_ids": {
+          "$ref": "../defs.json#/$defs/decision_ids"
+        },
+        "escalated_hooks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "hook": {
+                "enum": [
+                  "pre-merge",
+                  "pre-post"
+                ]
+              },
+              "index": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Position in the hook's configured list."
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "hook",
+              "index"
+            ]
+          },
+          "description": "Every hook entry that escalated."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "refused"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "reason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "vetoed",
+                  "escalated"
+                ]
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "hook",
+              "hook_stderr"
+            ],
+            "properties": {
+              "hook": {
+                "type": "string"
+              },
+              "hook_stderr": {
+                "type": "string"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "hook": {
+                "type": "null"
+              },
+              "hook_stderr": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "escalated"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "escalated_hooks"
+            ],
+            "properties": {
+              "escalated_hooks": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "not_ready"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "blocked_by"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "method_required"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "allowed"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "invalid_position"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "invalid"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "outcome_partial"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "landed",
+                  "failed"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "host_rejected"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "status"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "quick_action_ran",
+                  "approved_stale_head"
+                ]
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "ids"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "audit_failed"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "outcome"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "body_too_large"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "index",
+                  "limit"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "drafts_present"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "count"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "stale_base"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "base_ref"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "error"
+  ]
+}

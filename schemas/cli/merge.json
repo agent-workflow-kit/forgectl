@@ -1,0 +1,244 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/cli/merge.json",
+  "title": "merge output",
+  "description": "Printed on exit 0, and on exit 20 from a --dry-run with would_refuse set.",
+  "type": "object",
+  "properties": {
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "merged": {
+      "type": "boolean"
+    },
+    "already_merged": {
+      "type": "boolean"
+    },
+    "auto_merge_enabled": {
+      "type": "boolean"
+    },
+    "merged_head_sha": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/sha"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The PR's own merged_head_sha, equal to the sha sent when this run merged; null while only armed."
+    },
+    "merge_commit_sha": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/sha"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "method": {
+      "enum": [
+        "squash",
+        "merge",
+        "rebase",
+        null
+      ],
+      "description": "What merged; null when nothing has merged yet and the project's own setting decides."
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "would_refuse": {
+      "$ref": "../defs.json#/$defs/would_refuse"
+    },
+    "plan": {
+      "type": "object",
+      "properties": {
+        "head_sha": {
+          "oneOf": [
+            {
+              "$ref": "../defs.json#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The head read; null when the refusal came before the read."
+        },
+        "expected_head": {
+          "oneOf": [
+            {
+              "$ref": "../defs.json#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Given, or pinned by an interactive run's first read; null when no value exists yet, because the refusal came before any read."
+        },
+        "expected_base": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-untrusted": true,
+          "description": "Untrusted: the base given, or pinned by an interactive run's first read; null when no value exists yet, because the refusal came before any read.",
+          "x-one-line": true
+        },
+        "base_ref": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-untrusted": true,
+          "description": "Untrusted: the PR's base; null when the refusal came before the read.",
+          "x-one-line": true
+        },
+        "auto": {
+          "type": "boolean"
+        },
+        "override_blocks": {
+          "type": "boolean"
+        },
+        "blocked_by": {
+          "oneOf": [
+            {
+              "$ref": "../defs.json#/$defs/blocked_by"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "null when the refusal came before the read."
+        },
+        "method": {
+          "enum": [
+            "squash",
+            "merge",
+            "rebase",
+            null
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "head_sha",
+        "expected_head",
+        "expected_base",
+        "base_ref",
+        "auto",
+        "override_blocks",
+        "blocked_by",
+        "method"
+      ],
+      "description": "What a real run would do; the dialog's facts."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "pr",
+    "merged",
+    "already_merged",
+    "auto_merge_enabled",
+    "merged_head_sha",
+    "merge_commit_sha",
+    "method",
+    "dry_run"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "dry_run": {
+            "const": true
+          }
+        },
+        "required": [
+          "dry_run"
+        ]
+      },
+      "then": {
+        "required": [
+          "would_refuse",
+          "plan"
+        ]
+      },
+      "else": {
+        "properties": {
+          "would_refuse": false,
+          "plan": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "already_merged": {
+            "const": true
+          }
+        },
+        "required": [
+          "already_merged"
+        ]
+      },
+      "then": {
+        "properties": {
+          "merged": {
+            "const": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "dry_run": {
+            "const": false
+          }
+        },
+        "required": [
+          "dry_run"
+        ]
+      },
+      "then": {
+        "anyOf": [
+          {
+            "properties": {
+              "merged": {
+                "const": true
+              }
+            }
+          },
+          {
+            "properties": {
+              "auto_merge_enabled": {
+                "const": true
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "merged": {
+            "const": true
+          }
+        },
+        "required": [
+          "merged"
+        ]
+      },
+      "then": {
+        "properties": {
+          "merged_head_sha": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/cli/reviews.json",
+  "title": "reviews output",
+  "type": "object",
+  "properties": {
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "head_sha": {
+      "$ref": "../defs.json#/$defs/sha"
+    },
+    "reviews": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/review"
+      }
+    },
+    "latest_by_reviewer": {
+      "$ref": "../defs.json#/$defs/latest_by_reviewer"
+    },
+    "review_decision": {
+      "$ref": "../defs.json#/$defs/review_decision"
+    },
+    "approvals": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "approvals_at_head": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Those at the current head, with can_push true, and not older than the PR's latest retarget. null is not approved."
+    },
+    "complete": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "pr",
+    "head_sha",
+    "reviews",
+    "latest_by_reviewer",
+    "review_decision",
+    "approvals",
+    "approvals_at_head",
+    "complete"
+  ]
+}

@@ -1,0 +1,1770 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/defs.json",
+  "title": "forgectl shared definitions",
+  "description": "Not an output on its own. Shared definitions referenced by the CLI, hook, audit and log schemas. config.json embeds its own copies.",
+  "$defs": {
+    "host": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?$",
+      "description": "Lowercase host, with an optional :port only for a non-default port."
+    },
+    "repo_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+$",
+      "description": "host/<full project path>, in the host's canonical path and case."
+    },
+    "pr": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|#))[A-Za-z0-9._-]+)+#[1-9][0-9]{0,9}$",
+      "description": "host/<full project path>#N. N has no leading zero and at most 10 digits."
+    },
+    "number": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9999999999
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Full 40-hex commit sha."
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})$",
+      "description": "RFC 3339."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^(?:gh:(?:ic|rc|rt|r):[A-Za-z0-9_=-]{1,100}|gl:d:[0-9a-f]{40}|gl:n:[1-9][0-9]{0,18})$",
+      "description": "Opaque, stable across calls. reply --to takes comment, thread and review ids; resolve --thread and unresolve --thread take thread ids. The prefix names the kind."
+    },
+    "account_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9:/_=-]{1,128}$",
+      "description": "Opaque, stable account id, used for comparisons."
+    },
+    "decision_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:@/-]{1,128}$"
+    },
+    "decision_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/decision_id"
+      },
+      "maxItems": 32,
+      "description": "From --decision-id and pre-hook stdout; possibly empty."
+    },
+    "actor": {
+      "type": "string",
+      "pattern": "^(human|auto):[A-Za-z0-9._@-]{1,64}$",
+      "description": "human:<user> or auto:<name>. Advisory against same-user processes."
+    },
+    "backend": {
+      "enum": [
+        "github",
+        "gitlab"
+      ]
+    },
+    "method": {
+      "enum": [
+        "squash",
+        "merge",
+        "rebase"
+      ]
+    },
+    "duration": {
+      "anyOf": [
+        {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^(?=.*[1-9])[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d)$"
+        },
+        {
+          "type": "string",
+          "pattern": "^(?=.*[1-9])[0-9]+(?:\\.[0-9]+)?$"
+        }
+      ],
+      "description": "Seconds as a positive number, a string <number><unit> with unit ms, s, m, h or d (e.g. '30s'), or a bare number string meaning seconds; zero is refused."
+    },
+    "env_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+    },
+    "login": {
+      "type": "string",
+      "x-untrusted": true,
+      "description": "Untrusted: a login on the forge, in the REST form.",
+      "minLength": 1,
+      "x-one-line": true
+    },
+    "login_or_null": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "x-untrusted": true,
+      "description": "Untrusted: a login on the forge in the REST form, or null.",
+      "minLength": 1,
+      "x-one-line": true
+    },
+    "rate_limit": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/host"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The host of this reading; null when no host was called."
+        },
+        "remaining": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "reset_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "remaining",
+        "reset_at"
+      ],
+      "description": "From the response headers; each is null where absent. The lowest remaining among the APIs and hosts this command called."
+    },
+    "exit_code": {
+      "enum": [
+        0,
+        1,
+        2,
+        10,
+        11,
+        12,
+        13,
+        20
+      ],
+      "description": "forgectl's exit codes.",
+      "x-codes": {
+        "0": [],
+        "1": [
+          "internal"
+        ],
+        "2": [
+          "usage",
+          "config_invalid",
+          "invalid_pr",
+          "body_too_large",
+          "method_required"
+        ],
+        "10": [
+          "not_found"
+        ],
+        "11": [
+          "vetoed"
+        ],
+        "12": [
+          "auth_required",
+          "permission_denied",
+          "rate_limited",
+          "upstream_error",
+          "network_error",
+          "tool_missing",
+          "host_rejected",
+          "outcome_unknown",
+          "outcome_partial",
+          "merge_unverified",
+          "invalid_position",
+          "quick_action_ran",
+          "approved_stale_head",
+          "wrong_host_response",
+          "audit_unavailable",
+          "audit_failed",
+          "partial_results",
+          "unsupported_host_version"
+        ],
+        "13": [
+          "confirmation_required",
+          "escalated"
+        ],
+        "20": [
+          "refused"
+        ]
+      }
+    },
+    "error_code": {
+      "enum": [
+        "internal",
+        "usage",
+        "config_invalid",
+        "invalid_pr",
+        "body_too_large",
+        "method_required",
+        "not_found",
+        "vetoed",
+        "auth_required",
+        "permission_denied",
+        "rate_limited",
+        "upstream_error",
+        "network_error",
+        "tool_missing",
+        "host_rejected",
+        "outcome_unknown",
+        "outcome_partial",
+        "merge_unverified",
+        "invalid_position",
+        "quick_action_ran",
+        "approved_stale_head",
+        "wrong_host_response",
+        "audit_unavailable",
+        "audit_failed",
+        "partial_results",
+        "unsupported_host_version",
+        "confirmation_required",
+        "escalated",
+        "refused"
+      ],
+      "description": "error.code. Exit 20 uses 'refused', with error.reason."
+    },
+    "refusal_reason": {
+      "enum": [
+        "unknown_host",
+        "stale_head",
+        "stale_base",
+        "no_head_match",
+        "not_open",
+        "not_ready",
+        "method_not_allowed",
+        "auto_merge_unavailable",
+        "self_approval",
+        "not_resolvable",
+        "too_large",
+        "drafts_present",
+        "pending_review_exists"
+      ]
+    },
+    "hook_name": {
+      "enum": [
+        "pre-merge",
+        "post-merge",
+        "pre-post",
+        "post-post"
+      ]
+    },
+    "author": {
+      "type": "object",
+      "properties": {
+        "login": {
+          "$ref": "#/$defs/login_or_null",
+          "description": "Untrusted: null when the host has no account for the author (for example GitHub's deleted user)."
+        },
+        "id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/account_id"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Opaque and stable; null when the host gives none."
+        },
+        "is_bot": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "null: unknown. Consumers treat null as not a human they may act for automatically."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "login",
+        "id",
+        "is_bot"
+      ]
+    },
+    "blocker": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "enum": [
+                "draft",
+                "conflicts",
+                "checks_pending",
+                "checks_failing",
+                "reviews_required",
+                "changes_requested",
+                "discussions_unresolved",
+                "branch_behind",
+                "mergeability_unknown",
+                "checks_absent"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "code"
+          ],
+          "description": "checks_absent appears only in merge's refusal, never in a PR's blocked_by."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "const": "other"
+            },
+            "detail": {
+              "type": "string",
+              "x-untrusted": true,
+              "description": "Untrusted: the host's status.",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "detail"
+          ]
+        }
+      ]
+    },
+    "blocked_by": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/blocker"
+      },
+      "description": "Empty means nothing known blocks a merge."
+    },
+    "review_decision": {
+      "enum": [
+        "approved",
+        "changes_requested",
+        "review_required",
+        "none"
+      ]
+    },
+    "review_request": {
+      "type": "object",
+      "properties": {
+        "reviewer": {
+          "type": "object",
+          "properties": {
+            "login": {
+              "$ref": "#/$defs/login"
+            },
+            "id": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/account_id"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "null where a host gives none. Compare by id, else by login, case-insensitively."
+            },
+            "kind": {
+              "enum": [
+                "user",
+                "team"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "login",
+            "id",
+            "kind"
+          ]
+        },
+        "state": {
+          "enum": [
+            "outstanding",
+            "reviewed"
+          ]
+        },
+        "code_owner": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "instance": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-untrusted": true,
+          "description": "Untrusted: opaque string identifying this request, or null.",
+          "pattern": "^[A-Za-z0-9:_=-]{1,128}$"
+        },
+        "requested_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "reviewer",
+        "state",
+        "code_owner",
+        "instance",
+        "requested_at"
+      ]
+    },
+    "review": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "author": {
+          "$ref": "#/$defs/author"
+        },
+        "state": {
+          "enum": [
+            "approved",
+            "changes_requested",
+            "commented",
+            "dismissed"
+          ]
+        },
+        "commit_sha": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "submitted_at": {
+          "$ref": "#/$defs/ts"
+        },
+        "body": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: the review's body."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "author",
+        "state",
+        "commit_sha",
+        "submitted_at",
+        "body"
+      ],
+      "description": "A host's review object. GitHub only: GitLab has none, so reviews is always empty there."
+    },
+    "latest_by_reviewer": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "login": {
+            "$ref": "#/$defs/login"
+          },
+          "id": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/account_id"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "enum": [
+              "approved",
+              "changes_requested",
+              "dismissed"
+            ]
+          },
+          "commit_sha": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/sha"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "null on GitLab."
+          },
+          "at": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/ts"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "GitHub: the review's submission time. GitLab: approved_at for an approved entry, else null."
+          },
+          "can_push": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the account can push. GitHub: the review's authorCanPushToRepository. GitLab: only for an approved entry on a project resetting approvals on push, else null."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "login",
+          "id",
+          "state",
+          "commit_sha",
+          "at",
+          "can_push"
+        ]
+      },
+      "description": "One entry per account, holding its latest non-commented state, computed by forgectl."
+    },
+    "comment": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "author": {
+          "$ref": "#/$defs/author"
+        },
+        "body": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: the comment's body."
+        },
+        "created_at": {
+          "$ref": "#/$defs/ts"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/ts"
+        },
+        "minimized": {
+          "type": "boolean"
+        },
+        "reply_to": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "review_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The review this comment belongs to, or null."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "author",
+        "body",
+        "created_at",
+        "updated_at",
+        "minimized",
+        "reply_to",
+        "review_id"
+      ]
+    },
+    "thread": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "resolvable": {
+          "type": "boolean"
+        },
+        "resolved": {
+          "type": "boolean",
+          "description": "false when not resolvable."
+        },
+        "outdated": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "null on GitLab: a consumer reads null as possibly outdated."
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-untrusted": true,
+          "description": "Untrusted: the file's path; null when the thread has no position.",
+          "x-one-line": true
+        },
+        "line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "null on an outdated thread and on a thread with no line."
+        },
+        "side": {
+          "enum": [
+            "left",
+            "right",
+            null
+          ]
+        },
+        "start_line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "commit_sha": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "comments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/comment"
+          },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "resolvable",
+        "resolved",
+        "outdated",
+        "path",
+        "line",
+        "side",
+        "start_line",
+        "commit_sha",
+        "comments"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "resolvable": {
+                "const": false
+              }
+            },
+            "required": [
+              "resolvable"
+            ]
+          },
+          "then": {
+            "properties": {
+              "resolved": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
+    },
+    "check": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: the check's name.",
+          "minLength": 1,
+          "x-one-line": true
+        },
+        "state": {
+          "enum": [
+            "passing",
+            "failing",
+            "pending",
+            "skipped"
+          ]
+        },
+        "required": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "counted": {
+          "type": "boolean",
+          "description": "false for a GitLab allow_failure job and for skipped."
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-untrusted": true,
+          "description": "Untrusted: the check's page; null when absent or not http or https.",
+          "pattern": "^https?://"
+        },
+        "finished_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "state",
+        "required",
+        "counted",
+        "url",
+        "finished_at"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "skipped"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "counted": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ci": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": [
+            "passing",
+            "failing",
+            "pending",
+            "none"
+          ]
+        },
+        "head_sha": {
+          "$ref": "#/$defs/sha",
+          "description": "The commit the checks belong to; the PR's head with state none."
+        },
+        "for_current_head": {
+          "type": "boolean",
+          "description": "false forces state pending: an old commit's checks are not evidence about the PR's head. Always true on GitHub."
+        },
+        "complete": {
+          "type": "boolean",
+          "description": "false: a host cap cut the list, which turns passing into pending."
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/check"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "head_sha",
+        "for_current_head",
+        "complete",
+        "checks"
+      ],
+      "description": "passing means no counted check registered for this head is failing or pending, and at least one passed. It does not say which checks, that every expected check registered, or who ran them. state none is not passing: it means no evidence.",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "for_current_head": {
+                "const": false
+              }
+            },
+            "required": [
+              "for_current_head"
+            ]
+          },
+          "then": {
+            "properties": {
+              "state": {
+                "const": "pending"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "complete": {
+                "const": false
+              }
+            },
+            "required": [
+              "complete"
+            ]
+          },
+          "then": {
+            "properties": {
+              "state": {
+                "not": {
+                  "const": "passing"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "file": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: the file's path.",
+          "minLength": 1,
+          "x-one-line": true
+        },
+        "previous_path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-untrusted": true,
+          "description": "Untrusted: the path before a rename; null otherwise.",
+          "minLength": 1,
+          "x-one-line": true
+        },
+        "status": {
+          "enum": [
+            "added",
+            "modified",
+            "deleted",
+            "renamed"
+          ]
+        },
+        "additions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "deletions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "previous_path",
+        "status",
+        "additions",
+        "deletions"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "renamed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "previous_path": {
+                "type": "string"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "previous_path": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "pr_fields": {
+      "type": "object",
+      "description": "The PR object's fields; closed by unevaluatedProperties in each schema using it.",
+      "properties": {
+        "pr": {
+          "$ref": "#/$defs/pr"
+        },
+        "repo": {
+          "$ref": "#/$defs/repo_id"
+        },
+        "pr_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9:/_=-]{1,128}$",
+          "description": "Opaque, stable across renames: GitHub node id, GitLab global id."
+        },
+        "number": {
+          "$ref": "#/$defs/number"
+        },
+        "url": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: the PR's page, built by forgectl.",
+          "pattern": "^https://",
+          "minLength": 9
+        },
+        "backend": {
+          "$ref": "#/$defs/backend"
+        },
+        "title": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: the PR's title.",
+          "x-one-line": true
+        },
+        "body": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-untrusted": true,
+          "description": "Untrusted: the PR's description; null where the host has none."
+        },
+        "author": {
+          "$ref": "#/$defs/author"
+        },
+        "state": {
+          "enum": [
+            "open",
+            "closed",
+            "merged"
+          ]
+        },
+        "draft": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "$ref": "#/$defs/ts"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/ts",
+          "description": "Not a reliable change signal on either host."
+        },
+        "closed_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "null while open."
+        },
+        "merged_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "null until merged."
+        },
+        "merged_by": {
+          "$ref": "#/$defs/login_or_null"
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "x-untrusted": true,
+            "description": "Untrusted: a label's name; anyone with triage rights can set one.",
+            "x-one-line": true
+          },
+          "x-untrusted": true
+        },
+        "author_association": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-untrusted": true,
+          "description": "Untrusted: GitHub's value or null. May only make a tier stricter; never shows write access."
+        },
+        "head": {
+          "type": "object",
+          "properties": {
+            "sha": {
+              "$ref": "#/$defs/sha"
+            },
+            "ref": {
+              "type": "string",
+              "x-untrusted": true,
+              "description": "Untrusted: the head branch's name.",
+              "x-one-line": true
+            },
+            "repo": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/repo_id"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "null when the head project was deleted."
+            },
+            "is_fork": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "null when the head project was deleted."
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "sha",
+            "ref",
+            "repo",
+            "is_fork"
+          ]
+        },
+        "base": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string",
+              "x-untrusted": true,
+              "description": "Untrusted: the target branch's name. A non-default ref is how a stacked PR shows.",
+              "x-one-line": true
+            },
+            "sha": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/sha"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "null when the host has not computed it. Not the merge base."
+            },
+            "is_default": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "ref",
+            "sha",
+            "is_default"
+          ]
+        },
+        "merged_head_sha": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The PR's head when it merged; null until merged."
+        },
+        "merge_commit_sha": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The merged commit; null until merged, also for a host that fills it on open PRs."
+        },
+        "head_fetch_ref": {
+          "type": "string",
+          "pattern": "^refs/(?:pull|merge-requests)/[1-9][0-9]{0,9}/head$"
+        },
+        "mergeable": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "blocked_by": {
+          "$ref": "#/$defs/blocked_by"
+        },
+        "auto_merge": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "false once merged, whatever the host's stale field says."
+            },
+            "by": {
+              "$ref": "#/$defs/login_or_null"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "by"
+          ]
+        },
+        "merge_queue": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "A merge queue or merge train applies; null when a successful answer does not say. On GitLab an absent setting reads false."
+        },
+        "merge_methods_allowed": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/method"
+          },
+          "uniqueItems": true,
+          "description": "null when unknown."
+        },
+        "additions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "null where the host does not report it."
+        },
+        "deletions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "null where the host does not report it."
+        },
+        "changed_files": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "null where the host does not report an exact count."
+        },
+        "review_decision": {
+          "$ref": "#/$defs/review_decision"
+        },
+        "approvals": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Accounts whose latest state is approved, at any head, other than the author and with can_push not false."
+        },
+        "approvals_at_head": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Those at the current head, with can_push true, and not older than the PR's latest retarget. null is not approved."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "open"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "closed_at": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "merged"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "merged_at": {
+                "type": "string"
+              },
+              "auto_merge": {
+                "properties": {
+                  "enabled": {
+                    "const": false
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "merged_at": {
+                "type": "null"
+              },
+              "merged_by": {
+                "type": "null"
+              },
+              "merged_head_sha": {
+                "type": "null"
+              },
+              "merge_commit_sha": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "pr_list_item": {
+      "type": "object",
+      "properties": {
+        "pr": {
+          "$ref": "#/$defs/pr"
+        },
+        "pr_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9:/_=-]{1,128}$",
+          "description": "Opaque, stable across renames: GitHub node id, GitLab global id."
+        },
+        "repo": {
+          "$ref": "#/$defs/repo_id"
+        },
+        "number": {
+          "$ref": "#/$defs/number"
+        },
+        "url": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: the PR's page.",
+          "pattern": "^https://",
+          "minLength": 9
+        },
+        "title": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: the PR's title.",
+          "x-one-line": true
+        },
+        "author": {
+          "$ref": "#/$defs/author"
+        },
+        "state": {
+          "enum": [
+            "open",
+            "closed",
+            "merged"
+          ]
+        },
+        "draft": {
+          "type": "boolean"
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "x-untrusted": true,
+            "description": "Untrusted: a label's name; anyone with triage rights can set one.",
+            "x-one-line": true
+          },
+          "x-untrusted": true
+        },
+        "head": {
+          "type": "object",
+          "properties": {
+            "sha": {
+              "$ref": "#/$defs/sha"
+            },
+            "ref": {
+              "type": "string",
+              "x-untrusted": true,
+              "description": "Untrusted: the head branch's name.",
+              "x-one-line": true
+            },
+            "repo": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/repo_id"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "null when the head project was deleted."
+            },
+            "is_fork": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "null when the head project was deleted."
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "sha",
+            "ref",
+            "repo",
+            "is_fork"
+          ]
+        },
+        "base": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string",
+              "x-untrusted": true,
+              "description": "Untrusted: the target branch's name.",
+              "x-one-line": true
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "ref"
+          ]
+        },
+        "updated_at": {
+          "$ref": "#/$defs/ts"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pr",
+        "pr_id",
+        "repo",
+        "number",
+        "url",
+        "title",
+        "author",
+        "state",
+        "draft",
+        "labels",
+        "head",
+        "base",
+        "updated_at"
+      ]
+    },
+    "host_error": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "$ref": "#/$defs/host"
+        },
+        "code": {
+          "$ref": "#/$defs/error_code"
+        },
+        "message": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: may hold a host's message."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "code",
+        "message"
+      ]
+    },
+    "invalid_position": {
+      "type": "object",
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Position in the input's comments list."
+        },
+        "path": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: the path as given.",
+          "minLength": 1,
+          "x-one-line": true
+        },
+        "line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "side": {
+          "enum": [
+            "left",
+            "right",
+            null
+          ]
+        },
+        "start_line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "path",
+        "line",
+        "side",
+        "start_line"
+      ]
+    },
+    "error_details": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "x-untrusted": true,
+      "description": "Untrusted: may hold host text. Each key belongs to the code or reason that names it.",
+      "properties": {
+        "blocked_by": {
+          "$ref": "#/$defs/blocked_by",
+          "description": "not_ready."
+        },
+        "head_sha": {
+          "$ref": "#/$defs/sha",
+          "description": "stale_head (when known), merge_unverified: the head read."
+        },
+        "base_ref": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: stale_base: the PR's base.",
+          "x-one-line": true
+        },
+        "state": {
+          "enum": [
+            "open",
+            "closed",
+            "merged"
+          ],
+          "description": "not_open."
+        },
+        "observed": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: merge_unverified, auto_merge_unavailable, wrong_host_response: what the host showed."
+        },
+        "basis": {
+          "enum": [
+            "authenticated",
+            "configured_me"
+          ],
+          "description": "self_approval."
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "drafts_present."
+        },
+        "leftover_drafts": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "host_rejected: own drafts left after a failed cleanup."
+        },
+        "ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/id"
+          },
+          "description": "quick_action_ran, approved_stale_head (the head or base moved past the approval): the comments or approval to act on."
+        },
+        "index": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "body_too_large: position in the input's comments list; null for the main body."
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "body_too_large: the limit, in bytes."
+        },
+        "outcome": {
+          "enum": [
+            "attempted",
+            "merged",
+            "merged_unexpected",
+            "auto_merge_enabled",
+            "posted",
+            "approved",
+            "resolved",
+            "unresolved",
+            "failed",
+            "outcome_unknown",
+            "outcome_partial",
+            "quick_action_ran"
+          ],
+          "description": "audit_failed: the outcome the audit could not record."
+        },
+        "allowed": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/method"
+          },
+          "description": "method_required, method_not_allowed."
+        },
+        "invalid": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/invalid_position"
+          },
+          "minItems": 1,
+          "description": "invalid_position."
+        },
+        "landed": {
+          "type": "object",
+          "properties": {
+            "ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/id"
+              }
+            },
+            "thread_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/id"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "ids",
+            "thread_ids"
+          ],
+          "description": "outcome_partial: what was published."
+        },
+        "failed": {
+          "enum": [
+            "request_changes",
+            "approve",
+            "note"
+          ],
+          "description": "outcome_partial: the follow-up that failed."
+        },
+        "status": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 100,
+          "maximum": 599,
+          "description": "host_rejected: the host's HTTP status; null when it gave none."
+        },
+        "install": {
+          "type": "string",
+          "description": "tool_missing: the install command."
+        },
+        "variable": {
+          "$ref": "#/$defs/env_name",
+          "description": "auth_required: the variable to set."
+        },
+        "key": {
+          "type": "string",
+          "description": "config_invalid: the key at fault."
+        }
+      },
+      "additionalProperties": false
+    },
+    "would_refuse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/refusal_reason"
+            },
+            "message": {
+              "type": "string",
+              "x-untrusted": true,
+              "description": "Untrusted: may hold a host's message."
+            },
+            "details": {
+              "$ref": "#/$defs/error_details"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "reason",
+            "message",
+            "details"
+          ],
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "reason": {
+                    "const": "not_ready"
+                  }
+                },
+                "required": [
+                  "reason"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "details": {
+                    "type": "object",
+                    "required": [
+                      "blocked_by"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "On a --dry-run: the refusal a real run would meet (exit 20), else null."
+    },
+    "hook_entry_pre": {
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Run through sh -c in its own process group."
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "default": "30s"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cmd"
+      ],
+      "description": "Exit 13 escalates; any other non-zero exit or a timeout vetoes."
+    },
+    "hook_entry_post": {
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Run through sh -c in its own process group."
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "default": "30s"
+        },
+        "async": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run detached under a watchdog that enforces its timeout."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cmd"
+      ],
+      "description": "Failures are logged and warned, never fatal."
+    }
+  }
+}

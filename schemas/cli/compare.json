@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/cli/compare.json",
+  "title": "compare output",
+  "type": "object",
+  "properties": {
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "from_sha": {
+      "$ref": "../defs.json#/$defs/sha"
+    },
+    "to_sha": {
+      "$ref": "../defs.json#/$defs/sha"
+    },
+    "status": {
+      "enum": [
+        "ahead",
+        "behind",
+        "diverged",
+        "identical",
+        "unavailable"
+      ]
+    },
+    "diff": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "x-untrusted": true,
+      "description": "Untrusted: the sanitized unified diff from from_sha to to_sha: present on ahead, empty on identical, null on behind, diverged and unavailable."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "pr",
+    "from_sha",
+    "to_sha",
+    "status",
+    "diff"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": [
+              "behind",
+              "diverged",
+              "unavailable"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "diff": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "diff": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "identical"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "diff": {
+            "const": ""
+          }
+        }
+      }
+    }
+  ]
+}

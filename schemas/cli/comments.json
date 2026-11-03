@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/cli/comments.json",
+  "title": "comments output",
+  "type": "object",
+  "properties": {
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "head_sha": {
+      "$ref": "../defs.json#/$defs/sha"
+    },
+    "threads": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/thread"
+      }
+    },
+    "complete": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "pr",
+    "head_sha",
+    "threads",
+    "complete"
+  ]
+}

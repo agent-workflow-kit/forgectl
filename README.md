@@ -1,53 +1,96 @@
 # forgectl
 
-Normalized access to pull/merge requests across GitHub and GitLab.
+Normalized access to pull/merge requests across GitHub and GitLab: read them, post to them and merge them through one interface.
 
 ## Status
 
-Pre-design: interface not yet specified; see [docs/design.md](docs/design.md).
+Designed; not yet implemented. The contract is [docs/interface.md](docs/interface.md), interface 0.1.0-design. Rationale and live-verification results are in [docs/design.md](docs/design.md); the staged plan is in [docs/plan.md](docs/plan.md).
 
 ## Layer
 
-L1 (primitive).
+L1 (primitive). It works on its own at a terminal.
 
 ## What it does
 
-- Lists, shows and inspects pull/merge requests on GitHub and GitLab through one normalized interface (diffs, comments, reviews, CI status), including a filter for PRs where review is requested from you by name.
-- Merges a PR (`merge <pr> [--auto]`); `merge` is confirm-by-default, and `--auto` uses host-native auto-merge / merge-when-pipeline-succeeds. Non-interactive `merge --yes` requires `--expected-head <sha>` and refuses a stale head.
-- Reads git-host credentials from a per-host env var (`hosts.<host>.token_env`) and sets `GH_TOKEN`/`GITLAB_TOKEN` for each `gh`/`glab` call.
-- Ships an optional `browse` TUI.
-
-## Indicative commands
-
-Indicative, finalized in [docs/interface.md](docs/interface.md).
-
-```text
-  forgectl prs  (filters incl. "review requested from me by name")
-  forgectl show
-  forgectl diff
-  forgectl comments
-  forgectl reviews
-  forgectl ci
-  forgectl merge <pr> [--auto]
-  forgectl browse
-```
-
-## Dependencies
-
-- `gh` (backend): binding: TBD (A/B/C), decided in this tool's design session
-- `glab` (backend): binding: TBD (A/B/C), decided in this tool's design session
+- Lists PRs, including those requesting review from you directly by name, and returns one normalized shape for both hosts: facts, readiness, review requests, reviews, threads, CI, files and diffs.
+- Reports what it cannot determine as `null` or `complete: false` rather than guessing or truncating silently.
+- Merges with a checked head and base: a merge is refused if the PR moved (`stale_head`), was retargeted (`stale_base`) or is blocked (`not_ready`), and is verified afterward. Automation also needs passing CI on the head.
+- Posts reviews, comments and replies, resolves threads and approves, with GitLab quick actions and similar commands in posted text neutralized.
+- Talks only to hosts it knows: `github.com`, `gitlab.com` and the ones you declare.
 
 ## Install
 
 ```sh
 uv tool install git+https://github.com/agent-workflow-kit/forgectl
+uv tool install 'forgectl[tui] @ git+https://github.com/agent-workflow-kit/forgectl'  # with browse
 ```
+
+## Requirements
+
+| Dependency | Binding | Needed for | Install |
+|---|---|---|---|
+| `gh` | C (internal adapter) | GitHub hosts | <https://cli.github.com> |
+| `glab` | C (internal adapter) | GitLab hosts | <https://gitlab.com/gitlab-org/cli> |
+
+forgectl has no dependency on any other awkit tool.
+
+## Quick start
+
+```sh
+forgectl prs --review-requested-from me --state open
+forgectl show github.com/org/repo#42
+forgectl ci gitlab.example.com/group/project#7 --json
+forgectl merge github.com/org/repo#42 --expected-head <sha> --expected-base main --method squash
+```
+
+## Commands
+
+| Command | Purpose |
+|---|---|
+| `prs` | list PRs |
+| `show`, `snapshot` | PR facts; facts plus requests, reviews, threads and CI |
+| `diff`, `files` | diff (refused rather than cut off); changed paths |
+| `compare` | how two commits of a PR relate, with their diff when `to` is ahead of `from` |
+| `comments`, `reviews`, `ci` | threads, reviews, checks |
+| `access`, `whoami` | write access of a user; authenticated user per host |
+| `merge` | merge; `--auto` arms auto-merge, for a human only, as the head allows |
+| `review`, `comment`, `reply`, `approve` | posts |
+| `resolve`, `unresolve` | threads |
+| `browse` | optional TUI |
+| `export` | audit records |
+
+Writes are confirm-by-default: without a TTY and without `--yes` they exit 13. Outside an interactive run, `merge`, `review` and `approve` need `--expected-head` and `--expected-base`. To see a host's raw answer, use `gh api` or `glab api`.
+
+## Config
+
+`~/.config/forgectl/config.yaml`, documented in [config.example.yaml](config.example.yaml). A self-managed host needs one entry:
+
+```yaml
+hosts:
+  gitlab.example.com:
+    backend: gitlab
+    token_env: MY_GITLAB_TOKEN
+```
+
+An undeclared host is refused. Tokens come from `token_env`, then `token_command`; the CLI's stored login is used only when neither is configured. Token variables in your environment are not inherited by `gh` or `glab`, because they might belong to another host; name the one to use in `token_env`.
+
+## Hooks
+
+`pre-merge`, `post-merge`, `pre-post`, `post-post`. See [Hooks](docs/interface.md#hooks).
+
+## Exit codes
+
+0 success, 1 internal, 2 usage, 10 not found, 11 vetoed, 12 failed, 13 needs a human, 20 refused (with a `reason`). See [Exit codes](docs/interface.md#exit-codes).
+
+## Environment variables
+
+`FORGECTL_TIMEOUT`, `FORGECTL_RETRIES`, `FORGECTL_GH_BIN`, `FORGECTL_GLAB_BIN`, plus the variables you name in `token_env`. See [Environment variables](docs/interface.md#environment-variables).
 
 ## Documentation
 
-- [awkit architecture](../awkit-docs/architecture.md) ([published](https://github.com/agent-workflow-kit/awkit-docs/blob/main/architecture.md))
-- [awkit tool design guide](../awkit-docs/design-guide.md) ([published](https://github.com/agent-workflow-kit/awkit-docs/blob/main/design-guide.md))
+- [awkit architecture](https://github.com/agent-workflow-kit/awkit-docs/blob/main/architecture.md)
+- [awkit tool design guide](https://github.com/agent-workflow-kit/awkit-docs/blob/main/design-guide.md)
 
 ## License
 
-MIT — see LICENSE.
+MIT, see LICENSE.

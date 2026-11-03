@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/hooks/post-post.json",
+  "title": "post-post hook payload (stdin)",
+  "description": "After the call, with result and new ids, also on a failed attempt. Failures are logged and warned, never fatal.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "forgectl"
+    },
+    "hook": {
+      "const": "post-post"
+    },
+    "object_type": {
+      "const": "pr"
+    },
+    "object_id": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "repo": {
+      "$ref": "../defs.json#/$defs/repo_id"
+    },
+    "head_sha": {
+      "$ref": "../defs.json#/$defs/sha"
+    },
+    "actor": {
+      "$ref": "../defs.json#/$defs/actor"
+    },
+    "decision_ids": {
+      "$ref": "../defs.json#/$defs/decision_ids"
+    },
+    "action": {
+      "enum": [
+        "review",
+        "comment",
+        "reply",
+        "approve",
+        "resolve",
+        "unresolve"
+      ],
+      "description": "review for a review; event says which kind."
+    },
+    "event": {
+      "enum": [
+        "comment",
+        "request_changes",
+        "approve",
+        null
+      ],
+      "description": "The review's event; null for other actions."
+    },
+    "body_sha256": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/sha256"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Of the body as posted; for a review, of canonical JSON {body, comments} as posted, with body_bytes their total. null only when nothing is posted. Bodies are never in a payload."
+    },
+    "body_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "thread_id": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/id"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "resolve and unresolve; null otherwise."
+    },
+    "thread_author_is_self": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "resolve and unresolve; null otherwise."
+    },
+    "reply_to": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/id"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "reply; null otherwise."
+    },
+    "result": {
+      "enum": [
+        "posted",
+        "approved",
+        "failed",
+        "outcome_unknown",
+        "outcome_partial",
+        "quick_action_ran",
+        "resolved",
+        "unresolved"
+      ]
+    },
+    "ids": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/id"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "tool",
+    "hook",
+    "object_type",
+    "object_id",
+    "repo",
+    "head_sha",
+    "actor",
+    "decision_ids",
+    "action",
+    "event",
+    "body_sha256",
+    "body_bytes",
+    "thread_id",
+    "thread_author_is_self",
+    "reply_to",
+    "result",
+    "ids"
+  ]
+}

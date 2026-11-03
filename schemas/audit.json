@@ -1,47 +1,432 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "forgectl/audit",
+  "$id": "forgectl/audit.json",
   "title": "forgectl audit.jsonl record",
-  "description": "Audit record for forgectl. Whether this tool writes audit records is decided in its design session (architecture §14).",
+  "description": "Two records for every write that reached the host, sharing attempt_id: attempted before the call, then the outcome, including failed and unknown ones. A record with no outcome means forgectl died in between. A refusal or veto before a call goes to the log.",
   "type": "object",
   "properties": {
     "ts": {
+      "$ref": "defs.json#/$defs/ts"
+    },
+    "attempt_id": {
       "type": "string",
-      "format": "date-time"
+      "pattern": "^[A-Za-z0-9_-]{8,64}$",
+      "description": "Pairs a write's attempted record with its outcome."
     },
     "actor": {
-      "type": "string"
+      "$ref": "defs.json#/$defs/actor"
     },
     "decision_id": {
-      "oneOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      ]
+      "$ref": "defs.json#/$defs/decision_ids"
     },
     "target": {
-      "type": "string"
+      "$ref": "defs.json#/$defs/pr"
     },
     "action": {
-      "type": "string"
+      "enum": [
+        "merge",
+        "review",
+        "comment",
+        "reply",
+        "approve",
+        "resolve",
+        "unresolve"
+      ]
     },
     "inputs": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "head_sha": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "base_ref": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-untrusted": true,
+          "description": "Untrusted: the PR's base; filled for merge, review and approve.",
+          "x-one-line": true
+        },
+        "event": {
+          "enum": [
+            "comment",
+            "request_changes",
+            "approve",
+            null
+          ]
+        },
+        "body_sha256": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "method": {
+          "enum": [
+            "squash",
+            "merge",
+            "rebase",
+            null
+          ]
+        },
+        "thread_id": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "resolve and unresolve; null otherwise."
+        },
+        "reply_to": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "reply; null otherwise."
+        },
+        "config_hash": {
+          "$ref": "defs.json#/$defs/sha256",
+          "description": "sha256 of sorted-key JSON of the merged config after defaults, without flags."
+        },
+        "config_path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "null for the default."
+        },
+        "host_login": {
+          "$ref": "defs.json#/$defs/login_or_null"
+        },
+        "token_source": {
+          "enum": [
+            "token_env",
+            "token_command",
+            "stored_login",
+            "none"
+          ]
+        },
+        "stdin_tty": {
+          "type": "boolean"
+        },
+        "actor_source": {
+          "enum": [
+            "flag",
+            "tty",
+            "default"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "head_sha",
+        "base_ref",
+        "event",
+        "body_sha256",
+        "method",
+        "thread_id",
+        "reply_to",
+        "config_hash",
+        "config_path",
+        "host_login",
+        "token_source",
+        "stdin_tty",
+        "actor_source"
+      ]
     },
-    "result": {}
+    "result": {
+      "enum": [
+        "attempted",
+        "merged",
+        "merged_unexpected",
+        "auto_merge_enabled",
+        "posted",
+        "approved",
+        "resolved",
+        "unresolved",
+        "failed",
+        "outcome_unknown",
+        "outcome_partial",
+        "quick_action_ran"
+      ]
+    },
+    "override": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "override_blocks",
+          "override_escalation",
+          "allow_self"
+        ]
+      },
+      "uniqueItems": true,
+      "description": "Human overrides that changed the outcome."
+    },
+    "ids": {
+      "type": "array",
+      "items": {
+        "$ref": "defs.json#/$defs/id"
+      },
+      "description": "Outcome record only; empty where no comment was posted."
+    },
+    "observed": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "head_sha": {
+              "$ref": "defs.json#/$defs/sha"
+            },
+            "base_ref": {
+              "type": "string",
+              "x-untrusted": true,
+              "description": "Untrusted: the base it merged into.",
+              "x-one-line": true
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "head_sha",
+            "base_ref"
+          ],
+          "x-untrusted": true
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Outcome record only. Set with merged_unexpected: the head and base the PR merged at; null otherwise."
+    }
   },
+  "additionalProperties": false,
   "required": [
     "ts",
+    "attempt_id",
     "actor",
+    "decision_id",
     "target",
     "action",
-    "result"
+    "inputs",
+    "result",
+    "override"
   ],
-  "additionalProperties": true
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "result": {
+            "const": "attempted"
+          }
+        },
+        "required": [
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
+          "ids": false,
+          "observed": false
+        }
+      },
+      "else": {
+        "required": [
+          "ids",
+          "observed"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "result": {
+            "const": "merged_unexpected"
+          }
+        },
+        "required": [
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
+          "observed": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "merge"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "result": {
+            "enum": [
+              "attempted",
+              "merged",
+              "merged_unexpected",
+              "auto_merge_enabled",
+              "failed",
+              "outcome_unknown"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "review"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "result": {
+            "enum": [
+              "attempted",
+              "posted",
+              "approved",
+              "failed",
+              "outcome_unknown",
+              "outcome_partial",
+              "quick_action_ran"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "enum": [
+              "comment",
+              "reply"
+            ]
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "result": {
+            "enum": [
+              "attempted",
+              "posted",
+              "failed",
+              "outcome_unknown",
+              "quick_action_ran"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "approve"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "result": {
+            "enum": [
+              "attempted",
+              "approved",
+              "failed",
+              "outcome_unknown",
+              "outcome_partial",
+              "quick_action_ran"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "resolve"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "result": {
+            "enum": [
+              "attempted",
+              "resolved",
+              "failed",
+              "outcome_unknown"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "unresolve"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "result": {
+            "enum": [
+              "attempted",
+              "unresolved",
+              "failed",
+              "outcome_unknown"
+            ]
+          }
+        }
+      }
+    }
+  ]
 }

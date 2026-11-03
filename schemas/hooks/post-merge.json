@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/hooks/post-merge.json",
+  "title": "post-merge hook payload (stdin)",
+  "description": "After a verified merge or a failed attempt. Failures are logged and warned, never fatal.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "forgectl"
+    },
+    "hook": {
+      "const": "post-merge"
+    },
+    "object_type": {
+      "const": "pr"
+    },
+    "object_id": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "repo": {
+      "$ref": "../defs.json#/$defs/repo_id"
+    },
+    "head_sha": {
+      "$ref": "../defs.json#/$defs/sha"
+    },
+    "actor": {
+      "$ref": "../defs.json#/$defs/actor"
+    },
+    "decision_ids": {
+      "$ref": "../defs.json#/$defs/decision_ids"
+    },
+    "action": {
+      "const": "merge"
+    },
+    "auto": {
+      "type": "boolean"
+    },
+    "method": {
+      "enum": [
+        "squash",
+        "merge",
+        "rebase",
+        null
+      ]
+    },
+    "base_ref": {
+      "type": "string",
+      "x-untrusted": true,
+      "description": "Untrusted: the PR's base.",
+      "x-one-line": true
+    },
+    "expected_head": {
+      "$ref": "../defs.json#/$defs/sha",
+      "description": "Given, or pinned by an interactive run's first read."
+    },
+    "expected_base": {
+      "type": "string",
+      "x-untrusted": true,
+      "description": "Untrusted: the expected base: given, or pinned by an interactive run's first read.",
+      "x-one-line": true
+    },
+    "blocked_by": {
+      "$ref": "../defs.json#/$defs/blocked_by"
+    },
+    "override_blocks": {
+      "type": "boolean"
+    },
+    "observed": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "head_sha": {
+              "$ref": "../defs.json#/$defs/sha"
+            },
+            "base_ref": {
+              "type": "string",
+              "x-untrusted": true,
+              "description": "Untrusted: the base it merged into.",
+              "x-one-line": true
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "head_sha",
+            "base_ref"
+          ],
+          "x-untrusted": true
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Set with merged_unexpected: the head and base the PR merged at; null otherwise."
+    },
+    "result": {
+      "enum": [
+        "merged",
+        "merged_unexpected",
+        "auto_merge_enabled",
+        "failed",
+        "outcome_unknown"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "tool",
+    "hook",
+    "object_type",
+    "object_id",
+    "repo",
+    "head_sha",
+    "actor",
+    "decision_ids",
+    "action",
+    "auto",
+    "method",
+    "base_ref",
+    "expected_head",
+    "expected_base",
+    "blocked_by",
+    "override_blocks",
+    "observed",
+    "result"
+  ]
+}

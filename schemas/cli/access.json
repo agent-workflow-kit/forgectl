@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/cli/access.json",
+  "title": "access output",
+  "type": "object",
+  "properties": {
+    "repo": {
+      "$ref": "../defs.json#/$defs/repo_id"
+    },
+    "user": {
+      "type": "string",
+      "x-untrusted": true,
+      "description": "Untrusted: the user as given, or the host's form of it.",
+      "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254})$"
+    },
+    "write_access": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "null: unknown; consumers treat null as no write access."
+    },
+    "level": {
+      "enum": [
+        "admin",
+        "maintain",
+        "write",
+        "triage",
+        "read",
+        "none",
+        null
+      ],
+      "description": "Normalized permission level; null when unknown."
+    },
+    "source": {
+      "enum": [
+        "collaborator_permission",
+        "project_member"
+      ],
+      "description": "The host call that gave the answer."
+    },
+    "reason": {
+      "enum": [
+        "no_permission_to_read",
+        null
+      ],
+      "description": "Why write_access is null; null otherwise."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "repo",
+    "user",
+    "write_access",
+    "level",
+    "source",
+    "reason"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "write_access": {
+            "enum": [
+              true,
+              false
+            ]
+          }
+        },
+        "required": [
+          "write_access"
+        ]
+      },
+      "then": {
+        "properties": {
+          "reason": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ]
+}

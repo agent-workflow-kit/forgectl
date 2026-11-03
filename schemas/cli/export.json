@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/cli/export.json",
+  "title": "export output (--json)",
+  "description": "An array of audit records. Without --json each line is one record.",
+  "type": "array",
+  "items": {
+    "$ref": "../audit.json"
+  }
+}

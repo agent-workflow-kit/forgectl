@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/review-input.json",
+  "title": "review --file input",
+  "description": "The agent-written input of review. Every text passes through neutralizing before posting. Attribution footers are the caller's. forgectl also checks what a schema cannot: start_line <= line, an empty review (event comment with neither body nor comments; approve with neither is allowed).",
+  "type": "object",
+  "properties": {
+    "event": {
+      "enum": [
+        "comment",
+        "request_changes",
+        "approve"
+      ]
+    },
+    "body": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "x-untrusted": true,
+      "description": "Untrusted: the review's body."
+    },
+    "comments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "x-untrusted": true,
+            "description": "Untrusted: the file's new path.",
+            "minLength": 1
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Required: there are no file-level comments; those go in the body."
+          },
+          "side": {
+            "enum": [
+              "left",
+              "right"
+            ],
+            "default": "right"
+          },
+          "start_line": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "A range is on one side; forgectl checks start_line <= line."
+          },
+          "body": {
+            "type": "string",
+            "x-untrusted": true,
+            "description": "Untrusted: the comment's body.",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "line",
+          "body"
+        ]
+      },
+      "default": []
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "event"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "request_changes"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  ]
+}
