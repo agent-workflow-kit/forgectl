@@ -22,7 +22,6 @@ Status: planned, 2026-11-03. Implements [interface.md](interface.md) (normative)
 | `surface.py` | 0 | argparse surface (the full, frozen command and flag set), global flags, value grammars |
 | `humanactions.py` | 0 | actor, human-only gate, interactive runs, required expected values, confirmation rule |
 | `registry.py` | 0 | handler registry the commands plug into; `cli.py` dispatches through it |
-| `textsafe.py` | 0 | stand-in for `sanitize.py` until it lands (todo #6) |
 | `output.py`, `errors.py` | 0 | result objects, error envelope, exit codes, dry-run results |
 | `config.py` | 0 | YAML and `config.d` merge, Pydantic models, defaults equal to `config.example.yaml`, `FORGECTL_*` overrides, config hash |
 | `identifiers.py` | 0 | anchored parsers for PR references, repo ids, typed comment and thread ids, logins, refs; closed-host check |
