@@ -1,8 +1,8 @@
 """Table and property tests for ``forgectl.sanitize`` (interface: Sanitizing).
 
 The tables are written out from the interface, not derived from the code under test. Code points
-are chosen to be stable across the Unicode versions of the supported Pythons (3.12 and 3.13), so
-no assigned-in-one-version-only character appears here.
+are chosen to be stable across the Unicode versions of the Pythons CI runs (3.12 and 3.13), so no
+assigned-in-one-version-only character appears here.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ CF = [0x00AD, 0x0600, 0x061C, 0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0x2060, 0x
 BIDI = [0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069]
 SURROGATES = [0xD800, 0xDB7F, 0xDBFF, 0xDC00, 0xDCFF, 0xDFFF]
 PRIVATE_USE = [0xE000, 0xF8FF, 0xF0000, 0xFFFFD, 0x100000, 0x10FFFD]
-UNASSIGNED = [0x0378, 0x0379, 0x0FFFF, 0xFFFF, 0xFDD0, 0x10FFFF, 0xE0000]
+UNASSIGNED = [0x0378, 0x0379, 0x1FFFF, 0xFFFF, 0xFDD0, 0x10FFFF, 0xE0000]
 SEPARATORS = [0x2028, 0x2029]
 ORDINARY = [
     "a",

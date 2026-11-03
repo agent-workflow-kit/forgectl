@@ -12,8 +12,7 @@ Three entry points differ only in what they keep:
 - ``sanitize_diff``: a diff. As ``sanitize_text``, except a CR before LF stays as it is.
 
 ``sanitize_bytes`` decodes first: bytes that are not valid UTF-8 become U+FFFD. Sanitizing runs
-after
-JSON decoding, so a lone surrogate arrives as a ``str`` code point and is marked, never raised on.
+after JSON decoding, so a lone surrogate arrives as a ``str`` code point and is marked, not raised.
 
 The marked set is the Unicode categories ``Cc``, ``Cf``, ``Cs``, ``Co``, ``Cn``, ``Zl``, ``Zp`` plus
 the interface's explicit code points. ``Cn`` follows the running Python's Unicode database, so a
@@ -43,17 +42,17 @@ def _marker(ch: str) -> str:
     return f"<U+{ord(ch):04X}>"
 
 
-def _sanitize(text: str, *, keep: str, crlf: str | None) -> str:
+def _sanitize(text: str, *, keep: str, crlf: str) -> str:
     """Mark every unsafe character except those in ``keep``.
 
     ``crlf`` is what a CR immediately followed by LF becomes: ``"\\n"`` (then LF is handled as
-    usual, so a one-line field marks it), ``"\\r\\n"`` (kept as is) or ``None`` (no special case).
+    usual, so a one-line field marks it) or ``"\\r\\n"`` (kept as is).
     """
     out: list[str] = []
     i, n = 0, len(text)
     while i < n:
         ch = text[i]
-        if ch == "\r" and crlf is not None and text.startswith("\n", i + 1):
+        if ch == "\r" and text.startswith("\n", i + 1):
             out.append(crlf if crlf == "\r\n" or "\n" in keep else _marker("\n"))
             i += 2
             continue

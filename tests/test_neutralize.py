@@ -116,10 +116,21 @@ def test_a_line_starting_with_a_url_scheme_slash_pair_is_still_a_slash_line() ->
         ("text\x0c/approve", "text\n /approve"),
         ("text\x1c/approve\x1d/x\x1e/y", "text\n /approve\n /x\n /y"),
         ("<details>\n/approve\n</details>", "<details>\n /approve\n</details>"),
+        (">>>\n/approve\n>>>", ">>>\n /approve\n>>>"),
     ],
 )
 def test_fence_quote_comment_and_separator_breakouts(body: str, expected: str) -> None:
     assert neutralize(body).text == expected
+
+
+def test_a_gitlab_multi_line_quote_breakout_counts_the_slash_line() -> None:
+    assert neutralize(">>>\n/approve\n>>>").neutralized_lines == 1
+
+
+def test_a_bom_before_a_slash_is_not_a_line_start_slash() -> None:
+    # Only a first character "/" triggers; a leading U+FEFF is left as it is.
+    result = neutralize("\ufeff/approve")
+    assert (result.text, result.neutralized_lines) == ("\ufeff/approve", 0)
 
 
 def test_a_quote_marker_before_a_slash_is_not_a_line_start_slash() -> None:
