@@ -6,6 +6,9 @@ never truncate silently: a list a host cut off sets its `complete` flag to false
 
 Errors are raised as `forgectl.errors` types; the protocol does not catch them. Retries, the
 deadline, and merging results across hosts belong to `reads.py`, not to an adapter.
+
+The protocol covers reads only (Stage 1); the writes (`merge`, posts, `resolve`) are added in a
+later stage.
 """
 
 from __future__ import annotations
@@ -39,8 +42,10 @@ class Backend(Protocol):
         """`prs` on this backend's hosts."""
         ...
 
-    def get_pr(self, ref: m.PrRef) -> m.PR:
-        """`show`: the PR object, with `blocked_by` computed by `model.compute_blocked_by`."""
+    def get_pr(self, ref: m.PrRef) -> m.PrRead:
+        """`show`: the PR object, with `blocked_by` computed by `model.compute_blocked_by`, and
+        the `CI` from the same read, so `merge` and `pre-merge` never re-read CI at a possibly
+        different head."""
         ...
 
     def snapshot(self, ref: m.PrRef) -> m.Snapshot:

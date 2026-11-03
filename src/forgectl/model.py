@@ -11,7 +11,8 @@ warning is due.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+import unicodedata
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -31,7 +32,9 @@ CompareStatus = Literal["ahead", "behind", "diverged", "identical", "unavailable
 CheckSource = Literal["github_check", "github_status", "gitlab"]
 Warn = Callable[[str], None]
 
-INCOMPLETE_PARTS = frozenset({"review_requests", "reviews", "threads", "ci"})
+#: Parts a caller may name in `Snapshot.incomplete`; `ci` comes only from `ci.complete`.
+INCOMPLETE_PARTS = frozenset({"review_requests", "reviews", "threads"})
+_PR_STATES = frozenset({"open", "closed", "merged"})
 
 # --- tri-states --------------------------------------------------------------------------------
 # `true`, `false` or `null` (unknown). Consumers treat null as the safe answer.
@@ -138,6 +141,19 @@ def _same_account(login: str | None, id_: str | None, author: Author) -> bool:
     return ascii_lower(login) == ascii_lower(author.login)
 
 
+def _as_author(entry: LatestByReviewer) -> Author:
+    return Author(login=entry.login, id=entry.id, is_bot=None)
+
+
+def _reject_duplicate_accounts(entries: Iterable[LatestByReviewer]) -> None:
+    """`latest_by_reviewer` holds one entry per account (accounts compare as `_same_account`)."""
+    seen: list[Author] = []
+    for e in entries:
+        if any(_same_account(e.login, e.id, a) for a in seen):
+            raise ValueError(f"latest_by_reviewer names the account {e.login!r} twice")
+        seen.append(_as_author(e))
+
+
 # --- CI ----------------------------------------------------------------------------------------
 
 _CHECK_TABLE: dict[str, dict[str, CheckState]] = {
@@ -218,10 +234,13 @@ def gitlab_required(allow_failure: bool | None) -> bool | None:
 
 
 def clean_check_url(url: str | None) -> str | None:
-    """A check's url, or null for any scheme other than ``http`` or ``https``."""
-    if url is not None and url.startswith(("http://", "https://")):
-        return url
-    return None
+    """A check's url, or null for any scheme other than lowercase ``http://`` or ``https://``
+    and for a url holding whitespace or a control character."""
+    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        return None
+    if any(ch.isspace() or unicodedata.category(ch) == "Cc" for ch in url):
+        return None
+    return url
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,6 +257,8 @@ class Check:
             raise ValueError("a check needs a name")
         if self.state == "skipped" and self.counted:
             raise ValueError("a skipped check is never counted")
+        if self.url is not None and clean_check_url(self.url) is None:
+            raise ValueError("a check's url is null unless clean_check_url keeps it")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -250,8 +271,20 @@ class Check:
         }
 
     @property
-    def sort_key(self) -> tuple[str, str, str]:
-        return (self.name, self.url or "", self.state)
+    def sort_key(self) -> tuple[str, bool, str, str, bool, str, int, bool]:
+        """The spec's key (`name`, `url`, `state`; a null url first), then every other field, so
+        the order never depends on the input order."""
+        required = {None: 0, False: 1, True: 2}[self.required]
+        return (
+            self.name,
+            self.url is not None,
+            self.url or "",
+            self.state,
+            self.finished_at is not None,
+            self.finished_at or "",
+            required,
+            self.counted,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +295,14 @@ class CI:
     complete: bool
     checks: tuple[Check, ...] = ()
 
+    def __post_init__(self) -> None:
+        expected = _ci_state(self.checks, for_head=self.for_current_head, complete=self.complete)
+        if self.state != expected:
+            raise ValueError(
+                f"ci state {self.state!r} does not follow from its checks, for_current_head and"
+                f" complete, which give {expected!r}"
+            )
+
     def to_dict(self) -> dict[str, Any]:
         checks = sorted(self.checks, key=lambda c: c.sort_key)
         return {
@@ -271,6 +312,24 @@ class CI:
             "complete": self.complete,
             "checks": [c.to_dict() for c in checks],
         }
+
+
+def _ci_state(checks: Iterable[Check], *, for_head: bool, complete: bool) -> CiState:
+    """The one aggregation rule, shared by `aggregate_ci` and `CI`'s own check."""
+    counted = [c for c in checks if c.counted]
+    if any(c.state == "failing" for c in counted):
+        state: CiState = "failing"
+    elif any(c.state == "pending" for c in counted):
+        state = "pending"
+    elif any(c.state == "passing" for c in counted):
+        state = "passing"
+    else:
+        state = "none"
+    if not for_head:
+        return "pending"
+    if state == "passing" and not complete:
+        return "pending"
+    return state
 
 
 def aggregate_ci(
@@ -288,21 +347,8 @@ def aggregate_ci(
     ``pending``; an incomplete list turns ``passing`` into ``pending``. ``none`` is not passing.
     """
     listed = tuple(checks)
-    counted = [c for c in listed if c.counted]
-    if any(c.state == "failing" for c in counted):
-        state: CiState = "failing"
-    elif any(c.state == "pending" for c in counted):
-        state = "pending"
-    elif any(c.state == "passing" for c in counted):
-        state = "passing"
-    else:
-        state = "none"
-
     for_head = checks_sha is None or checks_sha == pr_head_sha
-    if not for_head:
-        state = "pending"
-    elif state == "passing" and not complete:
-        state = "pending"
+    state = _ci_state(listed, for_head=for_head, complete=complete)
     head = pr_head_sha if checks_sha is None or for_head else checks_sha
     return CI(
         state=state, head_sha=head, for_current_head=for_head, complete=complete, checks=listed
@@ -364,8 +410,8 @@ class Review:
 def count_approvals(entries: Iterable[LatestByReviewer], author: Author) -> int:
     """Accounts whose latest state is ``approved`` at any head, other than the author, with
     ``can_push`` not false (unknown still counts)."""
-    return sum(
-        1
+    return _count_distinct(
+        e
         for e in entries
         if e.state == "approved"
         and not _same_account(e.login, e.id, author)
@@ -373,13 +419,22 @@ def count_approvals(entries: Iterable[LatestByReviewer], author: Author) -> int:
     )
 
 
+def _count_distinct(entries: Iterable[LatestByReviewer]) -> int:
+    """Entries counted once per account, whatever the caller passed."""
+    seen: list[Author] = []
+    for e in entries:
+        if not any(_same_account(e.login, e.id, a) for a in seen):
+            seen.append(_as_author(e))
+    return len(seen)
+
+
 def _not_before(at: str | None, floor: str) -> bool:
     """Whether ``at`` is at or after ``floor``; any missing, naive or unparsable time is no."""
-    if at is None:
+    if not isinstance(at, str) or not isinstance(floor, str):
         return False
     try:
         t, f = datetime.fromisoformat(at), datetime.fromisoformat(floor)
-    except ValueError:
+    except (TypeError, ValueError):
         return False
     if t.tzinfo is None or f.tzinfo is None:
         return False
@@ -393,8 +448,8 @@ def count_approvals_at_head(
     head_sha: str,
     backend: BackendName,
     reset_approvals_on_push: bool | None = None,
-    retarget_at: str | None = None,
-    retarget_known: bool = True,
+    retarget_at: str | None,
+    retarget_known: bool,
 ) -> int | None:
     """Approvals at the current head with ``can_push`` true, or ``None`` (not approved).
 
@@ -402,24 +457,26 @@ def count_approvals_at_head(
     exists only when ``reset_approvals_on_push`` is true. An approval older than the latest
     retarget does not count, nor does one with no time when a retarget exists. If the retarget
     could not be determined (``retarget_known`` false) no approval counts and the answer is
-    ``None``.
+    ``None``. Every backend but ``gitlab`` compares the sha; an unknown backend is an error.
     """
+    if backend not in ("github", "gitlab"):
+        raise ValueError(f"unknown backend {backend!r}")
     if not retarget_known:
         return None
     if backend == "gitlab" and reset_approvals_on_push is not True:
         return None
-    total = 0
+    counted: list[LatestByReviewer] = []
     for e in entries:
         if e.state != "approved" or e.can_push is not True:
             continue
         if _same_account(e.login, e.id, author):
             continue
-        if backend == "github" and e.commit_sha != head_sha:
+        if backend != "gitlab" and e.commit_sha != head_sha:
             continue
         if retarget_at is not None and not _not_before(e.at, retarget_at):
             continue
-        total += 1
-    return total
+        counted.append(e)
+    return _count_distinct(counted)
 
 
 def github_review_decision(raw: str | None) -> ReviewDecision:
@@ -666,6 +723,18 @@ class PR:
     def __post_init__(self) -> None:
         if any(b.code is BlockerCode.CHECKS_ABSENT for b in self.blocked_by):
             raise ValueError("checks_absent never appears in a PR's blocked_by")
+        if self.state != "open":
+            if self.blocked_by:
+                raise ValueError("a closed or merged PR has an empty blocked_by")
+            if self.mergeable is not None:
+                raise ValueError("a closed or merged PR has mergeable null")
+        if self.state == "merged" and self.auto_merge.enabled:
+            raise ValueError("auto_merge.enabled is false once merged")
+        if self.state != "merged" and self.merge_commit_sha is not None:
+            raise ValueError("merge_commit_sha is null until merged")
+        methods = self.merge_methods_allowed
+        if methods is not None and len(set(methods)) != len(methods):
+            raise ValueError("merge_methods_allowed lists each method once")
 
     @property
     def approved_at_head(self) -> bool:
@@ -708,7 +777,7 @@ class PR:
             "auto_merge": self.auto_merge.to_dict(),
             "merge_queue": self.merge_queue,
             "merge_methods_allowed": (
-                None if self.merge_methods_allowed is None else list(self.merge_methods_allowed)
+                None if self.merge_methods_allowed is None else sorted(self.merge_methods_allowed)
             ),
             "additions": self.additions,
             "deletions": self.deletions,
@@ -737,6 +806,8 @@ class BlockFacts:
     reviews_required: bool = False
     #: GitLab `discussions_not_resolved`.
     host_discussions_unresolved: bool = False
+    #: GitLab `requested_changes`.
+    host_changes_requested: bool = False
     #: GitHub `mergeStateStatus: BLOCKED`.
     host_blocked: bool = False
     #: GitLab `ci_still_running`.
@@ -748,6 +819,11 @@ class BlockFacts:
     #: Host statuses no code covers; each becomes `{code: other, detail}`.
     other_details: tuple[str, ...] = ()
     latest_by_reviewer: tuple[LatestByReviewer, ...] = field(default=())
+
+    def __post_init__(self) -> None:
+        if self.state not in _PR_STATES:
+            raise ValueError(f"unknown PR state {self.state!r}")
+        _reject_duplicate_accounts(self.latest_by_reviewer)
 
 
 def compute_blocked_by(facts: BlockFacts) -> tuple[Blocker, ...]:
@@ -788,24 +864,22 @@ def compute_blocked_by(facts: BlockFacts) -> tuple[Blocker, ...]:
 
     if facts.reviews_required:
         add(C.REVIEWS_REQUIRED)
-    if any(
+    if facts.host_changes_requested or any(
         e.state == "changes_requested" and e.can_push is not False for e in facts.latest_by_reviewer
     ):
         add(C.CHANGES_REQUESTED)
     if facts.host_discussions_unresolved:
         add(C.DISCUSSIONS_UNRESOLVED)
 
-    if facts.host_blocked and not {b.code for b in out} - {C.OTHER}:
-        # BLOCKED and nothing above explains it.
-        explained = False
-        if facts.unresolved_threads is not None and facts.unresolved_threads > 0:
-            add(C.DISCUSSIONS_UNRESOLVED)
-            explained = True
+    if facts.host_blocked:
+        unexplained = not {b.code for b in out} - {C.OTHER}
         if ci.state == "none":
-            add(C.CHECKS_PENDING)  # a required check that has not reported
-            explained = True
-        if not explained:
-            add(C.OTHER, "BLOCKED")
+            add(C.CHECKS_PENDING)  # a required check that has not reported, whatever else blocks
+        if unexplained:
+            if facts.unresolved_threads is not None and facts.unresolved_threads > 0:
+                add(C.DISCUSSIONS_UNRESOLVED)
+            elif ci.state != "none":
+                add(C.OTHER, "BLOCKED")
 
     for detail in facts.other_details:
         add(C.OTHER, detail)
@@ -827,13 +901,17 @@ class Snapshot:
     rate_limit: RateLimit
     fetched_at: str
     #: Parts a host cut off, from `review_requests`, `reviews`, `threads`; `ci` follows
-    #: `ci.complete` and is added by `to_dict`.
+    #: `ci.complete` and is added by `to_dict`, never by the caller.
     incomplete: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         unknown = set(self.incomplete) - INCOMPLETE_PARTS
         if unknown:
-            raise ValueError(f"unknown snapshot parts: {sorted(unknown)}")
+            raise ValueError(
+                f"snapshot parts not allowed in incomplete: {sorted(unknown)}"
+                " (ci follows ci.complete)"
+            )
+        _reject_duplicate_accounts(self.latest_by_reviewer)
 
     def to_dict(self) -> dict[str, Any]:
         incomplete = set(self.incomplete)
@@ -917,6 +995,9 @@ class ReviewsResult:
     approvals: int
     approvals_at_head: int | None
     complete: bool
+
+    def __post_init__(self) -> None:
+        _reject_duplicate_accounts(self.latest_by_reviewer)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1083,14 +1164,54 @@ class PrQuery:
 
 
 @dataclass(frozen=True, slots=True)
+class PrListItem:
+    """One item of `prs` (`defs#/$defs/pr_list_item`); a request instance needs `snapshot`."""
+
+    pr: str
+    pr_id: str
+    repo: str
+    number: int
+    url: str
+    title: str
+    author: Author
+    state: PrState
+    draft: bool
+    labels: tuple[str, ...]
+    head: Head
+    base_ref: str
+    updated_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "pr": self.pr,
+            "pr_id": self.pr_id,
+            "repo": self.repo,
+            "number": self.number,
+            "url": self.url,
+            "title": self.title,
+            "author": self.author.to_dict(),
+            "state": self.state,
+            "draft": self.draft,
+            "labels": sorted(self.labels),
+            "head": self.head.to_dict(),
+            "base": {"ref": self.base_ref},
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class PrPage:
     """One backend's answer to `prs`: PRs newest `updated_at` first, then `pr`."""
 
-    items: tuple[PR, ...]
+    items: tuple[PrListItem, ...]
     complete: bool
     rate_limit: RateLimit
 
 
-def ordered(values: Sequence[str]) -> list[str]:
-    """Sort strings by code point (Python's default); named so call sites say why."""
-    return sorted(values)
+@dataclass(frozen=True, slots=True)
+class PrRead:
+    """`get_pr`'s answer: the PR and the CI of the same read, so a caller never pairs a PR with
+    checks read at another head."""
+
+    pr: PR
+    ci: CI

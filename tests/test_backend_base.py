@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import get_type_hints
+
 from forgectl import model as m
 from forgectl.backends.base import READ_METHODS, Backend
 
@@ -10,7 +12,7 @@ class _Full:
     name = "github"
 
     def list_prs(self, query: m.PrQuery) -> m.PrPage: ...
-    def get_pr(self, ref: m.PrRef) -> m.PR: ...
+    def get_pr(self, ref: m.PrRef) -> m.PrRead: ...
     def snapshot(self, ref: m.PrRef) -> m.Snapshot: ...
     def diff(self, ref: m.PrRef) -> m.DiffResult: ...
     def compare(self, ref: m.PrRef, from_sha: str, to_sha: str) -> m.CompareResult: ...
@@ -25,7 +27,7 @@ class _Full:
 class _NoCompare:
     name = "gitlab"
 
-    def get_pr(self, ref: m.PrRef) -> m.PR: ...
+    def get_pr(self, ref: m.PrRef) -> m.PrRead: ...
 
 
 def test_a_full_adapter_satisfies_the_protocol() -> None:
@@ -50,3 +52,8 @@ def test_pr_ref_builds_the_output_form_and_rejects_bad_numbers() -> None:
         except ValueError:
             continue
         raise AssertionError(f"accepted {bad!r}")
+
+
+def test_get_pr_returns_the_pr_and_its_ci_from_one_read() -> None:
+    assert get_type_hints(Backend.get_pr)["return"] is m.PrRead
+    assert [f for f in m.PrRead.__dataclass_fields__] == ["pr", "ci"]

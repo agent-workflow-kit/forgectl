@@ -200,27 +200,50 @@ def test_skipped_check_cannot_be_counted() -> None:
         m.Check(name="a", state="skipped", required=None, counted=True, url=None, finished_at=None)
 
 
-@pytest.mark.parametrize(
-    ("kind", "raw", "allow_failure", "expected"),
-    [
-        ("github_check", "SUCCESS", None, "passing"),
-        ("github_check", "TIMED_OUT", None, "failing"),
-        ("github_check", "STALE", None, "failing"),
-        ("github_check", "IN_PROGRESS", None, "pending"),
-        ("github_check", "NEUTRAL", None, "skipped"),
-        ("github_check", "SKIPPED", None, "skipped"),
-        ("github_status", "ERROR", None, "failing"),
-        ("github_status", "EXPECTED", None, "pending"),
-        ("github_status", "SUCCESS", None, "passing"),
-        ("gitlab", "success", None, "passing"),
-        ("gitlab", "canceled", None, "failing"),
-        ("gitlab", "waiting_for_callback", None, "pending"),
-        ("gitlab", "skipped", None, "skipped"),
-        ("gitlab", "manual", False, "pending"),
-        ("gitlab", "manual", True, "skipped"),
-        ("gitlab", "manual", None, "pending"),
+# Every row of the interface's check-state table (CI object), one column per source.
+_STATE_ROWS: list[tuple[str, str, bool | None, str]] = [
+    *[("github_check", r, None, "passing") for r in ("SUCCESS",)],
+    *[
+        ("github_check", r, None, "failing")
+        for r in (
+            "FAILURE",
+            "TIMED_OUT",
+            "CANCELLED",
+            "ACTION_REQUIRED",
+            "STARTUP_FAILURE",
+            "STALE",
+        )
     ],
-)
+    *[
+        ("github_check", r, None, "pending")
+        for r in ("QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED")
+    ],
+    *[("github_check", r, None, "skipped") for r in ("NEUTRAL", "SKIPPED")],
+    ("github_status", "SUCCESS", None, "passing"),
+    *[("github_status", r, None, "failing") for r in ("FAILURE", "ERROR")],
+    *[("github_status", r, None, "pending") for r in ("PENDING", "EXPECTED")],
+    ("gitlab", "success", None, "passing"),
+    *[("gitlab", r, None, "failing") for r in ("failed", "canceled")],
+    *[
+        ("gitlab", r, None, "pending")
+        for r in (
+            "created",
+            "pending",
+            "preparing",
+            "running",
+            "scheduled",
+            "waiting_for_resource",
+            "waiting_for_callback",
+        )
+    ],
+    ("gitlab", "manual", False, "pending"),
+    ("gitlab", "skipped", None, "skipped"),
+    ("gitlab", "manual", True, "skipped"),
+    ("gitlab", "manual", None, "pending"),  # unknown allow_failure is the stricter answer
+]
+
+
+@pytest.mark.parametrize(("kind", "raw", "allow_failure", "expected"), _STATE_ROWS)
 def test_check_state_mapping(
     kind: str, raw: str, allow_failure: bool | None, expected: str
 ) -> None:
@@ -256,6 +279,14 @@ def test_counted_rule_and_required_and_url() -> None:
     assert m.clean_check_url("http://ci.example/1") == "http://ci.example/1"
     for bad in ("javascript:alert(1)", "ftp://x", "HTTPS://x", "//x", "", None):
         assert m.clean_check_url(bad) is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["https://x/a\nb", "https://x/a\tb", "https://x/a b", "https://x/\x00", "https://x/\x7f"],
+)
+def test_check_url_with_whitespace_or_control_is_null(bad: str) -> None:
+    assert m.clean_check_url(bad) is None
 
 
 # --- blocked_by --------------------------------------------------------------------------------
@@ -316,8 +347,22 @@ BLOCK_TABLE: list[tuple[str, dict[str, Any], list[tuple[str, str | None]]]] = [
         [("checks_pending", None)],
     ),
     (
-        "BLOCKED explained by reviews",
+        "BLOCKED + reviews_required + no checks",
         {"ci": ci_of(), "host_blocked": True, "reviews_required": True},
+        [("checks_pending", None), ("reviews_required", None)],
+    ),
+    (
+        "BLOCKED + changes_requested + no checks",
+        {
+            "ci": ci_of(),
+            "host_blocked": True,
+            "latest_by_reviewer": (entry("bob", "changes_requested"),),
+        },
+        [("changes_requested", None), ("checks_pending", None)],
+    ),
+    (
+        "BLOCKED explained by reviews",
+        {"host_blocked": True, "reviews_required": True},
         [("reviews_required", None)],
     ),
     (
@@ -374,6 +419,11 @@ BLOCK_TABLE: list[tuple[str, dict[str, Any], list[tuple[str, str | None]]]] = [
     (
         "changes requested, can_push unknown still blocks",
         {"latest_by_reviewer": (entry("bob", "changes_requested", can_push=None),)},
+        [("changes_requested", None)],
+    ),
+    (
+        "GitLab requested_changes with no entry",
+        {"host_changes_requested": True},
         [("changes_requested", None)],
     ),
     (
@@ -477,6 +527,8 @@ def test_author_compare_falls_back_to_login_when_no_id() -> None:
 
 
 def gh_at_head(entries: list[m.LatestByReviewer], **kw: Any) -> int | None:
+    kw.setdefault("retarget_at", None)
+    kw.setdefault("retarget_known", True)
     return m.count_approvals_at_head(entries, ALICE, head_sha=H, backend="github", **kw)
 
 
@@ -527,6 +579,8 @@ def test_github_approvals_at_head(
 def test_gitlab_approvals_at_head(
     reset: bool | None, entries: list[m.LatestByReviewer], kw: dict[str, Any], expected: int | None
 ) -> None:
+    kw.setdefault("retarget_at", None)
+    kw.setdefault("retarget_known", True)
     got = m.count_approvals_at_head(
         entries, ALICE, head_sha=H, backend="gitlab", reset_approvals_on_push=reset, **kw
     )
@@ -914,3 +968,205 @@ def test_thread_rules() -> None:
             commit_sha=None,
             comments=(),
         )
+
+
+# --- review round 1: constructor invariants and fail-closed inputs ------------------------------
+
+
+def test_ci_rejects_a_state_its_checks_do_not_give() -> None:
+    with pytest.raises(ValueError):
+        m.CI(state="passing", head_sha=H, for_current_head=True, complete=True, checks=())
+    with pytest.raises(ValueError):
+        m.CI(
+            state="none",
+            head_sha=H,
+            for_current_head=True,
+            complete=True,
+            checks=(check("a", "failing"),),
+        )
+
+
+def test_ci_not_for_the_head_must_be_pending() -> None:
+    with pytest.raises(ValueError):
+        m.CI(
+            state="passing",
+            head_sha=OLD,
+            for_current_head=False,
+            complete=True,
+            checks=(check("a", "passing"),),
+        )
+
+
+def test_ci_incomplete_is_never_passing() -> None:
+    with pytest.raises(ValueError):
+        m.CI(
+            state="passing",
+            head_sha=H,
+            for_current_head=True,
+            complete=False,
+            checks=(check("a", "passing"),),
+        )
+
+
+def test_ci_built_by_aggregation_is_accepted() -> None:
+    ci = ci_of(check("a", "passing"), complete=False)
+    assert m.CI(ci.state, ci.head_sha, ci.for_current_head, ci.complete, ci.checks) == ci
+
+
+@pytest.mark.parametrize("bad", ["javascript:x", "HTTPS://x", "https://x/a\nb", ""])
+def test_check_rejects_a_url_the_cleaner_would_null(bad: str) -> None:
+    with pytest.raises(ValueError):
+        check("a", "passing", url=bad)
+
+
+def test_approvals_count_distinct_accounts() -> None:
+    dup = [entry("b", id_="2"), entry("B", id_="2")]
+    assert m.count_approvals(dup, ALICE) == 1
+    got = m.count_approvals_at_head(
+        dup, ALICE, head_sha=H, backend="github", retarget_at=None, retarget_known=True
+    )
+    assert got == 1
+    no_id = [
+        m.LatestByReviewer("b", None, "approved", H, T1, True),
+        m.LatestByReviewer("B", None, "approved", H, T1, True),
+    ]
+    assert m.count_approvals(no_id, ALICE) == 1
+
+
+def test_duplicate_accounts_in_latest_by_reviewer_are_rejected() -> None:
+    dup = (entry("b", id_="2"), entry("B", id_="2"))
+    with pytest.raises(ValueError):
+        make_snapshot(latest_by_reviewer=dup)
+    with pytest.raises(ValueError):
+        facts(latest_by_reviewer=dup)
+    with pytest.raises(ValueError):
+        m.ReviewsResult(
+            pr="github.com/o/r#7",
+            head_sha=H,
+            reviews=(),
+            latest_by_reviewer=dup,
+            review_decision="approved",
+            approvals=1,
+            approvals_at_head=1,
+            complete=True,
+        )
+
+
+def test_approvals_at_head_fails_closed_on_unknown_backend() -> None:
+    with pytest.raises(ValueError):
+        m.count_approvals_at_head(
+            [entry("bob", sha=OLD)],
+            ALICE,
+            head_sha=H,
+            backend="bitbucket",  # type: ignore[arg-type]
+            retarget_at=None,
+            retarget_known=True,
+        )
+
+
+def test_approvals_at_head_needs_the_retarget_arguments() -> None:
+    with pytest.raises(TypeError):
+        m.count_approvals_at_head([], ALICE, head_sha=H, backend="github")  # type: ignore[call-arg]
+
+
+def test_block_facts_reject_an_unknown_state() -> None:
+    with pytest.raises(ValueError):
+        facts(state="locked")
+
+
+def test_a_non_string_time_does_not_count_after_a_retarget() -> None:
+    e = entry("bob", at=5)  # type: ignore[arg-type]
+    assert gh_at_head([e], retarget_at=T1) == 0
+
+
+def test_snapshot_rejects_ci_in_caller_incomplete() -> None:
+    with pytest.raises(ValueError):
+        make_snapshot(incomplete=("ci",))
+
+
+def test_check_order_is_total() -> None:
+    def full(finished: str | None, required: bool | None, counted: bool) -> m.Check:
+        return m.Check(
+            name="a",
+            state="failing",
+            required=required,
+            counted=counted,
+            url="https://x/1",
+            finished_at=finished,
+        )
+
+    checks = [
+        full(T1, None, True),
+        full(T0, True, True),
+        full(None, False, False),
+        full(T0, None, True),
+        full(T0, True, False),
+    ]
+    a = ci_of(*checks).to_dict()
+    b = ci_of(*reversed(checks)).to_dict()
+    assert a == b
+
+
+def test_merge_methods_are_sorted_and_unique() -> None:
+    d = make_pr(merge_methods_allowed=("squash", "merge", "rebase")).to_dict()
+    assert d["merge_methods_allowed"] == ["merge", "rebase", "squash"]
+    with pytest.raises(ValueError):
+        make_pr(merge_methods_allowed=("squash", "squash"))
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"state": "closed", "closed_at": T1, "blocked_by": (m.Blocker(m.BlockerCode.DRAFT),)},
+        {"state": "closed", "closed_at": T1, "mergeable": True},
+        {
+            "state": "merged",
+            "closed_at": T1,
+            "merged_at": T1,
+            "mergeable": None,
+            "auto_merge": m.AutoMerge(enabled=True, by="bob"),
+        },
+        {"merge_commit_sha": NEW},
+        {"state": "closed", "closed_at": T1, "mergeable": None, "merge_commit_sha": NEW},
+    ],
+)
+def test_pr_rejects_fields_its_state_forbids(over: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        make_pr(**over)
+
+
+def test_merged_pr_validates() -> None:
+    pr = make_pr(
+        state="merged",
+        closed_at=T1,
+        merged_at=T1,
+        merged_by="bob",
+        merged_head_sha=H,
+        merge_commit_sha=NEW,
+        mergeable=None,
+    )
+    validate(pr.to_dict(), "forgectl/cli/show.json")
+
+
+def test_pr_list_item_validates_and_sorts_labels() -> None:
+    item = m.PrListItem(
+        pr="github.com/o/r#7",
+        pr_id="PR_abc",
+        repo="github.com/o/r",
+        number=7,
+        url="https://github.com/o/r/pull/7",
+        title="t",
+        author=author(),
+        state="open",
+        draft=False,
+        labels=("z", "a"),
+        head=m.Head(sha=H, ref="feat", repo="github.com/o/r", is_fork=False),
+        base_ref="main",
+        updated_at=T1,
+    )
+    d = item.to_dict()
+    validate(d, "forgectl/defs.json#/$defs/pr_list_item")
+    assert d["labels"] == ["a", "z"]
+    assert d["base"] == {"ref": "main"}
+    page = m.PrPage(items=(item,), complete=True, rate_limit=m.RateLimit(None, None, None))
+    assert page.items == (item,)

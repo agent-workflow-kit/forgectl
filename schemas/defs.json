@@ -755,7 +755,8 @@
           ],
           "x-untrusted": true,
           "description": "Untrusted: the check's page; null when absent or not http or https.",
-          "pattern": "^https?://"
+          "pattern": "^https?://",
+          "x-one-line": true
         },
         "finished_at": {
           "oneOf": [
