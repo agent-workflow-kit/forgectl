@@ -7,11 +7,13 @@ one of these functions, so a shape the schemas do not allow fails the test.
 from __future__ import annotations
 
 import json
+import re
+from datetime import datetime
 from functools import cache
 from pathlib import Path
 from typing import Any
 
-from jsonschema import Draft202012Validator, ValidationError
+from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 from referencing import Registry, Resource
 from referencing.exceptions import Unresolvable
 from referencing.jsonschema import DRAFT202012
@@ -19,6 +21,9 @@ from referencing.jsonschema import DRAFT202012
 SCHEMA_DIR = Path(__file__).resolve().parents[2] / "schemas"
 
 HOOKS = ("pre-merge", "post-merge", "pre-post", "post-post")
+RFC3339 = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})"
+)
 
 
 class UnknownSchemaError(KeyError):
@@ -49,18 +54,38 @@ def schema_ids() -> list[str]:
     return sorted(_documents())
 
 
-def _schema(schema_id: str) -> Any:
+def is_rfc3339(value: object) -> bool:
+    """RFC 3339 date-time, checked without the optional ``rfc3339-validator`` package."""
+    if not isinstance(value, str):
+        return True  # formats apply to strings only
+    if not RFC3339.fullmatch(value):
+        return False
     try:
-        return _documents()[schema_id]
-    except KeyError:
-        raise UnknownSchemaError(schema_id) from None
+        datetime.fromisoformat(value.replace("t", "T").replace("z", "Z"))
+    except ValueError:
+        return False
+    return True
+
+
+@cache
+def format_checker() -> FormatChecker:
+    """The draft's format checkers, with ``date-time`` always enforced."""
+    checker = FormatChecker()
+    checker.checks("date-time")(is_rfc3339)
+    return checker
 
 
 def validate(instance: Any, schema_id: str) -> None:
-    """Raise ``ValidationError`` unless ``instance`` satisfies the schema with this ``$id``."""
-    schema = _schema(schema_id)
+    """Raise ``ValidationError`` unless ``instance`` satisfies the schema with this ``$id``.
+
+    ``schema_id`` may carry a fragment, such as ``forgectl/defs.json#/$defs/ts``.
+    """
+    try:
+        registry().resolver().lookup(schema_id)
+    except Unresolvable:
+        raise UnknownSchemaError(schema_id) from None
     validator = Draft202012Validator(
-        schema, registry=registry(), format_checker=Draft202012Validator.FORMAT_CHECKER
+        {"$ref": schema_id}, registry=registry(), format_checker=format_checker()
     )
     validator.validate(instance)
 

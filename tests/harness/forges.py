@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import stat
 import sys
 from dataclasses import dataclass, field
@@ -18,7 +19,17 @@ from typing import Any
 
 FAKEBIN = Path(__file__).resolve().parents[1] / "fakebin"
 FAKE_PROGRAM = FAKEBIN / "_forgefake.py"
-MAX_SHEBANG = 120
+
+
+def shebang_limit(system: str | None = None, release: str | None = None) -> int:
+    """The kernel's ``#!`` line limit: 255 bytes on Linux 5.1 and later, else 127."""
+    system = platform.system() if system is None else system
+    release = platform.release() if release is None else release
+    if system == "Linux":
+        numbers = [int(n) for n in release.split("-")[0].split(".")[:2] if n.isdigit()]
+        if len(numbers) == 2 and tuple(numbers) >= (5, 1):
+            return 255
+    return 127
 
 
 @dataclass
@@ -37,11 +48,17 @@ class Call:
     pid: int
     pgid: int
     repo_context: str | None
+    config_dir: str | None = None  # the backend's config dir variable, as received
+    config_dir_real: str | None = None
+    config_entries: list[str] | None = None  # its listing when the program started
+    config_mode: int | None = None
     stdin: str | None = None
     exit: int | None = None  # None: still running, or killed by a signal
     signals: list[str] = field(default_factory=list)
     request: dict[str, Any] | None = None
     unmatched: bool = False
+    defaulted: bool = False  # answered by ``default_answer``
+    not_modelled: bool = False  # exit 70: the fake refused something it does not model
     rule: int | None = None
     placeholders: bool = False
 
@@ -53,12 +70,20 @@ class Call:
     def token_sent(self) -> str | None:
         return (self.request or {}).get("token_sent")
 
+    @property
+    def requests(self) -> list[dict[str, Any]]:
+        """The first request and one more per redirect hop followed, each with its token."""
+        if self.request is None:
+            return []
+        return [self.request, *self.request.get("hops", [])]
+
 
 class FakeForges:
     def __init__(self, root: Path) -> None:
         self.bin_dir = root / "fakebin"
         self.bin_dir.mkdir(parents=True)
         self.allow_unmatched = False
+        self.allow_not_modelled = False  # separate opt-in: allow_unmatched never waives these
         self._rules: list[dict[str, Any]] = []
         self._keyring: dict[str, str] = {}
         self._default: dict[str, Any] | None = None
@@ -68,7 +93,7 @@ class FakeForges:
 
     def _install(self, backend: str) -> None:
         shebang = f"#!{sys.executable} -I"
-        if len(shebang) > MAX_SHEBANG or " " in sys.executable:
+        if len(shebang) > shebang_limit() or " " in sys.executable:
             raise RuntimeError(f"interpreter path unusable in a shebang: {sys.executable}")
         body = (
             f"{shebang}\n"
@@ -110,10 +135,19 @@ class FakeForges:
         stderr: str | None = None,
         exit: int | None = None,
         delay: float | None = None,
-        hang: bool = False,
+        hang: bool | float = False,
         die: str | None = None,
+        redirect: str | None = None,
     ) -> None:
-        """Script an answer. Rules are tried in order; the first match with uses left wins."""
+        """Script an answer. Rules are tried in order; the first match with uses left wins.
+
+        ``redirect`` is a ``Location`` (absolute or relative): the fake follows it as the real
+        programs do (``status`` 301, 302 or 303 turns a POST into a GET without a body, 307 and
+        308 keep both; default 302) and the followed request is matched against the rules again,
+        with ``endpoint`` the new URL's path without its leading slash.
+        """
+        if redirect is not None and status == 200:
+            status = 302
         match = {
             k: v
             for k, v in dict(
@@ -140,7 +174,9 @@ class FakeForges:
         )
         rule.update({k: v for k, v in optional.items() if v is not None})
         if hang:
-            rule["hang"] = True
+            rule["hang"] = hang  # True: until signaled (capped at 120 s); a number: that cap
+        if redirect is not None:
+            rule["redirect"] = {"location": redirect}
         self._rules.append(rule)
         self._write_script()
 
@@ -149,20 +185,22 @@ class FakeForges:
         self._write_script()
 
     def keyring_login(self, backend: str, host: str, token: str) -> None:
-        """A login in the OS keyring, visible only when the caller passes a session bus variable."""
+        """A keyring login: reached only with a session bus variable, and never by ``gh api``."""
         self._keyring[f"{backend}:{host}"] = token
         self._write_script()
 
     @staticmethod
     def stored_login(config_dir: Path, backend: str, host: str, token: str) -> None:
-        """A login in ``hosts.yml`` (gh) or ``config.yml`` (glab) under ``config_dir``."""
+        """A login in ``hosts.yml`` (gh) or ``config.yml`` (glab, 0600) under ``config_dir``."""
         config_dir.mkdir(parents=True, exist_ok=True)
         if backend == "gh":
             text = f"{host}:\n    oauth_token: {token}\n    user: someone\n"
             (config_dir / "hosts.yml").write_text(text, encoding="utf-8")
         else:
-            text = f"hosts:\n  {host}:\n    token: {token}\n"
-            (config_dir / "config.yml").write_text(text, encoding="utf-8")
+            text = f"hosts:\n    {host}:\n        token: {token}\n"
+            path = config_dir / "config.yml"
+            path.write_text(text, encoding="utf-8")
+            path.chmod(0o600)  # glab refuses any other mode
 
     # environment -------------------------------------------------------------------------
 
@@ -196,6 +234,10 @@ class FakeForges:
                     pid=rec["pid"],
                     pgid=rec["pgid"],
                     repo_context=rec["repo_context"],
+                    config_dir=rec.get("config_dir"),
+                    config_dir_real=rec.get("config_dir_real"),
+                    config_entries=rec.get("config_entries"),
+                    config_mode=rec.get("config_mode"),
                 )
                 order.append(cid)
             elif phase == "stdin":
@@ -207,6 +249,8 @@ class FakeForges:
                 call.exit = rec["exit"]
                 call.request = rec.get("request")
                 call.unmatched = bool(rec.get("unmatched"))
+                call.defaulted = bool(rec.get("defaulted"))
+                call.not_modelled = bool(rec.get("not_modelled"))
                 call.rule = rec.get("rule")
                 call.placeholders = bool(rec.get("placeholders"))
         found = [merged[c] for c in order]
@@ -214,3 +258,26 @@ class FakeForges:
 
     def unmatched(self) -> list[Call]:
         return [c for c in self.calls() if c.unmatched]
+
+    def not_modelled_calls(self) -> list[Call]:
+        return [c for c in self.calls() if c.not_modelled or c.placeholders]
+
+    def check_teardown(self) -> None:
+        """Fail on calls the fake did not model (always, unless ``allow_not_modelled``) and on
+        requests with no scripted answer (unless ``allow_unmatched``)."""
+        problems: list[str] = []
+        if not self.allow_not_modelled:
+            refused = self.not_modelled_calls()
+            if refused:
+                problems.append(
+                    "calls the fake does not model (set allow_not_modelled to accept): "
+                    + "; ".join(f"{c.backend} {' '.join(c.argv)}" for c in refused)
+                )
+        if not self.allow_unmatched:
+            unmatched = self.unmatched()
+            if unmatched:
+                problems.append(
+                    "requests with no scripted answer (set allow_unmatched to accept): "
+                    + "; ".join(f"{c.backend} {' '.join(c.argv)}" for c in unmatched)
+                )
+        assert not problems, "\n".join(problems)

@@ -1,24 +1,39 @@
 """Fake ``gh`` and ``glab`` for process tests (standard library only).
 
-Modelled, from docs/design.md (Live verification) and docs/interface.md (Invoking the backends):
+Modelled, from docs/design.md (Live verification) and docs/interface.md (Invoking the backends),
+plus observations of gh 2.87.3 and glab 1.89.0 where the design has no row (version rule: the
+newest verified behavior per program; a divergence is recorded, not silently resolved):
 
 - ``gh api`` and ``glab api``: flag grammar (long, short, ``--flag=value``, clustered short flags,
-  ``--``), cobra-style usage errors (exit 1), host routing, which environment variable or stored
-  login supplies the token, ``-i`` output, ``--input -``, HTTP errors (exit 1, body on stdout,
-  message on stderr), GraphQL ``errors`` with HTTP 200 (``gh``: exit 1, full body on stdout), no
-  credential (``gh``: exit 4).
-- ``gh auth token`` (returns an ambient token for any host) and ``glab auth token`` (no
-  ``--hostname`` flag), ``--version``.
-- ``glab`` routing: ``GITLAB_HOST`` keeps its path prefix, ``--hostname`` drops it and wins, and
-  an environment token is sent only to the host ``GITLAB_HOST`` names (default gitlab.com).
-- Signals: SIGINT, SIGTERM and SIGHUP are logged, then the process dies by the signal, as a Go
-  program without a handler does.
+  boolean values parsed like Go's ``strconv.ParseBool``, ``--``), usage errors (exit 1; ``gh``
+  in cobra wording, ``glab`` boxed, capitalised, with a trailing period), host routing, which
+  environment variable or stored login supplies the token, ``-i`` output (status line ending in
+  LF, Go-canonical header names sorted, CRLF header lines), ``--silent``, ``--input -``, fields
+  in the query string with ``-X GET`` or ``--input``, HTTP errors (exit 1, body on stdout,
+  ``<prog>: <message> (HTTP N)`` or ``<prog>: HTTP N`` on stderr), 304 (exit 1), GraphQL
+  ``errors`` with HTTP 200 (exit 1, full body on stdout), redirects (followed; the token rules
+  of each program), no credential (``gh``: exit 4).
+- ``gh auth token`` (returns an ambient token for any host, the gh 2.72.0 row; gh 2.87.3 is
+  host-scoped) and ``glab auth token`` (no ``--hostname`` flag), ``--version``.
+- ``gh`` token variables: a variable that does not apply to the host gives an anonymous request
+  (gh 2.87.3); exit 4 only when no token variable is set at all and there is no stored login.
+- ``gh api`` reads only file logins; ``gh auth token`` and ``glab`` also reach a keyring login,
+  only when a session bus variable (``DBUS_SESSION_BUS_ADDRESS`` or ``XDG_RUNTIME_DIR``) is set.
+- ``glab`` routing: ``GITLAB_HOST`` (alias ``GL_HOST``) keeps its path prefix, ``--hostname``
+  drops it and wins, and an environment token is sent only to the host ``GITLAB_HOST`` names
+  (default gitlab.com); GraphQL goes to ``<prefix>/api/graphql``.
+- ``glab`` config: ``config.yml`` must be mode 0600 (else exit 2); on first run glab writes
+  ``config.yml`` and ``aliases.yml`` (0600) into its config dir, and an unwritable dir exits 2.
+- Signals: ``gh`` dies by SIGINT, SIGTERM or SIGHUP; ``glab`` exits 1 on SIGINT or SIGTERM with
+  a message (glab 1.89.0) and dies by SIGHUP. Each is logged first.
 - Every call is logged to ``calls.jsonl`` in the state directory: argv, the environment as
-  received, cwd, cwd listing and mode, repository discovery, stdin, the request that would be
-  sent, which token was sent, the exit code and any signal.
+  received, cwd, cwd listing and mode, the config dir listing and mode, repository discovery,
+  stdin, the requests that would be sent (one per redirect hop), which token each carried, the
+  exit code and any signal.
 
-Anything else fails loudly with exit 70 and ``forgefake: not modelled``. Answers come from
-``script.json`` in the state directory (see ``tests/harness/forges.py``).
+Anything else fails loudly with exit 70 and ``forgefake: not modelled`` (logged as
+``not_modelled``). Answers come from ``script.json`` in the state directory (see
+``tests/harness/forges.py``).
 """
 
 from __future__ import annotations
@@ -31,11 +46,16 @@ import signal
 import stat
 import sys
 import time
+import urllib.parse
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 NOT_MODELLED = 70
+HANG_CAP = 120.0  # seconds; a scripted hang never outlives a forgotten test by more
+MAX_REDIRECTS = 10
+STATE_VAR = "FORGEFAKE_STATE"
+REPO = Path(__file__).resolve().parents[2]
 
 REASONS = {
     200: "OK",
@@ -44,7 +64,10 @@ REASONS = {
     204: "No Content",
     301: "Moved Permanently",
     302: "Found",
+    303: "See Other",
     304: "Not Modified",
+    307: "Temporary Redirect",
+    308: "Permanent Redirect",
     400: "Bad Request",
     401: "Unauthorized",
     403: "Forbidden",
@@ -58,6 +81,8 @@ REASONS = {
     502: "Bad Gateway",
     503: "Service Unavailable",
 }
+BOOL_TRUE = {"1", "t", "T", "TRUE", "true", "True"}
+BOOL_FALSE = {"0", "f", "F", "FALSE", "false", "False"}
 
 # name, short, takes a value
 API_FLAGS: dict[str, list[tuple[str, str | None, bool]]] = {
@@ -106,6 +131,23 @@ PLACEHOLDER = {
 GH_TOKEN_VARS = ("GH_TOKEN", "GITHUB_TOKEN")
 GH_ENTERPRISE_VARS = ("GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
 GLAB_TOKEN_VARS = ("GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN")
+GLAB_SIGNAL_TEXT = {
+    signal.SIGINT: "interrupt signal received.",
+    signal.SIGTERM: "terminated signal received.",
+}
+GLAB_DEFAULT_CONFIG = (
+    "git_protocol: ssh\n"
+    "check_update: true\n"
+    "host: gitlab.com\n"
+    "no_prompt: false\n"
+    "telemetry: true\n"
+    "hosts:\n"
+    "    gitlab.com:\n"
+    "        api_protocol: https\n"
+    "        api_host: gitlab.com\n"
+    "        token:\n"
+)
+GLAB_DEFAULT_ALIASES = "ci: pipeline ci\nco: mr checkout\n"
 
 
 class Exit(Exception):
@@ -125,6 +167,50 @@ def original_env() -> dict[str, str]:
             key, _, value = item.partition(b"=")
             out[os.fsdecode(key)] = os.fsdecode(value)
     return out
+
+
+def canonical_header(key: str) -> str:
+    """Go's ``textproto.CanonicalMIMEHeaderKey``: unchanged if it holds a non-token byte."""
+    token = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+    if not token.match(key):
+        return key
+    out: list[str] = []
+    upper = True
+    for ch in key:
+        out.append(ch.upper() if upper else ch.lower())
+        upper = ch == "-"
+    return "".join(out)
+
+
+def glab_box(message: str, *, hint: bool) -> str:
+    """glab's boxed error: a blank-padded ERROR title, the message, an optional usage hint."""
+    lines = [" " * 10, "   ERROR  ", " " * 10, ("  " + message).ljust(118), ""]
+    if hint:
+        lines += ["  Try --help for usage.", ""]
+    return "\n".join(lines) + "\n"
+
+
+def parse_simple_yaml(text: str) -> dict[tuple[str, ...], str]:
+    """Scalar leaves of a block-mapping YAML file by key path, for any consistent indentation."""
+    leaves: dict[tuple[str, ...], str] = {}
+    stack: list[tuple[int, str]] = []
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        found = re.match(r"^( *)([^:\s][^:]*?):(?:\s+(.*))?$", line)
+        if not found:
+            continue
+        indent = len(found.group(1))
+        key = found.group(2).strip().strip("'\"")
+        value = (found.group(3) or "").strip()
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        path = (*(k for _, k in stack), key)
+        if value:
+            leaves[path] = value.strip("'\"")
+        else:
+            stack.append((indent, key))
+    return leaves
 
 
 class Fake:
@@ -164,20 +250,33 @@ class Fake:
         self.say(message if message.endswith("\n") else message + "\n")
         return Exit(code)
 
+    def usage_error(self, message: str) -> Exit:
+        if self.backend == "glab":
+            text = message[:1].upper() + message[1:]
+            return self.fail(1, glab_box(text if text.endswith(".") else text + ".", hint=True))
+        return self.fail(1, f"{message}\n{self.usage()}")
+
     def not_modelled(self, what: str) -> Exit:
+        self.summary["not_modelled"] = True
         return self.fail(NOT_MODELLED, f"forgefake: not modelled: {what}")
 
     # environment pictures ----------------------------------------------------------------
 
+    @staticmethod
+    def _listing(path: str) -> tuple[list[str] | None, int | None, bool | None]:
+        try:
+            entries = sorted(os.listdir(path))
+            info = os.stat(path)
+        except OSError:
+            return None, None, None
+        return entries, stat.S_IMODE(info.st_mode), info.st_uid == os.getuid()
+
     def start_record(self) -> None:
         cwd = os.getcwd()
-        entries: list[str] | None
-        try:
-            entries = sorted(os.listdir("."))
-            mode = stat.S_IMODE(os.stat(".").st_mode)
-            owner = os.stat(".").st_uid
-        except OSError:
-            entries, mode, owner = None, None, None
+        entries, mode, mine = self._listing(".")
+        config_var = "GH_CONFIG_DIR" if self.backend == "gh" else "GLAB_CONFIG_DIR"
+        config = self.env.get(config_var)
+        config_entries, config_mode, _ = self._listing(config) if config else (None, None, None)
         self.log(
             "start",
             argv=self.argv,
@@ -186,7 +285,11 @@ class Fake:
             cwd_real=os.path.realpath(cwd),
             cwd_entries=entries,
             cwd_mode=mode,
-            cwd_owner_is_me=owner == os.getuid() if owner is not None else None,
+            cwd_owner_is_me=mine,
+            config_dir=config,
+            config_dir_real=os.path.realpath(config) if config else None,
+            config_entries=config_entries,
+            config_mode=config_mode,
             pid=os.getpid(),
             ppid=os.getppid(),
             pgid=os.getpgrp(),
@@ -220,26 +323,59 @@ class Fake:
             return Path(xdg) / leaf
         return Path(self.env.get("HOME", "/nonexistent")) / ".config" / leaf
 
+    def glab_config(self) -> None:
+        """glab loads its config first: mode 0600 is enforced, and a first run writes defaults."""
+        cfg = self.config_dir()
+        path = cfg / "config.yml"
+        prefix = "failed to read configuration:  "
+        if path.exists():
+            mode = stat.S_IMODE(path.stat().st_mode)
+            if mode != 0o600:
+                raise self.fail(
+                    2,
+                    f"{prefix}{path} has the permissions {mode:o}, but glab requires 600.\n"
+                    f"Consider running `chmod 600 {path}`",
+                )
+            return
+        try:
+            cfg.mkdir(parents=True, exist_ok=True, mode=0o700)
+        except OSError as err:
+            reason = (err.strerror or str(err)).lower()
+            raise self.fail(
+                2, f"{prefix}failed to create config directory: mkdir {cfg}: {reason}"
+            ) from None
+        if not os.access(cfg, os.W_OK):
+            temp = f"{cfg}/.config.yml{time.time_ns() % 10**19}"
+            raise self.fail(2, f"{prefix}open {temp}: permission denied")
+        for name, text in (
+            ("config.yml", GLAB_DEFAULT_CONFIG),
+            ("aliases.yml", GLAB_DEFAULT_ALIASES),
+        ):
+            target = cfg / name
+            if not target.exists():
+                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(text)
+
     def file_login(self, host: str) -> str | None:
         """Token for ``host`` from ``hosts.yml`` (gh) or ``config.yml`` (glab) in the config dir."""
-        name, key = (
-            ("hosts.yml", "oauth_token") if self.backend == "gh" else ("config.yml", "token")
-        )
+        name = "hosts.yml" if self.backend == "gh" else "config.yml"
         try:
-            lines = (self.config_dir() / name).read_text(encoding="utf-8").splitlines()
+            leaves = parse_simple_yaml((self.config_dir() / name).read_text(encoding="utf-8"))
         except OSError:
             return None
-        current: str | None = None
-        for line in lines:
-            if line and not line[0].isspace() and line.rstrip().endswith(":"):
-                current = None if line.startswith("hosts:") else line.strip()[:-1]
-            elif (
-                line.startswith("  ") and not line.startswith("   ") and line.strip().endswith(":")
-            ):
-                current = line.strip()[:-1].strip("'\"")
-            elif current == host and line.strip().startswith(key + ":"):
-                return line.split(":", 1)[1].strip().strip("'\"")
-        return None
+        key = (host, "oauth_token") if self.backend == "gh" else ("hosts", host, "token")
+        return leaves.get(key) or None
+
+    def bus_reachable(self) -> bool:
+        return bool(self.env.get("DBUS_SESSION_BUS_ADDRESS") or self.env.get("XDG_RUNTIME_DIR"))
+
+    def keyring_login(self, host: str) -> str | None:
+        """A login kept in the OS keyring: reachable only with a session bus variable."""
+        if not self.bus_reachable():
+            return None
+        value = self.script.get("keyring", {}).get(f"{self.backend}:{host}")
+        return value if isinstance(value, str) else None
 
     def stored_token(self, host: str) -> tuple[str | None, str | None]:
         for source, token in (
@@ -250,19 +386,15 @@ class Fake:
                 return source, token
         return None, None
 
-    def keyring_login(self, host: str) -> str | None:
-        """A login kept in the OS keyring: reachable only with a session bus variable."""
-        if not self.env.get("DBUS_SESSION_BUS_ADDRESS"):
-            return None
-        value = self.script.get("keyring", {}).get(f"{self.backend}:{host}")
-        return value if isinstance(value, str) else None
-
     # parsing -----------------------------------------------------------------------------
 
     def parse(
         self, args: list[str], flags: list[tuple[str, str | None, bool]]
     ) -> tuple[dict[str, list[str]], list[str]]:
-        """pflag-like parse. Returns (flag values by long name, positionals)."""
+        """pflag-like parse. Returns (flag values by long name, positionals).
+
+        A boolean flag's values are "true" or "false"; use ``on`` to read one.
+        """
         longs = {n: (s, v) for n, s, v in flags}
         shorts = {s: (n, v) for n, s, v in flags if s}
         values: dict[str, list[str]] = {}
@@ -277,37 +409,51 @@ class Fake:
             if arg.startswith("--"):
                 name, eq, inline = arg[2:].partition("=")
                 if name not in longs:
-                    raise self.fail(1, f"unknown flag: --{name}\n{self.usage()}")
-                takes = longs[name][1]
+                    raise self.usage_error(f"unknown flag: --{name}")
+                short, takes = longs[name]
                 if takes and not eq:
                     if i >= len(args):
-                        raise self.fail(1, f"flag needs an argument: --{name}\n{self.usage()}")
+                        raise self.usage_error(f"flag needs an argument: --{name}")
                     inline, i = args[i], i + 1
-                elif not takes and eq and inline not in ("true", "false"):
-                    raise self.fail(1, f'invalid argument "{inline}" for "--{name}" flag')
-                values.setdefault(name, []).append(inline if takes else (inline or "true"))
+                elif not takes:
+                    inline = self._bool(name, short, inline if eq else "true")
+                values.setdefault(name, []).append(inline)
             elif arg.startswith("-") and arg != "-":
                 cluster = arg[1:]
                 while cluster:
                     ch, cluster = cluster[0], cluster[1:]
                     if ch not in shorts:
-                        raise self.fail(
-                            1, f"unknown shorthand flag: '{ch}' in {arg}\n{self.usage()}"
-                        )
+                        raise self.usage_error(f"unknown shorthand flag: '{ch}' in {arg}")
                     name, takes = shorts[ch]
                     if takes:
                         if not cluster:
                             if i >= len(args):
-                                raise self.fail(
-                                    1, f"flag needs an argument: '{ch}' in -{ch}\n{self.usage()}"
-                                )
+                                raise self.usage_error(f"flag needs an argument: '{ch}' in -{ch}")
                             cluster, i = args[i], i + 1
                         values.setdefault(name, []).append(cluster.removeprefix("="))
+                        break
+                    if cluster.startswith("="):
+                        values.setdefault(name, []).append(self._bool(name, ch, cluster[1:]))
                         break
                     values.setdefault(name, []).append("true")
             else:
                 positional.append(arg)
         return values, positional
+
+    def _bool(self, name: str, short: str | None, text: str) -> str:
+        if text in BOOL_TRUE:
+            return "true"
+        if text in BOOL_FALSE:
+            return "false"
+        spelled = f"-{short}, --{name}" if short else f"--{name}"
+        raise self.usage_error(
+            f'invalid argument "{text}" for "{spelled}" flag: '
+            f'strconv.ParseBool: parsing "{text}": invalid syntax'
+        )
+
+    @staticmethod
+    def on(values: dict[str, list[str]], name: str) -> bool:
+        return values.get(name, ["false"])[-1] == "true"
 
     def usage(self) -> str:
         return f"Usage:  {self.backend} api <endpoint> [flags]\n"
@@ -317,6 +463,8 @@ class Fake:
     def run(self) -> int:
         self.start_record()
         try:
+            if self.backend == "glab":
+                self.glab_config()
             self.dispatch()
             code = 0
         except Exit as stop:
@@ -347,48 +495,59 @@ class Fake:
         if extra:
             raise self.fail(1, f'unknown command "{extra[0]}"')
         if self.backend == "gh":
-            host = (values.get("hostname") or [self.env.get("GH_HOST", "github.com")])[0]
+            host = (values.get("hostname") or [self.env.get("GH_HOST", "github.com")])[-1]
+            # design.md (gh 2.72.0): any ambient variable, for any host.
             token = next(
                 (self.env[v] for v in (*GH_TOKEN_VARS, *GH_ENTERPRISE_VARS) if self.env.get(v)),
                 None,
             )
-            token = token or self.file_login(host) or self.keyring_login(host)
         else:
-            host = (self.env.get("GITLAB_HOST") or "gitlab.com").split("/")[0]
+            host = self.glab_env_host().split("/")[0]
             token = next((self.env[v] for v in GLAB_TOKEN_VARS if self.env.get(v)), None)
-            token = token or self.file_login(host) or self.keyring_login(host)
+        token = token or self.file_login(host) or self.keyring_login(host)
         if token is None:
             raise self.fail(1, f"no oauth token found for {host}")
         self.out.write(token.encode() + b"\n")
 
     def api(self, args: list[str]) -> None:
         values, positional = self.parse(args, API_FLAGS[self.backend])
-        if "help" in values:
+        if self.on(values, "help"):
             self.out.write(self.usage().encode())
             return
         if len(positional) != 1:
-            raise self.fail(1, f"accepts 1 arg(s), received {len(positional)}\n{self.usage()}")
-        for name in UNMODELLED & values.keys():
+            raise self.usage_error(f"accepts 1 arg(s), received {len(positional)}")
+        for name in sorted(UNMODELLED & values.keys()):
             raise self.not_modelled(f"--{name}")
         endpoint = positional[0]
         if PLACEHOLDER[self.backend].search(endpoint):
             self.summary["placeholders"] = True
             raise self.not_modelled("placeholder expansion in an endpoint")
         fields = values.get("field", []) + values.get("raw-field", [])
-        method = (values.get("method") or ["POST" if fields or "input" in values else "GET"])[-1]
+        has_input = "input" in values
+        explicit = (values.get("method") or [None])[-1]
+        method = (explicit or ("POST" if fields or has_input else "GET")).upper()
         stdin_text: str | None = None
         if values.get("input") == ["-"]:
             stdin_text = sys.stdin.read()
             self.log("stdin", stdin=stdin_text)
-        elif "input" in values:
+        elif has_input:
             raise self.not_modelled("--input FILE (forgectl sends bodies on stdin)")
         file_fields = [f for f in fields if "=" in f and f.split("=", 1)[1].startswith("@")]
         request = self.route(values, endpoint, method)
+        query = [f.split("=", 1) if "=" in f else [f, ""] for f in fields]
+        if fields and (method == "GET" or has_input):
+            # gh and glab put fields in the query string with -X GET or with --input, encoded
+            # as Go's url.Values does: sorted by key.
+            request["url"] += ("&" if "?" in request["url"] else "?") + urllib.parse.urlencode(
+                sorted((k, v) for k, v in query)
+            )
+            request["query"] = query
         request["file_fields"] = file_fields
         request["headers_sent"] = values.get("header", [])
         request["fields"] = fields
-        request["include"] = "include" in values
+        request["include"] = self.on(values, "include")
         request["full_url_endpoint"] = bool(re.match(r"https?://", endpoint, re.I))
+        request["body"] = stdin_text
         self.summary["request"] = request
         self.answer(values, request, stdin_text)
 
@@ -399,6 +558,10 @@ class Fake:
 
     def route_gh(self, values: dict[str, list[str]], endpoint: str, method: str) -> dict[str, Any]:
         host = (values.get("hostname") or [self.env.get("GH_HOST") or "github.com"])[-1]
+        if not host.strip():
+            raise self.usage_error("error parsing `--hostname`: a value for hostname is required")
+        if ":" in host or "/" in host:
+            raise self.usage_error("error parsing `--hostname`: invalid hostname")
         names = (
             GH_TOKEN_VARS
             if host == "github.com" or host.endswith(".ghe.com")
@@ -410,15 +573,18 @@ class Fake:
                 source, token = "env:" + name, self.env[name]
                 break
         if token is None:
-            source, token = self.stored_token(host)
-        if token is None:
-            var = names[0]
+            # gh api reads only file logins: with an empty config dir it refuses (design.md).
+            stored = self.file_login(host)
+            source, token = ("file", stored) if stored else (None, None)
+        any_var = any(self.env.get(v) for v in (*GH_TOKEN_VARS, *GH_ENTERPRISE_VARS))
+        if token is None and not any_var:
             raise self.fail(
                 4,
                 "To get started with GitHub CLI, please run:  gh auth login\n"
-                f"Alternatively, populate the {var} environment variable with a GitHub API "
+                "Alternatively, populate the GH_TOKEN environment variable with a GitHub API "
                 "authentication token.",
             )
+        # gh 2.87.3: a set variable that does not apply to this host gives an anonymous request.
         path = endpoint.lstrip("/")
         if host == "github.com":
             url = f"https://api.github.com/{path}"
@@ -435,16 +601,18 @@ class Fake:
             "endpoint": path,
             "token_sent": token,
             "token_source": source,
-            "token_header": "Authorization",
+            "token_header": "Authorization" if token else None,
         }
+
+    def glab_env_host(self) -> str:
+        return self.env.get("GITLAB_HOST") or self.env.get("GL_HOST") or "gitlab.com"
 
     def route_glab(
         self, values: dict[str, list[str]], endpoint: str, method: str
     ) -> dict[str, Any]:
         flag = (values.get("hostname") or [None])[-1]
-        env_host = self.env.get("GITLAB_HOST") or "gitlab.com"
         scheme = "https"
-        spec = env_host
+        spec = self.glab_env_host()
         if "://" in spec:
             scheme, _, spec = spec.partition("://")
         env_netloc, _, env_prefix = spec.partition("/")
@@ -457,14 +625,11 @@ class Fake:
         else:
             netloc, prefix = env_netloc, env_prefix
         host = netloc.split(":")[0]
-        cfg = self.config_dir()
-        if cfg.exists() and not os.access(cfg, os.W_OK):
-            raise self.fail(1, f"glab: cannot write config directory {cfg}: permission denied")
-        source, token, header = None, None, "Private-Token"
+        source, token = None, None
         env_token = next((v for v in GLAB_TOKEN_VARS if self.env.get(v)), None)
-        if env_token and netloc.split(":")[0] == env_netloc.split(":")[0]:
+        # design.md (glab 1.127.0): an environment token goes only to GITLAB_HOST's host.
+        if env_token and host == env_netloc.split(":")[0]:
             source, token = "env:" + env_token, self.env[env_token]
-            header = "Authorization" if env_token == "OAUTH_TOKEN" else "Private-Token"
         elif env_token:
             warnings.append(f"credential in {env_token} was not sent to {host}")
             self.say(f"warning: {warnings[-1]}\n")
@@ -472,8 +637,12 @@ class Fake:
             source, token = self.stored_token(host)
         path = endpoint.lstrip("/")
         full = bool(re.match(r"https?://", endpoint, re.I))
-        # glab sends its token to whatever host a full-URL endpoint names.
-        url = endpoint if full else f"{scheme}://{netloc}{prefix}/api/v4/{path}"
+        if full:
+            url = endpoint  # glab sends its token to whatever host a full-URL endpoint names
+        elif path == "graphql":
+            url = f"{scheme}://{netloc}{prefix}/api/graphql"
+        else:
+            url = f"{scheme}://{netloc}{prefix}/api/v4/{path}"
         return {
             "host": host,
             "method": method,
@@ -481,7 +650,7 @@ class Fake:
             "endpoint": path,
             "token_sent": token,
             "token_source": source,
-            "token_header": header if token else None,
+            "token_header": "Private-Token" if token else None,  # OAUTH_TOKEN too
             "warnings": warnings,
         }
 
@@ -526,51 +695,97 @@ class Fake:
             return False
         return True
 
+    def choose(self, request: dict[str, Any], body: str | None) -> dict[str, Any]:
+        rule = self.pick_rule(request, body)
+        if rule is not None:
+            self.summary.setdefault("rules", []).append(rule["index"])
+            self.summary.setdefault("rule", rule["index"])
+            return rule
+        if self.script.get("default"):
+            self.summary["defaulted"] = True
+            return self.script["default"]
+        self.summary["unmatched"] = True
+        return {"status": 404, "body": {"message": "Not Found", "forgefake": "no scripted answer"}}
+
+    def follow(self, request: dict[str, Any], rule: dict[str, Any]) -> dict[str, Any]:
+        """The next request of a redirect, with Go's net/http method, body and header rules."""
+        status = rule.get("status", 302)
+        location = urllib.parse.urljoin(request["url"], rule["redirect"]["location"])
+        parts = urllib.parse.urlsplit(location)
+        method, body = request["method"], request.get("body")
+        if status in (301, 302, 303):
+            if status == 303 and method not in ("GET", "HEAD"):
+                method = "GET"
+            if status in (301, 302) and method == "POST":
+                method = "GET"
+            body = None
+        initial = urllib.parse.urlsplit(self.summary["request"]["url"]).netloc
+        token = request["token_sent"]
+        if self.backend == "gh" and parts.netloc != initial:
+            token = None  # Go drops Authorization on another host; an explicit :443 differs
+        return {
+            "host": parts.hostname or "",
+            "method": method,
+            "url": location,
+            "endpoint": parts.path.lstrip("/"),
+            "token_sent": token,
+            "token_header": request["token_header"] if token else None,
+            "body": body,
+            "status_followed": status,
+        }
+
     def answer(
         self, values: dict[str, list[str]], request: dict[str, Any], stdin_text: str | None
     ) -> None:
-        rule = self.pick_rule(request, stdin_text)
-        if rule is None:
-            self.summary["unmatched"] = True
-            rule = self.script.get("default") or {
-                "status": 404,
-                "body": {"message": "Not Found", "forgefake": "no scripted answer"},
-            }
-        else:
-            self.summary["rule"] = rule["index"]
+        rule = self.choose(request, stdin_text)
+        current = request
+        hops: list[dict[str, Any]] = []
+        while rule.get("redirect"):
+            if len(hops) >= MAX_REDIRECTS:
+                raise self.fail(1, f"{self.backend}: stopped after {MAX_REDIRECTS} redirects")
+            current = self.follow(current, rule)
+            hops.append(current)
+            request["hops"] = hops
+            rule = self.choose(current, current["body"])
         if rule.get("delay"):
             time.sleep(rule["delay"])
         if rule.get("hang"):
             self.out.flush()
-            while True:
-                time.sleep(3600)
+            hang = rule["hang"]
+            cap = HANG_CAP if hang is True else min(float(hang), HANG_CAP)
+            deadline = time.monotonic() + cap
+            while time.monotonic() < deadline:
+                time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+            self.summary["hang_capped"] = True
+            raise self.fail(NOT_MODELLED, f"forgefake: hang capped after {cap:g} s")
         status = rule.get("status", 200)
         if "body_text" in rule:
             body = (rule["body_text"] * rule.get("body_repeat", 1)).encode()
-        elif "body" in rule:
+        elif rule.get("body") is not None:
             body = json.dumps(rule["body"], separators=(",", ":")).encode()
         else:
             body = b""
-        if status == 204:
+        if status in (204, 304):
             body = b""
-        headers = {"Content-Type": "application/json; charset=utf-8", **rule.get("headers", {})}
-        silent = "silent" in values
-        if "include" in values and not silent:
-            head = f"HTTP/2.0 {status} {REASONS.get(status, 'Status')}\r\n"
+        scripted = {"Content-Type": "application/json; charset=utf-8", **rule.get("headers", {})}
+        headers = {canonical_header(k): v for k, v in scripted.items()}
+        if self.on(values, "include"):
+            head = f"HTTP/2.0 {status} {REASONS.get(status, 'Status')}\n"
             head += "".join(f"{k}: {v}\r\n" for k, v in sorted(headers.items())) + "\r\n"
             self.out.write(head.encode())
-        if not silent:
+        if not self.on(values, "silent"):
             self.out.write(body)
         self.out.flush()
         if rule.get("stderr"):
             self.say(rule["stderr"])
         if "exit" in rule:
             raise Exit(rule["exit"])
-        if status >= 400:
-            message = self.error_message(body, status)
-            self.say(f"{self.backend}: {message} (HTTP {status})\n")
+        if status >= 400 or status == 304:
+            message = self.error_message(body)
+            text = f"{message} (HTTP {status})" if message else f"HTTP {status}"
+            self.say(f"{self.backend}: {text}\n")
             raise Exit(1)
-        if self.backend == "gh" and request["endpoint"] == "graphql":
+        if current["endpoint"] == "graphql" or current["url"].endswith("/graphql"):
             try:
                 errors = json.loads(body).get("errors")
             except (ValueError, AttributeError):
@@ -579,22 +794,34 @@ class Fake:
                 text = "; ".join(
                     str(e.get("message", e)) if isinstance(e, dict) else str(e) for e in errors
                 )
-                self.say(f"gh: {text}\n")
+                self.say(f"{self.backend}: {text}\n")
                 raise Exit(1)
         if rule.get("die"):
             os.kill(os.getpid(), getattr(signal, rule["die"]))
 
     @staticmethod
-    def error_message(body: bytes, status: int) -> str:
+    def error_message(body: bytes) -> str | None:
+        """The ``message`` string of a JSON body; gh and glab ignore an ``error`` key."""
         try:
             doc = json.loads(body)
-            if isinstance(doc, dict):
-                for key in ("message", "error"):
-                    if isinstance(doc.get(key), str):
-                        return doc[key]
         except ValueError:
-            pass
-        return REASONS.get(status, "HTTP error")
+            return None
+        if isinstance(doc, dict) and isinstance(doc.get("message"), str):
+            return doc["message"]
+        return None
+
+
+def state_from_env() -> str:
+    """For the developer launchers: the state dir must be named and outside the repository."""
+    state = os.environ.get(STATE_VAR, "")
+    if not state or not os.path.isabs(state) or not os.path.isdir(state):
+        sys.stderr.write(f"forgefake: set {STATE_VAR} to an existing absolute directory\n")
+        raise SystemExit(64)
+    real, repo = os.path.realpath(state), os.path.realpath(REPO)
+    if real == repo or real.startswith(repo + os.sep):
+        sys.stderr.write(f"forgefake: {STATE_VAR} must be outside the repository ({repo})\n")
+        raise SystemExit(64)
+    return state
 
 
 def main(backend: str, state_dir: str, argv: list[str] | None = None) -> None:
@@ -602,6 +829,12 @@ def main(backend: str, state_dir: str, argv: list[str] | None = None) -> None:
 
     def die(signum: int, _frame: Any) -> None:
         fake.log("signal", signal=signal.Signals(signum).name)
+        if backend == "glab" and signum in GLAB_SIGNAL_TEXT:
+            # glab 1.89.0 handles these: a message and exit 1.
+            fake.say(GLAB_SIGNAL_TEXT[signal.Signals(signum)] + "\n")
+            fake.log("end", exit=1, **fake.summary)
+            sys.stdout.flush()
+            os._exit(1)
         signal.signal(signum, signal.SIG_DFL)
         os.kill(os.getpid(), signum)
 
@@ -615,4 +848,6 @@ def main(backend: str, state_dir: str, argv: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--dev"]:
+        main(sys.argv[2], state_from_env(), sys.argv[3:])
     main(sys.argv[1], sys.argv[2], sys.argv[3:])

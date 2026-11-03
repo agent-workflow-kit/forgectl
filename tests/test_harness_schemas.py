@@ -87,3 +87,28 @@ def test_log_and_audit_validators_reject_an_empty_record() -> None:
         schemas.validate_log_record(empty)
     with pytest.raises(ValidationError):
         schemas.validate_audit_record(empty)
+
+
+def test_a_fragment_id_validates_against_that_definition() -> None:
+    schemas.validate("2026-01-02T03:04:05Z", "forgectl/defs.json#/$defs/ts")
+    with pytest.raises(ValidationError):
+        schemas.validate(5, "forgectl/defs.json#/$defs/ts")
+
+
+def test_an_unknown_fragment_is_an_error_not_a_pass() -> None:
+    with pytest.raises(schemas.UnknownSchemaError):
+        schemas.validate({}, "forgectl/defs.json#/$defs/no-such-def")
+
+
+@pytest.mark.parametrize(
+    "value", ["2026-13-01T00:00:00Z", "2026-02-30T00:00:00Z", "2026-01-01T25:00:00Z"]
+)
+def test_date_time_format_is_enforced(value: str) -> None:
+    with pytest.raises(ValidationError):
+        schemas.validate(value, "forgectl/defs.json#/$defs/ts")
+
+
+def test_the_date_time_checker_follows_rfc_3339() -> None:
+    assert schemas.is_rfc3339("2026-01-02t03:04:05.123+05:30")
+    assert not schemas.is_rfc3339("2026-01-02 03:04:05Z")  # a space is ISO 8601, not RFC 3339
+    assert not schemas.is_rfc3339("2026-13-01T00:00:00Z")

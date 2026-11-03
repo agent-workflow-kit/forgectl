@@ -22,6 +22,10 @@ AMBIENT_TOKEN_VARS = (
     "GITLAB_ACCESS_TOKEN",
     "OAUTH_TOKEN",
 )
+# Planted by ``run_forgectl`` in the caller's environment; checked by default on every call.
+AMBIENT_SENTINELS = {
+    name: f"ambient-sentinel-{name.lower().replace('_', '-')}-5d81" for name in AMBIENT_TOKEN_VARS
+}
 FIXED_SETTINGS = {
     "GH_PROMPT_DISABLED": "1",
     "GH_NO_UPDATE_NOTIFIER": "1",
@@ -51,13 +55,8 @@ BASE_ALLOWED = {
     "GIT_CEILING_DIRECTORIES",
     *FIXED_SETTINGS,
 }
-STORED_ONLY = {
-    "GH_CONFIG_DIR",
-    "GLAB_CONFIG_DIR",
-    "XDG_CONFIG_HOME",
-    "DBUS_SESSION_BUS_ADDRESS",
-    "XDG_RUNTIME_DIR",
-}
+BUS_VARS = {"DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"}
+STORED_ONLY = {"GH_CONFIG_DIR", "GLAB_CONFIG_DIR", "XDG_CONFIG_HOME", *BUS_VARS}
 
 Mode = Literal["token", "stored"]
 
@@ -71,6 +70,19 @@ def token_variable(backend: str, host: str) -> str:
     )
 
 
+def hostname_values(argv: list[str]) -> list[str]:
+    """Every ``--hostname`` value in argv, in either ``--hostname X`` or ``--hostname=X`` form."""
+    found: list[str] = []
+    for index, arg in enumerate(argv):
+        if arg == "--":
+            break
+        if arg == "--hostname":
+            found.append(argv[index + 1] if index + 1 < len(argv) else "")
+        elif arg.startswith("--hostname="):
+            found.append(arg.partition("=")[2])
+    return found
+
+
 def assert_call_safe(
     call: Call,
     *,
@@ -78,12 +90,18 @@ def assert_call_safe(
     mode: Mode = "token",
     untrusted: Iterable[str] = (),
     ambient: Mapping[str, str] | None = None,
+    gitlab_host: str | None = None,
+    caller_config_dir: bool = False,
 ) -> None:
     """Assert every safety rule on one logged call.
 
-    ``untrusted`` are strings the test planted in forge-controlled input; none may reach argv.
-    ``ambient`` are token variables the test set in the caller's own environment and that must
-    not reach the child: no child variable may hold any of their values.
+    ``untrusted`` are strings the test planted in forge-controlled input; none may reach argv or
+    the environment. ``ambient`` are token variables in the caller's own environment that must not
+    reach the child (default: the sentinels ``run_forgectl`` plants); no child argv element or
+    environment value may contain any of their values. ``gitlab_host`` is the expected
+    ``GITLAB_HOST`` for a GitLab host other than gitlab.com (default: ``host``), in the form
+    ``<host>[:port]<api_prefix>``. ``caller_config_dir`` says the caller set this backend's config
+    dir, so stored-login mode must pass no session bus variable.
     """
     env = call.env
     where = f"{call.backend} {' '.join(call.argv)}"
@@ -96,9 +114,19 @@ def assert_call_safe(
     else:
         assert not present, f"{where}: stored-login mode passed token variables {present}"
 
-    for name, value in (ambient or {}).items():
-        leaked = [k for k, v in env.items() if v == value]
+    for name in present:
+        value = env[name]
+        in_argv = [a for a in call.argv if value and value in a]
+        assert not in_argv, f"{where}: the {name} value is in argv"
+        elsewhere = [k for k, v in env.items() if k != name and value and value in v]
+        assert not elsewhere, f"{where}: the {name} value is also inside {elsewhere}"
+
+    for name, value in (AMBIENT_SENTINELS if ambient is None else ambient).items():
+        assert value, "an empty ambient value proves nothing"
+        leaked = [k for k, v in env.items() if value in v]
         assert not leaked, f"{where}: ambient value of {name} reached {leaked}"
+        in_argv = [a for a in call.argv if value in a]
+        assert not in_argv, f"{where}: ambient value of {name} is in argv"
 
     for name in NEVER_PASSED:
         assert name not in env, f"{where}: {name} must never pass through"
@@ -108,45 +136,92 @@ def assert_call_safe(
     allowed = set(BASE_ALLOWED) | set(present)
     if mode == "stored":
         allowed |= STORED_ONLY
+        if caller_config_dir:
+            allowed -= BUS_VARS
     else:
         allowed |= {"GH_CONFIG_DIR" if call.backend == "gh" else "GLAB_CONFIG_DIR"}
     if call.backend == "glab" and host != "gitlab.com":
         allowed.add("GITLAB_HOST")
     stray = sorted(set(env) - allowed)
     assert not stray, f"{where}: environment not built from scratch, stray {stray}"
-    if mode == "token":
-        config_var = "GH_CONFIG_DIR" if call.backend == "gh" else "GLAB_CONFIG_DIR"
-        assert env.get(config_var), f"{where}: token mode needs a private {config_var}"
 
     for entry in env.get("PATH", "").split(os.pathsep):
         assert os.path.isabs(entry), f"{where}: PATH entry {entry!r} is not absolute"
 
+    raw_tmpdir = env.get("TMPDIR")
+    assert raw_tmpdir and os.path.isabs(raw_tmpdir), (
+        f"{where}: TMPDIR {raw_tmpdir!r} is missing or not absolute"
+    )
+    tmpdir = os.path.realpath(raw_tmpdir)
     assert call.cwd_entries == [], f"{where}: cwd not empty: {call.cwd_entries}"
     assert call.cwd_mode == 0o700, f"{where}: cwd mode {oct(call.cwd_mode or 0)}, want 0o700"
-    tmpdir = os.path.realpath(env.get("TMPDIR", ""))
-    assert tmpdir and call.cwd_real.startswith(tmpdir + os.sep), (
+    assert call.cwd_real.startswith(tmpdir + os.sep), (
         f"{where}: cwd {call.cwd_real} is not under TMPDIR {tmpdir}"
     )
-    assert env.get("GIT_CEILING_DIRECTORIES") == os.path.dirname(call.cwd), (
-        f"{where}: GIT_CEILING_DIRECTORIES {env.get('GIT_CEILING_DIRECTORIES')!r} is not the "
-        f"parent of cwd {call.cwd}"
-    )
     assert call.repo_context is None, f"{where}: a repository was discoverable: {call.repo_context}"
+    ceiling = env.get("GIT_CEILING_DIRECTORIES")
+    assert ceiling and os.path.realpath(ceiling) == os.path.realpath(os.path.dirname(call.cwd)), (
+        f"{where}: GIT_CEILING_DIRECTORIES {ceiling!r} is not the parent of cwd {call.cwd}"
+    )
 
+    if mode == "token":
+        _assert_private_config_dir(call, where, tmpdir)
+
+    _assert_routing(call, where, host, gitlab_host)
     assert_no_untrusted_in_argv(call, untrusted)
     assert not call.placeholders, f"{where}: endpoint used a CLI placeholder"
-    if call.backend == "gh" and call.argv[:1] == ["api"]:
-        assert "--hostname" in call.argv, f"{where}: gh needs --hostname on every call"
     if call.request is not None:
         assert not call.request["full_url_endpoint"], f"{where}: full-URL endpoint"
         assert not call.request["file_fields"], f"{where}: -F read a file"
 
 
+def _assert_private_config_dir(call: Call, where: str, tmpdir: str) -> None:
+    var = "GH_CONFIG_DIR" if call.backend == "gh" else "GLAB_CONFIG_DIR"
+    value = call.env.get(var)
+    assert value, f"{where}: token mode needs a private {var}"
+    real = call.config_dir_real or os.path.realpath(value)
+    assert real.startswith(tmpdir + os.sep), f"{where}: {var} {real} is not under TMPDIR"
+    cwd = call.cwd_real
+    assert real != cwd and not real.startswith(cwd + os.sep), f"{where}: {var} is in the cwd"
+    assert call.config_mode == 0o700, (
+        f"{where}: {var} mode {oct(call.config_mode or 0)}, want 0o700"
+    )
+    assert call.config_entries == [], f"{where}: {var} not empty at start: {call.config_entries}"
+
+
+def _assert_routing(call: Call, where: str, host: str, gitlab_host: str | None) -> None:
+    """interface.md, Routing: gh always names the host; glab by host kind."""
+    names = hostname_values(call.argv)
+    if call.backend == "gh":
+        if call.argv[:1] == ["api"] or call.argv[:2] == ["auth", "token"]:
+            assert names == [host], f"{where}: gh needs exactly one --hostname {host}, got {names}"
+        return
+    if host == "gitlab.com":
+        assert "GITLAB_HOST" not in call.env, f"{where}: gitlab.com takes no GITLAB_HOST"
+        if call.argv[:1] == ["api"]:
+            assert names == ["gitlab.com"], (
+                f"{where}: gitlab.com needs exactly one --hostname gitlab.com, got {names}"
+            )
+        return
+    want = gitlab_host or host
+    got = call.env.get("GITLAB_HOST")
+    assert got == want, f"{where}: GITLAB_HOST {got!r}, want {want!r}"
+    assert not names, f"{where}: a self-managed host takes no --hostname, got {names}"
+
+
 def assert_no_untrusted_in_argv(call: Call, untrusted: Iterable[str]) -> None:
+    """No planted string in any argv element, across argv elements, or in any env value."""
+    argv = call.argv
+    joined = ["".join(argv), " ".join(argv)]
     for planted in untrusted:
         assert planted, "an empty string proves nothing"
-        hits = [a for a in call.argv if planted in a]
+        hits = [a for a in argv if planted in a]
         assert not hits, f"{call.backend}: untrusted text {planted!r} in argv: {hits}"
+        assert not any(planted in j for j in joined), (
+            f"{call.backend}: untrusted text {planted!r} split across argv elements"
+        )
+        in_env = [k for k, v in call.env.items() if planted in v or planted in k]
+        assert not in_env, f"{call.backend}: untrusted text {planted!r} in the environment {in_env}"
 
 
 def reference_env(
@@ -157,6 +232,7 @@ def reference_env(
     path: str,
     token: str | None = "tok-fixture-0001",
     mode: Mode = "token",
+    gitlab_host: str | None = None,
 ) -> tuple[dict[str, str], Path]:
     """A child environment and private cwd built the way the interface says the gateway builds
     them. For tests of the harness itself and as a reference for gateway tests; the gateway
@@ -177,11 +253,12 @@ def reference_env(
         **FIXED_SETTINGS,
     }
     if backend == "glab" and host != "gitlab.com":
-        env["GITLAB_HOST"] = host
+        env["GITLAB_HOST"] = gitlab_host or host
     if mode == "token":
         assert token
         env[token_variable(backend, host)] = token
-        config = private / "config"
+        config = root / "config"
         config.mkdir(mode=0o700)
+        config.chmod(0o700)
         env["GH_CONFIG_DIR" if backend == "gh" else "GLAB_CONFIG_DIR"] = str(config)
     return env, cwd
