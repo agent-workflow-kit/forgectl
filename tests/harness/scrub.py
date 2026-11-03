@@ -47,6 +47,7 @@ OWNER_PATH_KEYS = {"full_name", "path_with_namespace", "full_path"}  # leading s
 REDACT_KEYS = {"authorization", "private-token", "cookie", "set-cookie"}
 REDACTED = "REDACTED"
 SERVICE_LOGINS = {"github", "ghost"}
+SERVICE_NAMES = {"github", "gitlab", "ghost"}  # forge display names, not people
 
 PLACEHOLDER_LOGIN = re.compile(r"(app/)?user-\d+(\[bot\])?")
 PLACEHOLDER_EMAIL = re.compile(r"user-\d+@example\.test")
@@ -73,6 +74,8 @@ HEADER_LINE = re.compile(
     r"(?im)^(?P<lead>[ \t]*(?:authorization|private-token|cookie|set-cookie)[ \t]*:[ \t]*)"
     r"(?P<value>\S.*)$"
 )
+# A string that is a URL as a whole: display names are never substituted in it.
+URL_VALUE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S+")
 SAFE_EMAIL_DOMAINS = ("example.test", "example.com", "example.org", "example.net")
 
 DATA_SUFFIXES = {".json", ".jsonl", ".txt", ".md", ".yaml", ".yml", ".http", ".har", ".log", ".csv"}
@@ -95,6 +98,19 @@ def is_service_login(login: str) -> bool:
     """Forge service accounts, kept as they are: ``github``, ``ghost``, ``*[bot]``, ``*-bot``."""
     lowered = login.lower()
     return lowered in SERVICE_LOGINS or lowered.endswith(("[bot]", "-bot"))
+
+
+def is_service_name(name: str) -> bool:
+    """Forge service display names, kept as they are: ``GitHub``, ``GitLab``, ``Ghost``."""
+    return name.lower() in SERVICE_NAMES
+
+
+def _name_ok(value: str) -> bool:
+    return bool(PLACEHOLDER_NAME.fullmatch(value)) or is_service_name(value)
+
+
+def _is_group(node: dict[str, Any]) -> bool:
+    return str(node.get("kind", "")).lower() == "group"
 
 
 def _login_ok(value: str) -> bool:
@@ -158,7 +174,7 @@ class Scrubber:
         return self._emails[key]
 
     def _name(self, name: str) -> str:
-        if PLACEHOLDER_NAME.fullmatch(name):
+        if _name_ok(name):
             return name
         key = name.lower()
         if key not in self._names:
@@ -179,6 +195,11 @@ class Scrubber:
         mapped = [self._alias_login(s) if s else s for s in owners]
         return "/".join(mapped + segments[len(owners) :])
 
+    def _group_name(self, value: str, node: dict[str, Any]) -> str:
+        """A group namespace's name is an owner, not a person: it takes its path's placeholder."""
+        path = node.get("path") or str(node.get("full_path") or "").rsplit("/", 1)[-1] or value
+        return self._alias_login(str(path))
+
     # traversal ---------------------------------------------------------------------------
 
     def _by_key(self, key: str, value: str, node: dict[str, Any], parent: str | None) -> str | None:
@@ -187,6 +208,8 @@ class Scrubber:
         if lowered in REDACT_KEYS:
             return REDACTED
         in_namespace = parent == NAMESPACE_KEY
+        if in_namespace and key == "name" and _is_group(node):
+            return self._group_name(value, node)
         if key in LOGIN_KEYS:
             return self._alias_login(value)
         if key in EMAIL_KEYS:
@@ -262,8 +285,10 @@ class Scrubber:
             return self._email(address).replace("@", "%40")
 
         text = EMAIL_PCT.sub(pct, text)
-        for name in sorted(self._names, key=len, reverse=True):
-            pattern = rf"(?<!\w){re.escape(name)}(?!\w)"
+        # Not inside a word, an email, a host or a URL path; URL paths take login placeholders.
+        names = [] if URL_VALUE.fullmatch(text) else sorted(self._names, key=len, reverse=True)
+        for name in names:
+            pattern = rf"(?<![\w.@/-]){re.escape(name)}(?![\w-]|\.\w)"
             text = re.sub(pattern, self._names[name], text, flags=re.IGNORECASE)
         for base in sorted(self._logins, key=len, reverse=True):
             if len(base) < 2:
@@ -306,9 +331,11 @@ def _identity_findings(node: Any, path: str, out: list[Finding], parent: str | N
                     (key.lower() in REDACT_KEYS and value != REDACTED)
                     or (key in LOGIN_KEYS and not _login_ok(value))
                     or (key in EMAIL_KEYS and not PLACEHOLDER_EMAIL.fullmatch(value))
+                    or (in_namespace and key == "name" and _is_group(node) and not _login_ok(value))
                     or (
                         (key in NAME_KEYS or (key == "name" and (person or in_namespace)))
-                        and not PLACEHOLDER_NAME.fullmatch(value)
+                        and not (in_namespace and _is_group(node))
+                        and not _name_ok(value)
                     )
                     or (key in AVATAR_KEYS and not PLACEHOLDER_AVATAR.fullmatch(value))
                     or (
@@ -341,7 +368,7 @@ def _text_findings(text: str, path: str, *, code: bool) -> list[Finding]:
                 findings.append(Finding(path, "email", match.group(0)))
         for match in NAME_EMAIL.finditer(variant):
             name = _person_name(match.group("name"))
-            if not PLACEHOLDER_NAME.fullmatch(name):
+            if not _name_ok(name):
                 findings.append(Finding(path, "name-email", match.group(0)))
     mention = CODE_MENTION if code else MENTION
     for line in text.splitlines():

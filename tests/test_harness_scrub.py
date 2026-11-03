@@ -115,6 +115,75 @@ def test_gitlab_shapes_are_scrubbed() -> None:
     assert scrub.Scrubber().scrub(out) == out
 
 
+def test_web_flow_committer_recording_keeps_html_url_and_url_hosts() -> None:
+    doc = {
+        "commit": {
+            "committer": {"name": "GitHub", "email": "noreply" + AT + "github.com"},
+            "author": {"name": "Ann Other", "email": "ann" + AT + "corp.example.org"},
+            "message": "Merge pull request #5",
+        },
+        "html_url": "https://github.com/user-1/r/commit/abc",
+        "url": "https://api.github.com/repos/user-1/r",
+    }
+    out = scrub.Scrubber().scrub(doc)
+    assert out["commit"]["committer"]["name"] == "GitHub"  # a forge service, kept
+    assert out["commit"]["author"]["name"].startswith("User ")
+    assert out["html_url"] == doc["html_url"]
+    assert out["url"] == doc["url"]
+    assert scrub.find_unscrubbed(json.dumps(out)) == []
+    assert scrub.Scrubber().scrub(out) == out
+
+
+@pytest.mark.parametrize("service", ["GitHub", "GitLab", "Ghost"])
+def test_forge_service_display_names_are_kept(service: str) -> None:
+    doc = {"user": {"name": service, "login": "user-1"}, "body": f"Posted via {service}"}
+    out = scrub.Scrubber().scrub(doc)
+    assert out == doc
+    assert scrub.find_unscrubbed(json.dumps(out)) == []
+
+
+@pytest.mark.parametrize(
+    ("name", "path", "url"),
+    [
+        ("Docs", "docs", "https://gitlab.example.test/docs/handbook"),
+        ("gitlab", "gitlab-org", "https://gitlab.com/gitlab-org/x"),
+    ],
+)
+def test_group_namespace_web_url_path_uses_the_namespace_path_placeholder(
+    name: str, path: str, url: str
+) -> None:
+    doc = {
+        "namespace": {"name": name, "path": path, "kind": "group"},
+        "web_url": url,
+        "description": f"{name} handbook",
+    }
+    out = scrub.Scrubber().scrub(doc)
+    placeholder = out["namespace"]["path"]
+    assert scrub.PLACEHOLDER_LOGIN.fullmatch(placeholder)
+    assert out["web_url"] == url.replace(f"/{path}/", f"/{placeholder}/")
+    assert out["namespace"]["name"] == placeholder  # a group is not a person
+    assert "User " not in json.dumps(out)
+    assert scrub.find_unscrubbed(json.dumps(out)) == []
+    assert scrub.Scrubber().scrub(out) == out
+
+
+def test_the_check_flags_an_unscrubbed_group_namespace_name() -> None:
+    leak = {"namespace": {"name": "Some Group", "path": "user-1", "kind": "group"}}
+    assert scrub.find_unscrubbed(json.dumps(leak))
+
+
+def test_display_names_are_not_rewritten_inside_urls_or_host_names() -> None:
+    doc = {
+        "user": {"name": "Docs", "email": "d" + AT + "corp.example.org"},
+        "html_url": "https://forge.example.test/docs/handbook",
+        "body": "Docs wrote docs.example.test/x and /docs/y and docs-team",
+    }
+    out = scrub.Scrubber().scrub(doc)
+    placeholder = out["user"]["name"]
+    assert out["html_url"] == doc["html_url"]
+    assert out["body"] == f"{placeholder} wrote docs.example.test/x and /docs/y and docs-team"
+
+
 def test_short_names_and_logins_match_on_word_boundaries_only() -> None:
     doc = {
         "user": {"login": "main", "name": "Ann"},
