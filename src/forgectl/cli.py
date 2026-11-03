@@ -1,39 +1,97 @@
-"""Command-line entry point for forgectl."""
+"""Command-line entry point for forgectl: parse, gate, dispatch, print."""
 
 from __future__ import annotations
 
-import argparse
+import signal
 import sys
+from argparse import Namespace
+from collections.abc import Iterator
+from contextlib import contextmanager
+from types import FrameType
 
-from . import __version__
+from . import registry
+from .errors import ForgectlError
+from .humanactions import Tty, build_context, default_me_name
+from .output import emit_error, emit_success
+from .registry import Invocation
+from .surface import WRITE_COMMANDS, build_parser, parse
 
-PROG = "forgectl"
-DESCRIPTION = "Normalized access to pull/merge requests across GitHub and GitLab."
+__all__ = ["build_parser", "main"]
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog=PROG,
-        description=DESCRIPTION,
+class SignalExit(BaseException):
+    """A SIGINT or SIGTERM arrived: exit 128+N with no envelope.
+
+    TODO(#7): once a write is in flight the gateway turns a signal into `outcome_unknown`
+    instead (the audit record and exit 12), and this applies only before any write.
+    """
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
+
+def _raise_signal_exit(signum: int, frame: FrameType | None) -> None:
+    raise SignalExit(signum)
+
+
+@contextmanager
+def _signals() -> Iterator[None]:
+    previous: dict[int, object] = {}
+    try:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            previous[sig] = signal.signal(sig, _raise_signal_exit)
+    except ValueError:  # not the main thread: leave the host's handlers alone
+        pass
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)  # type: ignore[arg-type]
+
+
+def _tty() -> Tty:
+    def isatty(stream: object) -> bool:
+        try:
+            return bool(stream.isatty())  # type: ignore[attr-defined]
+        except (AttributeError, ValueError):
+            return False
+
+    return Tty(stdin=isatty(sys.stdin), stderr=isatty(sys.stderr))
+
+
+def _run(args: Namespace, tty: Tty) -> dict[str, object]:
+    command: str = args.command
+    human = (
+        build_context(args, tty, me_name=default_me_name()) if command in WRITE_COMMANDS else None
     )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"{PROG} {__version__}",
-    )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        help="emit machine-readable JSON output",
-    )
-    parser.add_subparsers(dest="command", metavar="<command>")
-    return parser
+    registry.load_handlers()
+    handler = registry.HANDLERS.get(command)
+    if handler is None:
+        raise ForgectlError("internal", f"{command}: not implemented yet")
+    return handler(Invocation(command=command, args=args, json=args.json, human=human))
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if args.command is None:
-        parser.print_help(sys.stderr)
-        return 2
-    return 0
+def main(argv: list[str] | None = None, *, tty: Tty | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # Until parsing succeeds we cannot know `--json` for sure; a bad command line still gets
+    # the envelope when the flag is anywhere before a `--`.
+    json_mode = "--json" in (argv[: argv.index("--")] if "--" in argv else argv)
+    args: Namespace | None = None
+    try:
+        with _signals():
+            args = parse(argv)
+            json_mode = args.json
+            emit_success(_run(args, tty or _tty()), json_mode=json_mode)
+            return 0
+    except SignalExit as signalled:
+        return 128 + signalled.signum
+    except ForgectlError as err:
+        return emit_error(
+            err, command=getattr(args, "command", None), args=args, json_mode=json_mode
+        )
+    except Exception as exc:  # last line of defense: never a traceback
+        internal = ForgectlError("internal", f"internal error: {type(exc).__name__}")
+        return emit_error(
+            internal, command=getattr(args, "command", None), args=args, json_mode=json_mode
+        )
