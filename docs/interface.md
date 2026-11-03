@@ -742,6 +742,8 @@ Reads fire none.
 
 Per-repo overrides hold only `merge_method` in v1: no setting lowers a safety rule, so none can be relaxed per repo. A duration is a positive number or a numeric string, in seconds, or `<number><unit>` with unit `ms`, `s`, `m`, `h` or `d`. `api_prefix` is only for declared hosts and null for GitHub. A built-in host's `backend` must match. A hook's `cmd` is not empty.
 
+**Reading files.** A config file or drop-in must be a regular file (a symlink to one is followed) of at most 256 KiB, valid UTF-8, a single YAML document whose top level is a mapping; at most 256 drop-ins are read, and names that do not end in `.yaml` or that start with `.` are skipped. YAML anchors, aliases, merge keys, duplicate keys, non-string keys and tags beyond the core types (so also timestamps and binary) are refused. `--config` and its drop-ins do not read the default location. A refusal names the key, or the file for a problem that has no key. Each of `FORGECTL_TIMEOUT`, `FORGECTL_RETRIES`, `FORGECTL_GH_BIN` and `FORGECTL_GLAB_BIN` is refused when empty, and is named by the variable. Beyond the schema, a blank hook `cmd`, an executable named `.` or `..`, control characters in an executable name, a duration over 100 years and per-repo keys that differ only by case are refused. `config_hash` includes the environment's overrides.
+
 ### Credentials
 
 Per host, in this order:

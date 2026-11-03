@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import signal
 import sys
 from argparse import Namespace
@@ -10,6 +11,7 @@ from contextlib import contextmanager
 from types import FrameType
 
 from . import registry
+from .config import load_config
 from .errors import ForgectlError
 from .humanactions import Tty, build_context, default_me_name
 from .output import emit_error, emit_success
@@ -62,14 +64,28 @@ def _tty() -> Tty:
 
 def _run(args: Namespace, tty: Tty) -> dict[str, object]:
     command: str = args.command
+    # Config first: a bad config or FORGECTL_* value ends the run before any command logic.
+    loaded = load_config(getattr(args, "config", None), env=os.environ)
+    timeout = loaded.timeout_for(getattr(args, "timeout", None))
     human = (
-        build_context(args, tty, me_name=default_me_name()) if command in WRITE_COMMANDS else None
+        build_context(args, tty, me_name=loaded.config.me.name or default_me_name())
+        if command in WRITE_COMMANDS
+        else None
     )
     registry.load_handlers()
     handler = registry.HANDLERS.get(command)
     if handler is None:
         raise ForgectlError("internal", f"{command}: not implemented yet")
-    return handler(Invocation(command=command, args=args, json=args.json, human=human))
+    return handler(
+        Invocation(
+            command=command,
+            args=args,
+            json=args.json,
+            human=human,
+            config=loaded,
+            timeout=timeout,
+        )
+    )
 
 
 def _wants_json(argv: list[str]) -> bool:

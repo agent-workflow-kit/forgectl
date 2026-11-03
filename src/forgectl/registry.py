@@ -13,9 +13,10 @@ from __future__ import annotations
 import importlib
 from argparse import Namespace
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
+from .config import DEFAULT_TIMEOUT, LoadedConfig
 from .humanactions import HumanContext
 
 
@@ -27,6 +28,8 @@ class Invocation:
     args: Namespace
     json: bool
     human: HumanContext | None  # set for the write commands only
+    config: LoadedConfig = field(default_factory=LoadedConfig.defaults)
+    timeout: float = DEFAULT_TIMEOUT  # seconds: --timeout, else FORGECTL_TIMEOUT, else config
 
 
 Handler = Callable[[Invocation], dict[str, Any]]
