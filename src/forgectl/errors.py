@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .textsafe import sanitize_text
+from .sanitize import sanitize_text
 
 EXIT_BY_CODE: dict[str, int] = {
     "internal": 1,
