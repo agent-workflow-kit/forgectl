@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+from argparse import Namespace
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from forgectl import registry
 from forgectl.cli import main
 from forgectl.errors import EXIT_BY_CODE, ForgectlError, refused
 from forgectl.humanactions import Tty, require_confirmation
+from forgectl.output import would_refuse_result
 from forgectl.registry import Invocation
 
 from .cli_schema_check import validate
@@ -274,8 +276,9 @@ def test_hostile_input_is_usage_error_exit_2(
 ) -> None:
     code, out, err = run(capsys, ["--json", *argv])
     assert code == 2, (out, err)
-    assert envelope(out)["code"] in {"usage"}
-    assert "usage" in err
+    code_name = envelope(out)["code"]
+    assert code_name in {"usage", "invalid_pr"}  # a bad PR argument is invalid_pr
+    assert code_name in err
 
 
 def test_usage_error_without_json_prints_text_only(capsys: pytest.CaptureFixture[str]) -> None:
@@ -335,7 +338,7 @@ def test_global_flags_parse_in_either_position(
 def test_a_positional_after_double_dash_is_not_a_flag(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    code, out, _ = run(capsys, ["--json", "show", "--", "--not-a-flag"])
+    code, out, _ = run(capsys, ["--json", "show", "--", "github.com/o/r#1"])
     assert code == 1
     assert envelope(out)["message"] == "show: not implemented yet"
 
@@ -919,17 +922,13 @@ def test_human_output_is_one_line_per_field(capsys: pytest.CaptureFixture[str]) 
 # --- would_refuse echoes argv, so it sanitizes it --------------------------------------------
 
 
-def test_dry_run_would_refuse_sanitizes_the_echoed_input(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    registry.HANDLERS["resolve"] = refusing("not_open", details={"state": "closed"})
-    argv = ["--json", "resolve", "x\x1b[31m\u202e\udcff\nz", "--thread", "t\x07\ud800", "--dry-run"]
-    code, out, _ = run(capsys, argv)
-    assert code == 20
-    result = json.loads(out)
+def test_dry_run_would_refuse_sanitizes_the_echoed_input() -> None:
+    """The parsers already refuse control characters in `pr` and `--thread`; the echo is
+    sanitized anyway, in case a parsed value ever carries one."""
+    args = Namespace(pr="x\x1b[31m\u202e\udcff\nz", thread="t\x07\ud800")
+    result = would_refuse_result("resolve", args, refused("not_open", "m", details={"state": "c"}))
     assert result["pr"] == "x<U+001B>[31m<U+202E><U+DCFF><U+000A>z"
     assert result["thread_id"] == "t<U+0007><U+D800>"
-    assert "\x1b" not in out and "\u202e" not in out
 
 
 def test_dry_run_plan_values_from_the_handler_are_sanitized(

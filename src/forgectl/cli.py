@@ -14,6 +14,7 @@ from . import registry
 from .config import load_config
 from .errors import ForgectlError
 from .humanactions import Tty, build_context, default_me_name
+from .identifiers import bind_args
 from .output import emit_error, emit_success
 from .registry import Invocation
 from .surface import WRITE_COMMANDS, build_parser, parse
@@ -66,6 +67,8 @@ def _run(args: Namespace, tty: Tty) -> dict[str, object]:
     command: str = args.command
     # Config first: a bad config or FORGECTL_* value ends the run before any command logic.
     loaded = load_config(getattr(args, "config", None), env=os.environ)
+    # The closed host list: an undeclared host exits 20 here, before any handler or process.
+    bind_args(args, loaded.config)
     timeout = loaded.timeout_for(getattr(args, "timeout", None))
     human = (
         build_context(args, tty, me_name=loaded.config.me.name or default_me_name())
