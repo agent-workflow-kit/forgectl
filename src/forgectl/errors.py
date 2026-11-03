@@ -176,8 +176,9 @@ class ForgectlError(Exception):
             body["retry_after"] = self.retry_after
         if self.hook is not None:
             body["hook"] = self.hook
-        if self.hook_stderr:
-            body["hook_stderr"] = truncate_utf8(sanitize_text(self.hook_stderr), HOOK_STDERR_LIMIT)
+        if self.hook_stderr or self.code in ("vetoed", "escalated"):
+            stderr = sanitize_text(self.hook_stderr or "")
+            body["hook_stderr"] = truncate_utf8(stderr, HOOK_STDERR_LIMIT)
         if self.decision_ids:
             body["decision_ids"] = list(self.decision_ids)
         if self.escalated_hooks:

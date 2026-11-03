@@ -212,10 +212,15 @@ def test_envelope_keeps_set_fields() -> None:
     assert body["decision_ids"] == ["d1"]
 
 
-def test_veto_envelope_omits_an_empty_hook_stderr() -> None:
-    body = ForgectlError("vetoed", "x", hook="pre-merge", hook_stderr="").envelope()["error"]
-    assert body["hook"] == "pre-merge"
-    assert "hook_stderr" not in body
+@pytest.mark.parametrize("code", ["vetoed", "escalated"])
+def test_veto_and_escalation_envelopes_keep_an_empty_hook_stderr(code: str) -> None:
+    hooks = [{"hook": "pre-merge", "index": 0}] if code == "escalated" else None
+    env = ForgectlError(
+        code, "x", hook="pre-merge", hook_stderr="", escalated_hooks=hooks
+    ).envelope()
+    assert env["error"]["hook"] == "pre-merge"
+    assert env["error"]["hook_stderr"] == ""
+    validate(env, "forgectl/cli/error.json")
 
 
 def test_hook_stderr_is_cut_to_4096_bytes_on_a_code_point_boundary() -> None:

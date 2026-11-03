@@ -152,3 +152,13 @@ def test_success_with_stderr_closed_still_prints_the_result(env: dict[str, str])
 
 def test_success_with_stderr_full_stays_exit_0(env: dict[str, str]) -> None:
     assert run(SUCCESS, ["whoami"], env, "2>/dev/full").returncode == 0
+
+
+@pytest.mark.parametrize("flag", ["--help", "--version"])
+@pytest.mark.parametrize("redirect", [">/dev/full", ">&-"])
+def test_help_and_version_exit_0_with_a_failed_stdout(
+    env: dict[str, str], flag: str, redirect: str
+) -> None:
+    result = run(CLI, [flag], env, redirect)
+    assert result.returncode == 0
+    clean(result.stderr)

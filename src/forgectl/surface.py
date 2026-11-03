@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import math
 import re
+import sys
 import unicodedata
 from argparse import Namespace
 from contextvars import ContextVar
@@ -247,6 +248,14 @@ class _Parser(argparse.ArgumentParser):
 
     def error(self, message: str) -> NoReturn:
         raise usage(message)
+
+    def _print_message(self, message: str, file: Any = None) -> None:
+        """Print help and version text through the stream-safe writer, so a full or closed
+        stdout cannot change the exit code or fail at shutdown."""
+        if message:
+            from .output import write_line
+
+            write_line(file if file is not None else sys.stderr, message.removesuffix("\n"))
 
 
 # --- the parser ----------------------------------------------------------------------------------

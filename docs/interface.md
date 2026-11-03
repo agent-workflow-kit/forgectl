@@ -650,7 +650,7 @@ Errors also go to stderr as text.
 
 ### Error envelope
 
-`{"error": {"code", "message", "reason", "details", "retry_after", "hook", "hook_stderr", "decision_ids", "escalated_hooks"}}`. Only `code` and `message` are required; the others are omitted when empty. `reason` is on exit 20. `retry_after` is seconds. `hook` and `hook_stderr` are on a veto or escalation. `hook_stderr` is untrusted: sanitized, then cut to 4096 bytes on a code-point boundary. The shape is `schemas/cli/error.json`.
+`{"error": {"code", "message", "reason", "details", "retry_after", "hook", "hook_stderr", "decision_ids", "escalated_hooks"}}`. Only `code` and `message` are required; the others are omitted when empty. `reason` is on exit 20. `retry_after` is seconds. `hook` and `hook_stderr` are on a veto or escalation, and are always present there, even when `hook_stderr` is empty. `hook_stderr` is untrusted: sanitized, then cut to 4096 bytes on a code-point boundary. The shape is `schemas/cli/error.json`.
 
 `details`, by code or reason:
 
