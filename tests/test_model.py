@@ -1019,18 +1019,38 @@ def test_check_rejects_a_url_the_cleaner_would_null(bad: str) -> None:
         check("a", "passing", url=bad)
 
 
-def test_approvals_count_distinct_accounts() -> None:
-    dup = [entry("b", id_="2"), entry("B", id_="2")]
-    assert m.count_approvals(dup, ALICE) == 1
-    got = m.count_approvals_at_head(
-        dup, ALICE, head_sha=H, backend="github", retarget_at=None, retarget_known=True
-    )
-    assert got == 1
-    no_id = [
-        m.LatestByReviewer("b", None, "approved", H, T1, True),
-        m.LatestByReviewer("B", None, "approved", H, T1, True),
+def _mixed_id_entries() -> list[m.LatestByReviewer]:
+    # `_same_account` is not transitive here: ("a", None) matches both others by login,
+    # while ("A", "5") and ("a", "6") differ by id.
+    return [
+        m.LatestByReviewer("a", None, "approved", H, T1, True),
+        m.LatestByReviewer("A", "5", "approved", H, T1, True),
+        m.LatestByReviewer("a", "6", "approved", H, T1, True),
     ]
-    assert m.count_approvals(no_id, ALICE) == 1
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [entry("b", id_="2"), entry("B", id_="2")],
+        [
+            m.LatestByReviewer("b", None, "approved", H, T1, True),
+            m.LatestByReviewer("B", None, "approved", H, T1, True),
+        ],
+        _mixed_id_entries(),
+        list(reversed(_mixed_id_entries())),
+    ],
+    ids=["same-id", "no-id", "mixed", "mixed-reversed"],
+)
+def test_approval_counters_reject_duplicate_accounts(
+    entries: list[m.LatestByReviewer],
+) -> None:
+    with pytest.raises(ValueError):
+        m.count_approvals(entries, ALICE)
+    with pytest.raises(ValueError):
+        m.count_approvals_at_head(
+            entries, ALICE, head_sha=H, backend="github", retarget_at=None, retarget_known=True
+        )
 
 
 def test_duplicate_accounts_in_latest_by_reviewer_are_rejected() -> None:

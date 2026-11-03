@@ -409,23 +409,17 @@ class Review:
 
 def count_approvals(entries: Iterable[LatestByReviewer], author: Author) -> int:
     """Accounts whose latest state is ``approved`` at any head, other than the author, with
-    ``can_push`` not false (unknown still counts)."""
-    return _count_distinct(
-        e
+    ``can_push`` not false (unknown still counts). Entries naming one account twice are an
+    error."""
+    entries = tuple(entries)
+    _reject_duplicate_accounts(entries)
+    return sum(
+        1
         for e in entries
         if e.state == "approved"
         and not _same_account(e.login, e.id, author)
         and e.can_push is not False
     )
-
-
-def _count_distinct(entries: Iterable[LatestByReviewer]) -> int:
-    """Entries counted once per account, whatever the caller passed."""
-    seen: list[Author] = []
-    for e in entries:
-        if not any(_same_account(e.login, e.id, a) for a in seen):
-            seen.append(_as_author(e))
-    return len(seen)
 
 
 def _not_before(at: str | None, floor: str) -> bool:
@@ -457,10 +451,13 @@ def count_approvals_at_head(
     exists only when ``reset_approvals_on_push`` is true. An approval older than the latest
     retarget does not count, nor does one with no time when a retarget exists. If the retarget
     could not be determined (``retarget_known`` false) no approval counts and the answer is
-    ``None``. Every backend but ``gitlab`` compares the sha; an unknown backend is an error.
+    ``None``. Every backend but ``gitlab`` compares the sha; an unknown backend is an error, as
+    are entries naming one account twice.
     """
     if backend not in ("github", "gitlab"):
         raise ValueError(f"unknown backend {backend!r}")
+    entries = tuple(entries)
+    _reject_duplicate_accounts(entries)
     if not retarget_known:
         return None
     if backend == "gitlab" and reset_approvals_on_push is not True:
@@ -476,7 +473,7 @@ def count_approvals_at_head(
         if retarget_at is not None and not _not_before(e.at, retarget_at):
             continue
         counted.append(e)
-    return _count_distinct(counted)
+    return len(counted)
 
 
 def github_review_decision(raw: str | None) -> ReviewDecision:
