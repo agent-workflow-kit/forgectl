@@ -51,6 +51,9 @@ GOOD_PRS = [
     ("https://github.com/o/r/pull/7/checks", "github.com/o/r#7"),
     ("https://github.com/o/r/pull/7.diff", "github.com/o/r#7"),
     ("https://github.com/o/r/pull/7.patch", "github.com/o/r#7"),
+    ("https://github.com/o/r/pull/7.diff/", "github.com/o/r#7"),
+    ("https://github.com/o/r/pull/7.patch/?x=1", "github.com/o/r#7"),
+    ("https://github.com/o/merge_requests/pull/1", "github.com/o/merge_requests#1"),
     ("https://github.com/o/r/pull/7?w=1&x=a.b_c~d-e", "github.com/o/r#7"),
     ("https://github.com/o/r/pull/7#issuecomment-1", "github.com/o/r#7"),
     ("https://github.com/o/r/pull/7/files?a=b#diff-ab", "github.com/o/r#7"),
@@ -175,7 +178,7 @@ BAD_PRS = [
     ("bad suffix", "https://github.com/o/r/pull/7/reviews"),
     ("gitlab suffix on github", "https://github.com/o/r/pull/7/diffs"),
     ("github suffix on gitlab", "https://gitlab.com/g/p/-/merge_requests/3/files"),
-    ("diff then slash", "https://github.com/o/r/pull/7.diff/"),
+    ("diff then two slashes", "https://github.com/o/r/pull/7.diff//"),
     ("diff twice", "https://github.com/o/r/pull/7.diff.diff"),
     ("commits bad sha", "https://github.com/o/r/pull/7/commits/xyz"),
     ("commits short sha", "https://github.com/o/r/pull/7/commits/abc"),
@@ -195,7 +198,6 @@ BAD_PRS = [
     ("host-form scheme and hash", "https://github.com/o/r#7"),
     ("dash project segment", "https://gitlab.com/g/-/p/-/merge_requests/3"),
     ("merge_requests project segment", "https://gitlab.com/g/merge_requests/p/-/merge_requests/3"),
-    ("dash project segment github", "https://github.com/-/r/pull/7"),
     ("only dash project", "https://gitlab.com/-/merge_requests/3"),
     ("empty project", "https://gitlab.com/merge_requests/3"),
     ("angle brackets", "https://github.com/<o>/r/pull/7"),
@@ -306,6 +308,59 @@ def test_a_url_that_is_only_the_api_prefix_is_invalid_pr() -> None:
 def test_the_prefix_must_match_whole_segments() -> None:
     url = "https://pre.example.test/gitlabx/g/p/-/merge_requests/3"
     assert code_of(bind_pr, parse_pr(url), CONFIG) == ("invalid_pr", None)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "gitlab.com/--help#1",
+        "gitlab.com/g/-x#1",
+        "gitlab.com/g/-/p#4",
+        "git.example.test/g/-p#1",
+        "https://gitlab.com/-x/p/-/merge_requests/1",
+        "https://gitlab.com/g/-p/merge_requests/1",
+        "https://pre.example.test/gitlab/-g/p/-/merge_requests/3",
+        "github.com/-/b#1",
+        "github.com/-o/r#1",
+        "https://github.com/-/r/pull/7",
+    ],
+)
+def test_a_leading_dash_in_a_gitlab_segment_or_github_owner_is_invalid_pr(text: str) -> None:
+    assert code_of(bind_pr, parse_pr(text), CONFIG) == ("invalid_pr", None)
+
+
+def test_a_github_repo_name_may_start_with_a_dash() -> None:
+    assert bind_pr(parse_pr("github.com/o/-r#1"), CONFIG).project == "o/-r"
+    assert bind_repo(parse_repo("github.com/o/-r"), CONFIG).path == "o/-r"
+
+
+@pytest.mark.parametrize("text", ["gitlab.com/-x/y", "gitlab.com/g/-y", "github.com/-o/r"])
+def test_a_repo_id_with_a_leading_dash_segment_is_usage(text: str) -> None:
+    assert code_of(bind_repo, parse_repo(text), CONFIG) == ("usage", None)
+
+
+def test_merge_requests_is_a_bad_segment_only_in_a_merge_request_url() -> None:
+    ref = bind_pr(parse_pr("https://github.com/o/merge_requests/pull/1"), CONFIG)
+    assert ref.project == "o/merge_requests"
+    assert bind_pr(parse_pr("github.com/o/merge_requests#1"), CONFIG) == ref
+    url = "https://gitlab.com/g/merge_requests/-/merge_requests/1"
+    assert code_of(parse_pr, url) == ("invalid_pr", None)
+
+
+def test_a_bind_time_invalid_pr_echoes_the_text_as_given() -> None:
+    url = "https://gitlab.com/g/p/pull/3"
+    with pytest.raises(ForgectlError) as caught:
+        bind_pr(parse_pr(url), CONFIG)
+    assert caught.value.code == "invalid_pr"
+    assert repr(url) in caught.value.message
+    assert "'gitlab.com/g/p#3'" not in caught.value.message
+
+
+def test_the_raw_text_does_not_change_equality_or_str() -> None:
+    a = parse_pr("https://github.com/o/r/pull/7")
+    b = parse_pr("https://github.com/o/r/pull/7/files?x=1")
+    assert a == b
+    assert str(a) == "github.com/o/r#7"
 
 
 def test_the_host_form_is_not_prefixed() -> None:
@@ -466,6 +521,10 @@ def test_good_logins(text: str) -> None:
         "bob;rm",
         "--flag",
         "a‮b",
+        ".",
+        "..",
+        "a.",
+        "a..",
     ],
 )
 def test_bad_logins_are_usage(text: str) -> None:
@@ -480,6 +539,8 @@ def test_login_binding_uses_the_backends_grammar() -> None:
     assert code_of(bind_login, "a" * 40, "github") == ("usage", None)
     assert code_of(bind_login, ".hidden", "github") == ("usage", None)
     assert code_of(bind_login, "dependabot[bot]", "gitlab") == ("usage", None)
+    for text in (".", "..", "a.", "." * 255):
+        assert code_of(bind_login, text, "gitlab") == ("usage", None)
 
 
 # --- typed ids --------------------------------------------------------------------------------

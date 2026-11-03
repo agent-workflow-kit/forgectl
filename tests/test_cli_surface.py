@@ -270,14 +270,17 @@ HOSTILE: list[tuple[str, list[str]]] = [
 ]
 
 
-@pytest.mark.parametrize("argv", [a for _, a in HOSTILE], ids=[n for n, _ in HOSTILE])
+HOSTILE_PR = frozenset({"empty pr", "double dash then flag as pr"})  # a bad PR is invalid_pr
+
+
+@pytest.mark.parametrize(("name", "argv"), HOSTILE, ids=[n for n, _ in HOSTILE])
 def test_hostile_input_is_usage_error_exit_2(
-    argv: list[str], capsys: pytest.CaptureFixture[str]
+    name: str, argv: list[str], capsys: pytest.CaptureFixture[str]
 ) -> None:
     code, out, err = run(capsys, ["--json", *argv])
     assert code == 2, (out, err)
     code_name = envelope(out)["code"]
-    assert code_name in {"usage", "invalid_pr"}  # a bad PR argument is invalid_pr
+    assert code_name == ("invalid_pr" if name in HOSTILE_PR else "usage")
     assert code_name in err
 
 

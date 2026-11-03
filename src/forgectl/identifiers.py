@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from argparse import Namespace
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from .config import BUILT_IN_HOSTS, Config
@@ -50,7 +50,7 @@ _REPO_RE = re.compile(rf"{_HOST}/{_PROJECT}", _ASCII)
 _PR_TEXT_RE = re.compile(rf"{_HOST}/{_PROJECT}#{_NUMBER}", _ASCII)
 _GITHUB_URL_RE = re.compile(
     rf"https://{_HOST}/{_PROJECT_LAZY}"
-    rf"/pull/{_NUMBER}(?:(?:/files|/commits(?:/{_SHORT_SHA})?|/checks)?/?|\.diff|\.patch){_TAIL}",
+    rf"/pull/{_NUMBER}(?:(?:/files|/commits(?:/{_SHORT_SHA})?|/checks)?/?|\.(?:diff|patch)/?){_TAIL}",
     _ASCII,
 )
 _GITLAB_URL_RE = re.compile(
@@ -59,7 +59,10 @@ _GITLAB_URL_RE = re.compile(
     _ASCII,
 )
 _GITHUB_LOGIN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\[bot\])?", _ASCII)
-_GITLAB_LOGIN_RE = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254}", _ASCII)
+# never ending in `.`, so `.` and `..` (path traversal in REST `users/<name>`) are out
+_GITLAB_LOGIN_RE = re.compile(
+    r"[A-Za-z0-9_]|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,253}[A-Za-z0-9_-]", _ASCII
+)
 _SHA_RE = re.compile(r"[0-9a-fA-F]{40}", _ASCII)
 _NODE = r"[A-Za-z0-9_=-]{1,100}"
 _TYPED_ID_RE = re.compile(
@@ -178,12 +181,15 @@ class PrInput:
 
     ``project`` is the path as given: for a URL on a host with an ``api_prefix`` it still holds
     the prefix. ``kind`` is the URL's ``pull`` or ``merge_requests``, None for ``host/path#N``.
+    ``raw`` is the text as given, for a bind-time ``invalid_pr`` message (the normalized form can
+    itself be a valid reference); it is not part of equality or ``str()``.
     """
 
     host: str
     project: str
     number: int
     kind: Literal["pull", "merge_requests"] | None
+    raw: str = field(default="", compare=False, repr=False)
 
     def __str__(self) -> str:
         return f"{self.host}/{self.project}#{self.number}"
@@ -191,6 +197,14 @@ class PrInput:
 
 def _clean_segments(project: str) -> bool:
     return not any(seg in (".", "..") for seg in project.split("/"))
+
+
+def _no_option_segments(backend: Backend, path: str) -> bool:
+    """No segment that reads as an option: GitLab group and project paths and GitHub owners
+    (logins) cannot start with ``-``; a GitHub repo name can."""
+    segments = path.split("/")
+    checked = segments if backend == "gitlab" else segments[:1]
+    return not any(seg.startswith("-") for seg in checked)
 
 
 def parse_pr(text: str) -> PrInput:
@@ -221,9 +235,9 @@ def _match_pr(text: str) -> PrInput | None:
     project = match["project"]
     if host is None or not _clean_segments(project):
         return None
-    if kind is not None and _BAD_PROJECT_SEGMENTS_IN_URL.intersection(project.split("/")):
+    if kind == "merge_requests" and _BAD_PROJECT_SEGMENTS_IN_URL.intersection(project.split("/")):
         return None
-    return PrInput(host=host, project=project, number=int(match["number"]), kind=kind)
+    return PrInput(host=host, project=project, number=int(match["number"]), kind=kind, raw=text)
 
 
 def parse_repo(text: str) -> RepoInput:
@@ -242,14 +256,15 @@ def _check_segments(backend: Backend, path: str) -> bool:
 
 def bind_repo(repo: RepoInput, config: Config) -> RepoRef:
     backend = backend_of(repo.host, config)
-    if not _check_segments(backend, repo.path):
+    if not _check_segments(backend, repo.path) or not _no_option_segments(backend, repo.path):
         raise usage(f"not a valid {backend} repo id: {_shown(str(repo))}")
     return RepoRef(host=repo.host, backend=backend, path=repo.path)
 
 
 def bind_pr(pr: PrInput, config: Config) -> PrRef:
     backend = backend_of(pr.host, config)
-    invalid = ForgectlError("invalid_pr", f"not a valid {backend} pull request: {_shown(str(pr))}")
+    shown = _shown(pr.raw or str(pr))
+    invalid = ForgectlError("invalid_pr", f"not a valid {backend} pull request: {shown}")
     expected_kind = "pull" if backend == "github" else "merge_requests"
     if pr.kind not in (None, expected_kind):
         raise invalid
@@ -265,6 +280,8 @@ def bind_pr(pr: PrInput, config: Config) -> PrRef:
             if _BAD_PROJECT_SEGMENTS_IN_URL.intersection(project.split("/")):
                 raise invalid
     if not project or not _check_segments(backend, project):
+        raise invalid
+    if not _no_option_segments(backend, project):
         raise invalid
     return PrRef(host=pr.host, backend=backend, project=project, number=pr.number)
 

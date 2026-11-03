@@ -297,3 +297,47 @@ def test_dry_run_echoes_the_thread_id(
     result = json.loads(out)
     validate(result, "forgectl/cli/resolve.json")
     assert (code, result["thread_id"]) == (20, "gl:d:" + "b" * 40)
+
+
+# --- a refusal at the identifier stage never starts a backend ---------------------------------
+
+
+@pytest.fixture
+def fake_backends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """``gh`` and ``glab`` stand-ins that log every call, named by FORGECTL_*_BIN and on PATH."""
+    log = tmp_path / "backend-calls.log"
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("gh", "glab"):
+        script = bindir / name
+        script.write_text(f'#!/bin/sh\necho "{name} $*" >> "{log}"\n', encoding="utf-8")
+        script.chmod(0o755)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    monkeypatch.setenv("FORGECTL_GH_BIN", str(bindir / "gh"))
+    monkeypatch.setenv("FORGECTL_GLAB_BIN", str(bindir / "glab"))
+    monkeypatch.setenv("PATH", f"{bindir}:/usr/bin:/bin")
+    return log
+
+
+@pytest.mark.parametrize(
+    ("argv", "code"),
+    [
+        (["show", "https://other.example.test/o/r/pull/1"], 20),
+        (["show", "other.example.test/o/r#1"], 20),
+        (["merge", "other.example.test/o/r#1", *EXPECTED, "--dry-run"], 20),
+        (["prs", "--repo", "other.example.test/o/r"], 20),
+        (["prs", "--host", "other.example.test", "--author", "me"], 20),
+        (["whoami", "--host", "other.example.test"], 20),
+        (["show", "github.com/o/r#0"], 2),
+        (["show", "https://gitlab.com/g/p/pull/3"], 2),
+        (["show", "gitlab.com/--help#1"], 2),
+        (["prs", "--repo", "gitlab.com/-x/y"], 2),
+        (["prs", "--host", "github.com/o", "--author", "me"], 2),
+    ],
+)
+def test_an_identifier_refusal_never_runs_gh_or_glab(
+    argv: list[str], code: int, fake_backends: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run(capsys, ["--json", *argv])[0] == code
+    assert not fake_backends.exists()
