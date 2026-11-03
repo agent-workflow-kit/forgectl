@@ -341,3 +341,15 @@ def test_an_identifier_refusal_never_runs_gh_or_glab(
 ) -> None:
     assert run(capsys, ["--json", *argv])[0] == code
     assert not fake_backends.exists()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="positive control for the test above: no command calls gh or glab yet; drop this "
+    "xfail once the first command calls the backend",
+)
+def test_a_valid_reference_does_run_the_backend(
+    fake_backends: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run(capsys, ["--json", "show", NORMAL])
+    assert fake_backends.exists()

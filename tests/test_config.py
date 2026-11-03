@@ -618,6 +618,9 @@ INVALID: dict[str, tuple[str, str]] = {
     "me.name unicode": ("me: {name: 'jos\u00e9'}\n", "me.name"),
     "me.github slash": ("me: {github: 'a/b'}\n", "me.github"),
     "me.gitlab empty": ("me: {gitlab: ''}\n", "me.gitlab"),
+    "me.gitlab dotdot": ("me: {gitlab: '..'}\n", "me.gitlab"),
+    "me.gitlab dot": ("me: {gitlab: '.'}\n", "me.gitlab"),
+    "me.gitlab trailing dot": ("me: {gitlab: 'a.'}\n", "me.gitlab"),
     "gh_bin relative path": ("gh_bin: bin/gh\n", "gh_bin"),
     "gh_bin empty": ("gh_bin: ''\n", "gh_bin"),
     "gh_bin newline": ('gh_bin: "gh\\n"\n', "gh_bin"),
@@ -716,6 +719,18 @@ INVALID: dict[str, tuple[str, str]] = {
     ),
     "host me bad": (
         HOST + "    backend: gitlab\n    me: 'a b'\n",
+        "hosts.h.example.com.me",
+    ),
+    "host me dotdot": (
+        HOST + "    backend: gitlab\n    me: '..'\n",
+        "hosts.h.example.com.me",
+    ),
+    "host me dot": (
+        HOST + "    backend: gitlab\n    me: '.'\n",
+        "hosts.h.example.com.me",
+    ),
+    "host me trailing dot": (
+        HOST + "    backend: gitlab\n    me: 'a.'\n",
         "hosts.h.example.com.me",
     ),
     "repo bad method": (

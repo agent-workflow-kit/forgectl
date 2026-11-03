@@ -81,7 +81,9 @@ _UNIT_SECONDS = {
 _DECIMAL = Context(prec=34)  # a private context: the thread's context may have been changed
 _NAME_RE = re.compile(r"[A-Za-z0-9._@-]{1,64}", re.ASCII)
 _LOGIN_RE = re.compile(
-    r"(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\[bot\])?|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254})", re.ASCII
+    r"(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\[bot\])?"
+    r"|[A-Za-z0-9_]|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,253}[A-Za-z0-9_-])",
+    re.ASCII,
 )
 _BIN_RE = re.compile(r"/.*|[^/]+", re.ASCII)
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*", re.ASCII)
