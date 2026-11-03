@@ -136,9 +136,12 @@ def _no_control_characters(value: str) -> str:
 
 
 def _bin_name(value: str) -> str:
-    """A bare name or an absolute path (the schema), not ``.`` or ``..``, no control characters."""
+    """A bare name or an absolute path (the schema), not ``.`` or ``..``, no control characters
+    and no lone surrogates (an environment value can carry one from undecodable bytes)."""
     if not _BIN_RE.fullmatch(value) or value in (".", ".."):
         raise ValueError("must be a bare executable name or an absolute path")
+    if any(unicodedata.category(ch) == "Cs" for ch in value):
+        raise ValueError("must not contain a lone surrogate")
     return _no_control_characters(value)
 
 

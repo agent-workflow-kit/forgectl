@@ -1008,7 +1008,19 @@ BAD_ENV = [
     ("FORGECTL_GLAB_BIN", ""),
     ("FORGECTL_GLAB_BIN", "./glab"),
     ("FORGECTL_GLAB_BIN", ".."),
+    ("FORGECTL_GH_BIN", os.fsdecode(b"gh\xff")),
+    ("FORGECTL_GLAB_BIN", "glab\ud800"),
 ]
+
+
+@pytest.mark.parametrize("name", ["FORGECTL_GH_BIN", "FORGECTL_GLAB_BIN"])
+def test_a_lone_surrogate_in_an_environment_executable_is_refused_without_echoing_it(
+    home: Path, name: str
+) -> None:
+    with pytest.raises(ForgectlError) as exc:
+        load(home, None, **{name: os.fsdecode(b"tool\xff")})
+    assert exc.value.details == {"key": name}
+    assert "tool" not in str(exc.value)
 
 
 @pytest.mark.parametrize(("name", "value"), BAD_ENV)
@@ -1140,6 +1152,13 @@ def test_hash_ignores_key_order_file_layout_and_spelling_of_durations(home: Path
     dropins(home, {"3.yaml": "timeout: '60'\n"})
     c = load(home).config_hash
     assert a == b == c
+
+
+def test_hash_input_writes_durations_as_float_seconds(home: Path) -> None:
+    dump = load(home, "timeout: 60\n").config.model_dump(mode="json", by_alias=True)
+    text = json.dumps(dump, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    assert '"timeout":60.0' in text
+    assert load(home, "timeout: 9ms\n").config.model_dump(mode="json")["timeout"] == 0.009
 
 
 def test_hash_changes_with_any_value(home: Path) -> None:
