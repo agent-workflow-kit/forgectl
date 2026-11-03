@@ -1,0 +1,52 @@
+"""The backend protocol (issue #10): both adapters must implement every read."""
+
+from __future__ import annotations
+
+from forgectl import model as m
+from forgectl.backends.base import READ_METHODS, Backend
+
+
+class _Full:
+    name = "github"
+
+    def list_prs(self, query: m.PrQuery) -> m.PrPage: ...
+    def get_pr(self, ref: m.PrRef) -> m.PR: ...
+    def snapshot(self, ref: m.PrRef) -> m.Snapshot: ...
+    def diff(self, ref: m.PrRef) -> m.DiffResult: ...
+    def compare(self, ref: m.PrRef, from_sha: str, to_sha: str) -> m.CompareResult: ...
+    def files(self, ref: m.PrRef) -> m.FilesResult: ...
+    def comments(self, ref: m.PrRef) -> m.CommentsResult: ...
+    def reviews(self, ref: m.PrRef) -> m.ReviewsResult: ...
+    def ci(self, ref: m.PrRef) -> m.CiResult: ...
+    def access(self, repo: m.RepoRef, user: str) -> m.AccessResult: ...
+    def whoami(self, host: str) -> m.Identity: ...
+
+
+class _NoCompare:
+    name = "gitlab"
+
+    def get_pr(self, ref: m.PrRef) -> m.PR: ...
+
+
+def test_a_full_adapter_satisfies_the_protocol() -> None:
+    assert isinstance(_Full(), Backend)
+
+
+def test_a_partial_adapter_does_not() -> None:
+    assert not isinstance(_NoCompare(), Backend)
+
+
+def test_read_methods_list_matches_the_protocol() -> None:
+    assert set(READ_METHODS) == {n for n in vars(_Full) if not n.startswith("_") and n != "name"}
+
+
+def test_pr_ref_builds_the_output_form_and_rejects_bad_numbers() -> None:
+    ref = m.PrRef(host="github.com", path="o/r", number=7)
+    assert ref.pr == "github.com/o/r#7"
+    assert ref.repo == "github.com/o/r"
+    for bad in (0, -1, 10**10, True):
+        try:
+            m.PrRef(host="github.com", path="o/r", number=bad)  # type: ignore[arg-type]
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted {bad!r}")
