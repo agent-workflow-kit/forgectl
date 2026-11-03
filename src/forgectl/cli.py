@@ -99,6 +99,14 @@ def _failure_level(err: ForgectlError) -> str:
     return "info"
 
 
+def _success_level(command: str, *, verbose: bool) -> str | None:
+    """Interface Audit and log: a write's success is ``info``; a read logs only at
+    ``--verbose`` (as ``debug``), so polling does not grow the file."""
+    if command in WRITE_COMMANDS:
+        return "info"
+    return "debug" if verbose else None
+
+
 def _log(level: str, event: str, args: Namespace | None, details: dict[str, Any]) -> None:
     """One ``log.jsonl`` line. A failure only warns: it never changes the result."""
     try:
@@ -133,8 +141,9 @@ def _dispatch(argv: list[str], tty: Tty | None) -> int:
         args = parse(argv)
         json_mode = args.json
         emit_success(_run(args, tty or _tty()), json_mode=json_mode)
-        if args.verbose:  # reads log only at --verbose or on failure, so polling stays small
-            _log("debug", "command_done", args, {"command": args.command})
+        level = _success_level(args.command, verbose=args.verbose)
+        if level is not None:
+            _log(level, "command_done", args, {"command": args.command})
         return 0
     except ForgectlError as err:
         code = emit_error(
@@ -150,9 +159,17 @@ def _dispatch(argv: list[str], tty: Tty | None) -> int:
         return code
     except Exception as exc:  # last line of defense: never a traceback
         internal = ForgectlError("internal", f"internal error: {type(exc).__name__}")
-        return emit_error(
+        code = emit_error(
             internal, command=getattr(args, "command", None), args=args, json_mode=json_mode
         )
+        # The exception's text may hold anything; only its type name is logged.
+        details = {
+            "command": getattr(args, "command", None),
+            "exit_code": code,
+            "exception": type(exc).__name__,
+        }
+        _log("error", "internal", args, details)
+        return code
 
 
 def main(argv: list[str] | None = None, *, tty: Tty | None = None) -> int:
@@ -163,4 +180,5 @@ def main(argv: list[str] | None = None, *, tty: Tty | None = None) -> int:
         try:
             return _dispatch(argv, tty)
         except SignalExit as signalled:
+            # TODO(#21): map a signal after Attempt.begin() to exit 12 outcome_unknown.
             return 128 + signalled.signum

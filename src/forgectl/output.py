@@ -167,15 +167,26 @@ def warn(text: str) -> None:
 def _write_stream(stream: TextIO | None, records: Iterable[dict[str, Any]], *, array: bool) -> None:
     if stream is None:
         return
-    try:
-        if array:
-            stream.write("[")
-        for index, record in enumerate(records):
-            stream.write(("," if array and index else "") + dumps(record) + ("" if array else "\n"))
+
+    def put(text: str) -> bool:
+        # Only the writes are guarded: an error from producing the records is not a broken pipe.
+        try:
+            stream.write(text)
             if not array:
                 stream.flush()
-        if array:
-            stream.write("]\n")
+        except (OSError, ValueError):
+            _discard(stream)
+            return False
+        return True
+
+    if array and not put("["):
+        return
+    for index, record in enumerate(records):
+        if not put(("," if array and index else "") + dumps(record) + ("" if array else "\n")):
+            return
+    if array:
+        put("]\n")
+    try:
         stream.flush()
     except (OSError, ValueError):
         _discard(stream)

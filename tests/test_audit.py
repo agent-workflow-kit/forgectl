@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
+import signal
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from forgectl import audit
+from forgectl import audit, jsonlog
 from forgectl.audit import Attempt, AuditContext, AuditInputs
-from forgectl.cli import SignalExit
+from forgectl.cli import SignalExit, _signals
 from forgectl.errors import ForgectlError
 
 from .cli_schema_check import validate  # TODO(#3): the shared schema registry replaces this
@@ -383,6 +385,25 @@ def mutations() -> list[tuple[str, dict[str, Any]]]:
         "attempted ok",
         lambda r: (r.update(result="attempted"), r.pop("ids"), r.pop("observed")),
     )
+    # A non-string where a string belongs, for every string field: never a TypeError.
+    top = ("ts", "attempt_id", "actor", "target", "action", "result")
+    nested = ("head_sha", "base_ref", "event", "body_sha256", "method", "thread_id")
+    nested += ("reply_to", "config_hash", "config_path", "host_login", "token_source")
+    nested += ("actor_source",)
+    for label, bad in (("list", ["merge"]), ("dict", {}), ("int", 1)):
+        for key in top:
+            mut(f"{key} {label}", lambda r, k=key, v=bad: r.update({k: copy.deepcopy(v)}))
+        for key in nested:
+            mut(f"inputs.{key} {label}", lambda r, k=key, v=bad: r["inputs"].update({k: v}))
+        for key in ("decision_id", "override", "ids"):
+            mut(f"{key} item {label}", lambda r, k=key, v=bad: r.update({k: [v]}))
+        for key in ("head_sha", "base_ref"):
+            mut(
+                f"observed.{key} {label}",
+                lambda r, k=key, v=bad: r.update(
+                    result="merged_unexpected", observed={"head_sha": SHA, "base_ref": "a", k: v}
+                ),
+            )
     return out
 
 
@@ -427,3 +448,72 @@ def test_the_validator_is_stricter_than_the_schema_on_a_trailing_newline(
     record = good()
     record[key] = value
     assert audit.audit_problem(record) is not None
+
+
+# --- a signal during an append (review round 1) ----------
+
+
+def _kill_self_during_open(monkeypatch: pytest.MonkeyPatch, *, on_call: int) -> list[int]:
+    """Send SIGTERM to this process from inside the append's open step, on call ``on_call``."""
+    calls: list[int] = []
+    real = jsonlog._open_append
+
+    def open_and_signal(directory: Path, name: str) -> int:
+        calls.append(1)
+        if len(calls) == on_call:
+            os.kill(os.getpid(), signal.SIGTERM)
+        return real(directory, name)
+
+    monkeypatch.setattr(jsonlog, "_open_append", open_and_signal)
+    return calls
+
+
+def test_a_signal_during_the_outcome_append_still_writes_exactly_one_outcome(
+    state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _signals(), pytest.raises(SignalExit) as caught, Attempt(state, context()) as attempt:
+        attempt.begin()
+        _kill_self_during_open(monkeypatch, on_call=1)
+        attempt.finish("merged")
+    assert caught.value.signum == signal.SIGTERM
+    assert [r["result"] for r in records(state)] == ["attempted", "merged"]
+
+
+def test_a_signal_during_the_attempted_append_writes_it_then_one_unknown_outcome(
+    state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _kill_self_during_open(monkeypatch, on_call=1)
+    with _signals(), pytest.raises(SignalExit), Attempt(state, context()) as attempt:
+        attempt.begin()
+        pytest.fail("the signal propagates out of begin()")
+    assert len(calls) == 2
+    assert [r["result"] for r in records(state)] == ["attempted", "outcome_unknown"]
+
+
+def test_a_signal_just_after_the_outcome_write_does_not_duplicate_it(
+    state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = os.write
+    sent: list[int] = []
+
+    def write_then_signal(fd: int, data: bytes) -> int:
+        written = real(fd, data)
+        if not sent and b'"merged"' in data:
+            sent.append(1)
+            os.kill(os.getpid(), signal.SIGTERM)
+        return written
+
+    with _signals(), pytest.raises(SignalExit), Attempt(state, context()) as attempt:
+        attempt.begin()
+        monkeypatch.setattr(jsonlog.os, "write", write_then_signal)
+        attempt.finish("merged")
+    assert sent == [1]
+    assert [r["result"] for r in records(state)] == ["attempted", "merged"]
+
+
+def test_the_signal_mask_is_restored_after_an_append(state: Path) -> None:
+    before = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    with Attempt(state, context()) as attempt:
+        attempt.begin()
+        attempt.finish("merged")
+    assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == before

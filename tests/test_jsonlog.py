@@ -293,6 +293,9 @@ def test_concurrent_processes_never_interleave_lines(
         assert proc.wait(timeout=120) == 0
     lines = (state / "audit.jsonl").read_bytes().split(b"\n")
     assert lines.pop() == b""
+    # A writer that reads the file's end while another write is in flight adds a newline
+    # first; the worst case is an empty line, which export skips.
+    lines = [line for line in lines if line]
     assert len(lines) == workers * count
     seen: dict[str, list[int]] = {}
     for line in lines:
@@ -300,3 +303,75 @@ def test_concurrent_processes_never_interleave_lines(
         assert record["pad"] == record["who"][0] * size
         seen.setdefault(record["who"], []).append(record["i"])
     assert all(order == list(range(count)) for order in seen.values())
+
+
+# --- review round 1 ----------
+
+
+def test_an_append_after_an_unterminated_fragment_starts_its_own_line(state: Path) -> None:
+    state.mkdir(parents=True, mode=0o700)
+    (state / "audit.jsonl").write_bytes(b'{"n":0}\n{"torn":')
+    jsonlog.append(state, "audit.jsonl", {"n": 1})
+    lines = (state / "audit.jsonl").read_bytes().split(b"\n")
+    assert lines == [b'{"n":0}', b'{"torn":', b'{"n":1}', b""]
+
+
+def test_an_append_after_a_complete_line_adds_no_blank_line(state: Path) -> None:
+    jsonlog.append(state, "audit.jsonl", {"n": 0})
+    jsonlog.append(state, "audit.jsonl", {"n": 1})
+    assert (state / "audit.jsonl").read_bytes() == b'{"n":0}\n{"n":1}\n'
+
+
+def test_a_record_at_the_cap_still_goes_after_a_fragment(state: Path) -> None:
+    state.mkdir(parents=True, mode=0o700)
+    (state / "audit.jsonl").write_bytes(b"frag")
+    pad = jsonlog.MAX_LINE_BYTES - len(json.dumps({"p": ""}, separators=(",", ":"))) - 1
+    jsonlog.append(state, "audit.jsonl", {"p": "x" * pad})
+    raw = (state / "audit.jsonl").read_bytes()
+    assert raw.startswith(b"frag\n") and len(raw) == 5 + jsonlog.MAX_LINE_BYTES
+
+
+def test_missing_parents_are_created_0700_under_a_permissive_umask(tmp_path: Path) -> None:
+    state = tmp_path / "home" / ".local" / "state" / "forgectl"
+    (tmp_path / "home").mkdir(mode=0o755)
+    old = os.umask(0)
+    try:
+        jsonlog.append(state, "audit.jsonl", {"a": 1})
+    finally:
+        os.umask(old)
+    assert mode(tmp_path / "home" / ".local") == 0o700
+    assert mode(tmp_path / "home" / ".local" / "state") == 0o700
+    assert mode(state) == 0o700
+    assert mode(tmp_path / "home") == 0o755  # an existing parent is left alone
+
+
+def test_open_read_refuses_a_hard_linked_file(state: Path, tmp_path: Path) -> None:
+    state.mkdir(parents=True, mode=0o700)
+    other = tmp_path / "other"
+    other.write_text("")
+    os.link(other, state / "audit.jsonl")
+    with pytest.raises(JsonlError):
+        jsonlog.open_read(state, "audit.jsonl")
+
+
+def test_userinfo_is_dropped_up_to_the_last_at_sign() -> None:
+    assert jsonlog.scrub_text("see https://u:pa@ss@host/x now") == "see https://host/x now"
+    assert jsonlog.scrub_text("https://host/p@q") == "https://host/p@q"
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "glpat-abcdefghijkl",
+        "glpat-abcdefghijkl.01.abcdefghi",
+        "gloas-abcdefghijkl",
+        "glrt-abcdefghijkl",
+        "gldt-abcdefghijkl",
+        "glptt-abcdefghijkl",
+        "glft-abcdefghijkl",
+        "glimt-abcdefghijkl",
+        "glsoat-abcdefghijkl",
+    ],
+)
+def test_gitlab_token_shapes_are_masked(token: str) -> None:
+    assert jsonlog.scrub_text(f"tok {token} end") == "tok <redacted> end"

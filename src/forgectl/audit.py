@@ -14,7 +14,10 @@ compares with ``schemas/audit.json``; jsonschema is test-only.
 from __future__ import annotations
 
 import secrets
-from collections.abc import Iterable, Mapping, Sequence
+import signal
+import threading
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
@@ -155,6 +158,8 @@ def audit_problem(record: object) -> str | None:
     if not attempted and ("ids" not in record or "observed" not in record):
         return "outcome record without ids or observed"
     action, result = record["action"], record["result"]
+    # Type-check before any dict or set lookup: an unhashable value must not raise.
+    action_ok = isinstance(action, str) and action in ACTIONS
     decisions = record["decision_id"]
     ids = record.get("ids", [])
     overrides = record["override"]
@@ -166,9 +171,10 @@ def audit_problem(record: object) -> str | None:
         and len(decisions) <= 32
         and all(matches("decision_id", d) for d in decisions),
         "target": matches("pr", record["target"]),
-        "action": action in ACTIONS,
-        "result": result in RESULTS
-        and action in RESULTS_BY_ACTION
+        "action": action_ok,
+        "result": isinstance(result, str)
+        and result in RESULTS
+        and action_ok
         and result in RESULTS_BY_ACTION[action],
         "override": isinstance(overrides, list)
         and all(o in OVERRIDES for o in overrides)
@@ -238,6 +244,31 @@ def check_writable(directory: Path) -> None:
         raise _unavailable(err) from None
 
 
+_HELD_SIGNALS = frozenset({signal.SIGINT, signal.SIGTERM})
+
+
+@contextmanager
+def _signals_held() -> Iterator[None]:
+    """Hold SIGINT and SIGTERM while a record is appended and its flag set.
+
+    A signal that arrives meanwhile stays pending and is delivered when the old mask is
+    restored, so its handler's exception is raised from that restore: after the record is on
+    disk and the flag is set. The record is then neither dropped nor written twice. Off the
+    main thread (or without ``pthread_sigmask``) the mask would not cover the thread that runs
+    Python handlers, so nothing is held there.
+    """
+    if not hasattr(signal, "pthread_sigmask") or (
+        threading.current_thread() is not threading.main_thread()
+    ):
+        yield
+        return
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, _HELD_SIGNALS)
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
 class Attempt:
     """One run's audit records. Use as a context manager around the writes."""
 
@@ -283,11 +314,12 @@ class Attempt:
         if self._begun:
             return
         record = self._record("attempted")
-        try:
-            jsonlog.append(self._dir, AUDIT_FILE, record)
-        except JsonlError as err:
-            raise _unavailable(err) from None
-        self._begun = True
+        with _signals_held():
+            try:
+                jsonlog.append(self._dir, AUDIT_FILE, record)
+            except JsonlError as err:
+                raise _unavailable(err) from None
+            self._begun = True
 
     def finish(
         self,
@@ -302,15 +334,20 @@ class Attempt:
         if self._finished:
             return
         record = self._record(result, ids, observed)
-        self._finished = True
-        try:
-            jsonlog.append(self._dir, AUDIT_FILE, record)
-        except JsonlError as err:
-            raise ForgectlError(
-                "audit_failed",
-                f"the outcome could not be recorded in audit.jsonl: {err}",
-                details={"outcome": record},
-            ) from None
+        # TODO(#26): an outcome record's `ids` is unbounded, so a large review can pass the
+        # 64 KiB line cap and end in audit_failed after the post landed. Before review is wired
+        # (#26; see also #27), bound the inline comments or give the outcome record an overflow
+        # rule.
+        with _signals_held():
+            self._finished = True
+            try:
+                jsonlog.append(self._dir, AUDIT_FILE, record)
+            except JsonlError as err:
+                raise ForgectlError(
+                    "audit_failed",
+                    f"the outcome could not be recorded in audit.jsonl: {err}",
+                    details={"outcome": record},
+                ) from None
 
     def __enter__(self) -> Attempt:
         return self

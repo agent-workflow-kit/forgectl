@@ -46,7 +46,10 @@ Handler = Callable[[Invocation], dict[str, Any] | RecordStream]
 HANDLERS: dict[str, Handler] = {}
 
 # Modules that register handlers, as dotted names. Each command's issue adds its own line.
-HANDLER_MODULES: tuple[str, ...] = ("forgectl.exportcmd",)
+HANDLER_MODULES: tuple[str, ...] = (
+    "forgectl.exportcmd",
+    # (this comment keeps the formatter from joining a one-entry tuple onto one line)
+)
 
 _loaded = False
 

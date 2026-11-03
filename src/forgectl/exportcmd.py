@@ -47,14 +47,18 @@ def _no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def parse_line(raw: bytes) -> dict[str, Any] | None:
-    """The audit record on a line, or None when it is not a valid one."""
+    """The audit record on a line, or None when it is not a valid one.
+
+    The line is hostile input: any exception from parsing or validating it (a validator bug
+    included) makes it malformed rather than ending the export.
+    """
     try:
         record = json.loads(
             raw.decode("utf-8"), parse_constant=_no_constant, object_pairs_hook=_no_duplicates
         )
-    except (ValueError, RecursionError):  # UnicodeDecodeError and JSONDecodeError are ValueErrors
-        return None
-    if audit.audit_problem(record) is not None:
+        if audit.audit_problem(record) is not None:
+            return None
+    except Exception:
         return None
     return record  # type: ignore[no-any-return]
 
@@ -93,11 +97,12 @@ def iter_records(
         try:
             for line, torn in _lines(stream):
                 number += 1
-                if line is not None and not line.strip():
+                if line == b"":  # an empty line, such as a newline after a torn write
                     continue
-                record = None if line is None or torn else parse_line(line)
+                record = None if line is None else parse_line(line)
                 if record is None:
-                    skip(f"audit.jsonl line {number} skipped: malformed")
+                    why = "incomplete last line" if torn else "malformed"
+                    skip(f"audit.jsonl line {number} skipped: {why}")
                     continue
                 if since is not None:
                     ts = jsonlog.parse_ts(record["ts"])

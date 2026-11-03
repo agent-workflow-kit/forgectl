@@ -161,9 +161,30 @@ def test_malformed_lines_warn_and_are_skipped(
 def test_a_torn_last_line_is_skipped(state: Path, capsys: pytest.CaptureFixture[str]) -> None:
     put(state, record("2026-01-01T00:00:00Z", attempt_id="good0000"))
     with open(state / "audit.jsonl", "ab") as handle:
-        handle.write(json.dumps(record("2026-01-02T00:00:00Z")).encode())  # no newline
+        handle.write(json.dumps(record("2026-01-02T00:00:00Z")).encode()[:40])  # torn, no newline
     code, out, err = run(capsys, "export")
-    assert code == 0 and len(out.splitlines()) == 1 and "line 2 skipped" in err
+    assert code == 0 and len(out.splitlines()) == 1
+    assert err.count("warning:") == 1
+    assert "line 2 skipped: incomplete last line" in err
+
+
+def test_a_valid_last_line_without_a_newline_is_exported(
+    state: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state.mkdir(parents=True, mode=0o700)
+    (state / "audit.jsonl").write_bytes(json.dumps(record("2026-01-01T00:00:00Z")).encode())
+    code, out, err = run(capsys, "export")
+    assert (code, err) == (0, "") and len(out.splitlines()) == 1
+
+
+def test_a_malformed_last_line_without_a_newline_does_not_repeat_its_content(
+    state: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state.mkdir(parents=True, mode=0o700)
+    (state / "audit.jsonl").write_bytes(b'{"SECRET-TEXT":')
+    code, out, err = run(capsys, "export")
+    assert (code, out) == (0, "")
+    assert "line 1 skipped: incomplete last line" in err and "SECRET-TEXT" not in err
 
 
 def test_an_oversized_line_is_skipped_without_losing_the_next(
@@ -185,10 +206,19 @@ def test_warnings_are_capped_with_a_count_of_the_rest(
     assert "30 more lines skipped" in err
 
 
-def test_blank_lines_are_ignored_quietly(state: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    put(state, b"", b"   ", record("2026-01-01T00:00:00Z"))
+def test_empty_lines_are_ignored_quietly(state: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    put(state, b"", record("2026-01-01T00:00:00Z"), b"")
     code, out, err = run(capsys, "export")
     assert (code, err) == (0, "") and len(out.splitlines()) == 1
+
+
+def test_a_whitespace_only_line_warns_as_malformed(
+    state: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    put(state, b"   ", b"\t", record("2026-01-01T00:00:00Z"))
+    code, out, err = run(capsys, "export")
+    assert code == 0 and len(out.splitlines()) == 1
+    assert err.count("warning:") == 2 and "line 1 skipped: malformed" in err
 
 
 def test_output_is_sanitized_for_untrusted_fields(
@@ -443,3 +473,127 @@ def test_an_unwritable_log_warns_and_keeps_the_result_code(
     assert code == 1
     assert "warning: log not written" in err
     assert not (tmp_path / "x").exists()
+
+
+# --- review round 1 ----------
+
+
+@pytest.mark.parametrize("json_flag", [False, True])
+def test_wrong_typed_string_fields_are_skipped_with_a_warning_each(
+    state: Path, capsys: pytest.CaptureFixture[str], json_flag: bool
+) -> None:
+    put(
+        state,
+        record("2026-01-01T00:00:00Z", attempt_id="good0001"),
+        record("2026-01-01T00:00:00Z", action=["merge"]),
+        record("2026-01-01T00:00:00Z", action={}),
+        record("2026-01-01T00:00:00Z", result=[]),
+        record("2026-01-01T00:00:00Z", result={}),
+        record("2026-01-02T00:00:00Z", attempt_id="good0002"),
+    )
+    code, out, err = run(capsys, *(["--json"] if json_flag else []), "export")
+    assert code == 0
+    items = json.loads(out) if json_flag else [json.loads(x) for x in out.splitlines()]
+    assert [x["attempt_id"] for x in items] == ["good0001", "good0002"]
+    assert err.count("warning:") == 4
+
+
+def test_any_exception_while_validating_a_line_is_treated_as_malformed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from forgectl import audit, exportcmd
+
+    def broken(_: object) -> str | None:
+        raise TypeError("validator bug")
+
+    monkeypatch.setattr(audit, "audit_problem", broken)
+    assert exportcmd.parse_line(json.dumps(record("2026-01-01T00:00:00Z")).encode()) is None
+
+
+def test_a_producer_error_while_streaming_is_not_taken_for_a_broken_pipe() -> None:
+    from forgectl.output import _write_stream
+
+    def records() -> Any:
+        yield {"a": 1}
+        raise ValueError("producer bug")
+
+    class Sink:
+        text = ""
+
+        def write(self, data: str) -> int:
+            self.text += data
+            return len(data)
+
+        def flush(self) -> None:
+            pass
+
+    with pytest.raises(ValueError, match="producer bug"):
+        _write_stream(Sink(), records(), array=False)  # type: ignore[arg-type]
+
+
+def test_an_append_after_a_torn_fragment_is_exported_and_the_fragment_warns_once(
+    state: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state.mkdir(parents=True, mode=0o700)
+    (state / "audit.jsonl").write_bytes(b'{"ts":"2026-01-01T00:00:00Z","attem')
+    jsonlog.append(state, "audit.jsonl", record("2026-01-02T00:00:00Z", attempt_id="good0000"))
+    code, out, err = run(capsys, "export")
+    assert code == 0 and [json.loads(x)["attempt_id"] for x in out.splitlines()] == ["good0000"]
+    assert err.count("warning:") == 1 and "line 1 skipped: malformed" in err
+
+
+def test_a_hard_linked_audit_file_is_refused_for_export(
+    state: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state.mkdir(parents=True, mode=0o700)
+    other = tmp_path / "other.jsonl"
+    other.write_text(json.dumps(record("2026-01-01T00:00:00Z")) + "\n")
+    os.link(other, state / "audit.jsonl")
+    code, out, err = run(capsys, "--json", "export")
+    assert code == 12
+    assert json.loads(out)["error"]["code"] == "audit_unavailable"
+
+
+def test_an_unexpected_exception_is_logged_at_error_level(
+    state: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from forgectl import registry
+
+    def boom(_: object) -> dict[str, Any]:
+        raise RuntimeError("handler bug with ghp_abcdefghijklmnop")
+
+    registry.load_handlers()
+    monkeypatch.setitem(registry.HANDLERS, "export", boom)
+    code, _, err = run(capsys, "export")
+    assert code == 1 and "internal" in err
+    [item] = logged(state)
+    validate(item, "forgectl/log.json")
+    assert (item["level"], item["event"]) == ("error", "internal")
+    assert item["details"]["command"] == "export" and item["details"]["exit_code"] == 1
+    assert "ghp_" not in (state / "log.jsonl").read_text()
+
+
+@pytest.mark.parametrize("verbose", [False, True])
+def test_a_successful_write_logs_command_done_at_info(
+    state: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, verbose: bool
+) -> None:
+    from forgectl import registry
+
+    registry.load_handlers()
+    monkeypatch.setitem(registry.HANDLERS, "resolve", lambda _: {"resolved": True})
+    argv = ["resolve", PR, "--thread", "gh:rt:abc", "--actor", "auto:bot"]
+    code, _, _ = run(capsys, *(["--verbose"] if verbose else []), *argv)
+    assert code == 0
+    [item] = logged(state)
+    validate(item, "forgectl/log.json")
+    assert (item["level"], item["event"]) == ("info", "command_done")
+    assert item["details"]["command"] == "resolve"
+
+
+def test_success_log_levels() -> None:
+    from forgectl.cli import _success_level
+
+    assert _success_level("resolve", verbose=False) == "info"
+    assert _success_level("merge", verbose=True) == "info"
+    assert _success_level("show", verbose=True) == "debug"
+    assert _success_level("export", verbose=False) is None

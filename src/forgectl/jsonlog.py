@@ -98,7 +98,25 @@ def _check_dir(fd: int) -> None:
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
         raise JsonlError("state directory is not a directory of this user")
     if info.st_mode & 0o022:
-        raise JsonlError("state directory is writable by others")
+        raise JsonlError("state directory is writable by group or others")
+
+
+def _make_parents(path: Path) -> None:
+    """Create the missing directories of ``path``, top down, each 0700.
+
+    ``mkdir``'s mode is only ever narrowed by the umask, so a created directory is never more
+    open than 0700 (pathlib's ``parents=True`` would give the parents umask-only modes).
+    Directories that exist are left as they are.
+    """
+    missing: list[Path] = []
+    while not os.path.lexists(path) and path != path.parent:
+        missing.append(path)
+        path = path.parent
+    for each in reversed(missing):
+        try:
+            os.mkdir(each, 0o700)
+        except FileExistsError:
+            pass
 
 
 def open_dir(directory: Path, *, create: bool) -> int | None:
@@ -109,7 +127,7 @@ def open_dir(directory: Path, *, create: bool) -> int | None:
         except FileNotFoundError:
             if not create:
                 return None
-            directory.parent.mkdir(parents=True, exist_ok=True)
+            _make_parents(directory.parent)
             try:
                 os.mkdir(directory, 0o700)
             except FileExistsError:
@@ -139,7 +157,8 @@ def _open_append(directory: Path, name: str) -> int:
     dfd = open_dir(directory, create=True)
     assert dfd is not None
     try:
-        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+        # Read access too: append() checks whether the file ends in a newline.
+        flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
         fd = os.open(name, flags | os.O_CLOEXEC, 0o600, dir_fd=dfd)
     except OSError as err:
         raise JsonlError(f"{name}: {os.strerror(err.errno or 0)}") from None
@@ -159,11 +178,19 @@ def check_appendable(directory: Path, name: str) -> None:
 
 
 def append(directory: Path, name: str, record: Mapping[str, Any]) -> None:
-    """Append ``record`` as one line; raises ``JsonlError`` (nothing partial that it knows of)."""
+    """Append ``record`` as one line; raises ``JsonlError`` (nothing partial that it knows of).
+
+    If the file ends in an unterminated fragment (an earlier short write), a newline goes
+    first, in the same single write, so this record is not glued onto it. Racing another
+    writer, the worst case is an empty line, which ``export`` skips.
+    """
     data = encode_line(record)
     fd = _open_append(directory, name)
     try:
         try:
+            size = os.fstat(fd).st_size
+            if size > 0 and os.pread(fd, 1, size - 1) != b"\n":
+                data = b"\n" + data
             written = os.write(fd, data)
         except OSError as err:
             raise JsonlError(f"{name}: {os.strerror(err.errno or 0)}") from None
@@ -187,9 +214,7 @@ def open_read(directory: Path, name: str) -> int | None:
     finally:
         os.close(dfd)
     try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
-            raise JsonlError(f"{name}: not a regular file of this user")
+        _check_file(fd)
     except BaseException:
         os.close(fd)
         raise
@@ -202,14 +227,18 @@ LOG_FILE = "log.jsonl"
 LEVELS = ("error", "warn", "info", "debug")
 _MAX_STRING = 2048
 _MAX_DEPTH = 6
-_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/?#@]*@")
+# Userinfo runs to the last "@" before the authority ends ("/", "?" or "#"), as urlsplit has it.
+_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/?#]*@")
+# GitHub token prefixes, and GitLab's gl<kind>- family (glpat-, gloas-, glrt-, gldt-, glptt-,
+# ...), whose routable form has "."-separated parts.
 _TOKEN_SHAPES = re.compile(
-    r"(?:gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}|glpat-[A-Za-z0-9_-]{8,})"
+    r"(?:gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}|gl[a-z]{2,6}-[A-Za-z0-9_.-]{8,})"
 )
 
 
 def scrub_text(text: str) -> str:
     """Drop userinfo from URLs and mask token-shaped words; cap the length."""
+    # TODO(#8): redact the exact token values in use, not only their shapes.
     text = _URL_USERINFO.sub(r"\1", text)
     text = _TOKEN_SHAPES.sub("<redacted>", text)
     return text if len(text) <= _MAX_STRING else text[:_MAX_STRING] + "..."
