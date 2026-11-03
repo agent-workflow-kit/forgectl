@@ -11,6 +11,7 @@ There is no rotation: the interface defines none. The only size cap is per line.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import pwd
@@ -156,10 +157,14 @@ def _check_file(fd: int) -> None:
 def _open_append(directory: Path, name: str) -> int:
     dfd = open_dir(directory, create=True)
     assert dfd is not None
+    flags = os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
     try:
-        # Read access too: append() checks whether the file ends in a newline.
-        flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
-        fd = os.open(name, flags | os.O_CLOEXEC, 0o600, dir_fd=dfd)
+        try:
+            # Read access too: append() checks whether the file ends in a newline.
+            fd = os.open(name, os.O_RDWR | flags, 0o600, dir_fd=dfd)
+        except PermissionError:
+            # An existing write-only file: append without that check.
+            fd = os.open(name, os.O_WRONLY | flags, 0o600, dir_fd=dfd)
     except OSError as err:
         raise JsonlError(f"{name}: {os.strerror(err.errno or 0)}") from None
     finally:
@@ -188,8 +193,9 @@ def append(directory: Path, name: str, record: Mapping[str, Any]) -> None:
     fd = _open_append(directory, name)
     try:
         try:
+            readable = fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDWR
             size = os.fstat(fd).st_size
-            if size > 0 and os.pread(fd, 1, size - 1) != b"\n":
+            if readable and size > 0 and os.pread(fd, 1, size - 1) != b"\n":
                 data = b"\n" + data
             written = os.write(fd, data)
         except OSError as err:
@@ -229,10 +235,13 @@ _MAX_STRING = 2048
 _MAX_DEPTH = 6
 # Userinfo runs to the last "@" before the authority ends ("/", "?" or "#"), as urlsplit has it.
 _URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/?#]*@")
-# GitHub token prefixes, and GitLab's gl<kind>- family (glpat-, gloas-, glrt-, gldt-, glptt-,
-# ...), whose routable form has "."-separated parts.
+# GitHub token prefixes, and GitLab's documented token prefixes, whose routable form has
+# "."-separated parts. A GitLab prefix must not follow a letter or digit, so ordinary words
+# such as "english-translations" do not match.
+_GITLAB_PREFIXES = "glpat|gloas|glrt|gldt|glptt|glft|glimt|glcbt|glsoat|glagent|glwt|glffct|gltst"
 _TOKEN_SHAPES = re.compile(
-    r"(?:gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}|gl[a-z]{2,6}-[A-Za-z0-9_.-]{8,})"
+    r"(?:gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}"
+    rf"|(?<![A-Za-z0-9])(?:{_GITLAB_PREFIXES})-[A-Za-z0-9_.-]{{8,}})"
 )
 
 

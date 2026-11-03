@@ -517,3 +517,24 @@ def test_the_signal_mask_is_restored_after_an_append(state: Path) -> None:
         attempt.begin()
         attempt.finish("merged")
     assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == before
+
+
+def test_the_signal_mask_is_restored_when_blocking_raises_after_applying(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real = signal.pthread_sigmask
+    before = real(signal.SIG_BLOCK, set())
+
+    def block_then_raise(how: int, mask: Any) -> Any:
+        old = real(how, mask)
+        if how == signal.SIG_BLOCK and set(mask):
+            raise KeyboardInterrupt  # a pending signal delivered as the call returns
+        return old
+
+    monkeypatch.setattr(signal, "pthread_sigmask", block_then_raise)
+    try:
+        with pytest.raises(KeyboardInterrupt), audit._signals_held():
+            pytest.fail("the body does not run")
+        assert real(signal.SIG_BLOCK, set()) == before
+    finally:
+        real(signal.SIG_SETMASK, before)

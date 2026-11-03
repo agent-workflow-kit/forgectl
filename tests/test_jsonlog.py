@@ -241,6 +241,20 @@ def test_an_uncreatable_state_directory_is_a_jsonl_error(tmp_path: Path) -> None
         parent.chmod(0o700)
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+def test_an_existing_write_only_file_is_still_appended_to(state: Path) -> None:
+    jsonlog.append(state, "audit.jsonl", {"a": 1})
+    path = state / "audit.jsonl"
+    path.chmod(0o200)
+    try:
+        jsonlog.check_appendable(state, "audit.jsonl")
+        jsonlog.append(state, "audit.jsonl", {"a": 2})
+        path.chmod(0o600)
+        assert path.read_bytes().splitlines() == [b'{"a":1}', b'{"a":2}']
+    finally:
+        path.chmod(0o600)
+
+
 def test_check_appendable_creates_the_file_and_writes_nothing(state: Path) -> None:
     jsonlog.check_appendable(state, "audit.jsonl")
     assert (state / "audit.jsonl").read_bytes() == b""
@@ -371,7 +385,26 @@ def test_userinfo_is_dropped_up_to_the_last_at_sign() -> None:
         "glft-abcdefghijkl",
         "glimt-abcdefghijkl",
         "glsoat-abcdefghijkl",
+        "glcbt-abcdefghijkl",
+        "glagent-abcdefghijkl",
+        "glwt-abcdefghijkl",
+        "glffct-abcdefghijkl",
+        "gltst-abcdefghijkl",
+        "(glpat-abcdefghijkl)",
     ],
 )
 def test_gitlab_token_shapes_are_masked(token: str) -> None:
-    assert jsonlog.scrub_text(f"tok {token} end") == "tok <redacted> end"
+    assert "abcdefghijkl" not in jsonlog.scrub_text(f"tok {token} end")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "glossary-update-2024",
+        "feature/global-config-refactor",
+        "english-translations",
+        "xglpat-abcdefghijkl",
+    ],
+)
+def test_ordinary_words_are_not_masked_as_gitlab_tokens(text: str) -> None:
+    assert jsonlog.scrub_text(f"see {text} end") == f"see {text} end"

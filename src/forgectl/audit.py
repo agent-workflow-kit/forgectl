@@ -262,8 +262,11 @@ def _signals_held() -> Iterator[None]:
     ):
         yield
         return
-    previous = signal.pthread_sigmask(signal.SIG_BLOCK, _HELD_SIGNALS)
+    # Read the mask without changing it, so a signal raised as the block returns still
+    # reaches the restore below.
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, [])
     try:
+        signal.pthread_sigmask(signal.SIG_BLOCK, _HELD_SIGNALS)
         yield
     finally:
         signal.pthread_sigmask(signal.SIG_SETMASK, previous)

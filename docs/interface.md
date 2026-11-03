@@ -799,6 +799,8 @@ A list and a detail pane with facts, CI, reviews, comments and diff. The default
 
 `audit.jsonl` gets mode 0600 on creation; an existing file's mode is not changed. There is no `state.db`. Neither file is rotated. Each record is one ASCII line (non-ASCII is escaped) of at most 64 KiB, written with a single append, so concurrent runs never interleave lines. The state directory must be a real directory (not a symlink) owned by the user and not writable by group or others, and a file must be a regular file owned by the user with one link; otherwise it is not used (an audit append fails as `audit_unavailable`, a log write warns). `export` skips a line over 256 KiB.
 
+Either file may contain empty lines: forgectl adds a newline first when an append finds the file not ending in one. A reader skips empty lines.
+
 ## Audit and log
 
 **Audit** (`schemas/audit.json`) gets records for every write that reached the host, including failed and unknown ones: `ts`, `attempt_id`, `actor`, `decision_id` (a list), `target`, `action` (`merge`, `review`, `comment`, `reply`, `approve`, `resolve`, `unresolve`), `inputs` (`head_sha`, `base_ref`, `event`, `body_sha256`, `method`, `thread_id`, `reply_to`, `config_hash`, `config_path`, `host_login`, `token_source`, `stdin_tty`, `actor_source`), `result` (`attempted`, `merged`, `merged_unexpected`, `auto_merge_enabled`, `posted`, `approved`, `resolved`, `unresolved`, `failed`, `outcome_unknown`, `outcome_partial`, `quick_action_ran`) and `override` (human overrides that changed the outcome: `override_blocks`, `override_escalation`, `allow_self`). The outcome record adds `ids`, empty where no comment was posted, and `observed`. A refusal or veto before a call goes to the log, because nothing external happened.
