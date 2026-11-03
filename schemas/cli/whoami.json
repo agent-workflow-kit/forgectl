@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/cli/whoami.json",
+  "title": "whoami output",
+  "description": "Printed on exit 0, and on exit 12 (partial_results) with errors listing the hosts that failed.",
+  "type": "object",
+  "properties": {
+    "hosts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "host": {
+            "$ref": "../defs.json#/$defs/host"
+          },
+          "backend": {
+            "$ref": "../defs.json#/$defs/backend"
+          },
+          "login": {
+            "$ref": "../defs.json#/$defs/login_or_null"
+          },
+          "id": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/account_id"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "me": {
+            "$ref": "../defs.json#/$defs/login_or_null",
+            "description": "Untrusted: what prs uses for me on this host. Posts and rules act as the authenticated account."
+          },
+          "me_matches_login": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "false warns; null when either is unknown."
+          },
+          "token_source": {
+            "enum": [
+              "token_env",
+              "token_command",
+              "stored_login",
+              "none"
+            ]
+          },
+          "scopes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "x-untrusted": true,
+              "description": "Untrusted: a scope name from the host."
+            },
+            "x-untrusted": true,
+            "description": "Untrusted: scope names from the host; null where the host does not report them. Tokens are never listed."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "host",
+          "backend",
+          "login",
+          "id",
+          "me",
+          "me_matches_login",
+          "token_source",
+          "scopes"
+        ]
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/host_error"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "hosts",
+    "errors"
+  ]
+}

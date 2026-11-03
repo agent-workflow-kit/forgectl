@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/cli/resolve.json",
+  "title": "resolve output",
+  "description": "Printed on exit 0, and on exit 20 from a --dry-run with would_refuse set.",
+  "type": "object",
+  "properties": {
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "action": {
+      "const": "resolve"
+    },
+    "thread_id": {
+      "$ref": "../defs.json#/$defs/id"
+    },
+    "resolved": {
+      "enum": [
+        true,
+        null
+      ],
+      "description": "The thread's state after the command; null on a --dry-run with a refusal."
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "would_refuse": {
+      "$ref": "../defs.json#/$defs/would_refuse"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "pr",
+    "action",
+    "thread_id",
+    "resolved",
+    "dry_run"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "dry_run": {
+            "const": true
+          }
+        },
+        "required": [
+          "dry_run"
+        ]
+      },
+      "then": {
+        "required": [
+          "would_refuse"
+        ]
+      },
+      "else": {
+        "properties": {
+          "would_refuse": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "dry_run": {
+            "const": false
+          }
+        },
+        "required": [
+          "dry_run"
+        ]
+      },
+      "then": {
+        "properties": {
+          "resolved": {
+            "const": true
+          }
+        }
+      }
+    }
+  ]
+}

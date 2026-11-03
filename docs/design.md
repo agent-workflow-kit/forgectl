@@ -1,60 +1,220 @@
 # forgectl: design
 
-Status: Seeded from awkit architecture v1.4; not yet designed.
+Status: designed, interface 0.1.0-design, 2026-11-03, after review pass 2 and spot checks. [`interface.md`](interface.md) is the single normative source for rules; this document records why, and how forgectl is built. It links to interface headings and does not restate their tables.
 
 ## Role and layer
 
-Normalized access to pull/merge requests across GitHub and GitLab. Layer 1 (primitive). Must work fully standalone (architecture §2, C2).
-
-## Responsibilities
-
-From architecture §5.1:
-
-Normalized access to pull/merge requests across GitHub and GitLab.
-
-- Commands: `prs` (filters incl. "review requested from me by name"), `show`, `diff`, `comments`, `reviews`, `ci`, `merge <pr> [--auto]`, `browse`.
-- Uses: `gh`, `glab` (backends).
-- Notes: `merge` is confirm-by-default (section 12.4); `--auto` uses host-native auto-merge / merge-when-pipeline-succeeds. `merge --yes` without a TTY requires `--expected-head <sha>` (exit 2 without it); if the PR head differs, it refuses (exit 20, `reason: stale_head`). With `--auto`, the expected head is enforced through the host's head-match option (e.g. a match-head-commit or sha parameter); where the host has none, `--auto` with `--expected-head` refuses (exit 20, `reason: no_head_match`). *When* to merge is decided elsewhere (QR-12). Git-host credentials: `token_env` is configured per host (`hosts.<host>.token_env`); forgectl sets `GH_TOKEN`/`GITLAB_TOKEN` for each `gh`/`glab` call from it, avoiding stale CLI logins under cron (QE-9). Ships an optional `browse` TUI.
+Normalized access to pull and merge requests on GitHub and GitLab: reading, posting and merging. Layer 1 (primitive). It works fully standalone (architecture section 2, C2).
 
 ## Uses
 
-- `gh` (backend): binding: TBD (A/B/C), decided in this tool's design session
-- `glab` (backend): binding: TBD (A/B/C), decided in this tool's design session
+| Dependency | Binding | Notes |
+|---|---|---|
+| `gh` (github backend) | C: one internal adapter | only `gh api`; needed only for GitHub hosts |
+| `glab` (gitlab backend) | C: one internal adapter | only `glab api`; needed only for GitLab hosts |
 
-## Architecture sections to read
+The adapters are internal to forgectl. Other forges are not pluggable by users in v1.
 
-Section numbers refer to `../awkit-docs/architecture.md` (v1.4).
-
-- §3.4: canonical identifiers (repo id, PR forms), never destroy work.
-- §6: conventions summary.
-- §12.3: gates: callers of `merge` that automate it require an enforced allowing gate.
-- §12.4: confirmations, holds and `--yes` (`merge` is a confirm-by-default primitive without a pending store).
-- §13.2: prompt injection: PR text returned by this tool is untrusted for consumers; fencing rules.
-- §13.3: credentials (per-host `token_env`).
-- §14: audit (`merge` is an external action).
-- §20: this tool's constraints and open topics.
-
-## Constraints (decided)
-
-From architecture §20: none.
-
-## Open topics
-
-From architecture §20:
-
-- backend abstraction
-- GitLab re-request detection
-- edge cases (forks, stacked PRs)
-- head-match option per backend for `merge --auto --expected-head`
+Python dependencies: `pyyaml` and `pydantic` (config, design guide section 3). `textual` only in the extra `forgectl[tui]`, so cron and shared use do not pull it in. No HTTP library: all network access goes through `gh` and `glab`.
 
 ## Decisions
 
-| Decision | Rationale | Date |
+| # | Decision | Why | Interface |
+|---|---|---|---|
+| D-1 | `gh api` and `glab api` only, built and normalized by forgectl | high-level commands truncate silently (`gh pr view --json files`), lose data (`glab -F json`), break (`gh pr edit` on 2.72.0) or are unsafe (`glab mr merge`); `api` keeps CLI logins, proxies and enterprise config. It also inherits their redirect behavior, so forgectl checks every answer's identity (D-5) | [Invoking the backends](interface.md#invoking-the-backends) |
+| D-2 | Direct HTTP rejected for now | changes the architecture; TLS trust with uv's Python and an internal CA is untested. A single gateway keeps a later switch contained. `glab`'s token repeat on a cross-host redirect (D-5) is a recorded reason to revisit this. A loopback filter allowing only the declared host was rejected too: it conflicts with user proxies and adds a moving part | |
+| D-3 | forgectl owns post primitives | every post needs host mechanics and neutralizing at one point. pr-comment keeps the review-draft format, re-anchoring, footers and the rule that unanchorable findings move to the body | [Post order](interface.md#post-order) |
+| D-4 | Stateless: no `state.db`, one-call `snapshot` | `updated_at` cannot drive change detection on either host, so a caller must fetch and compare anyway. pr-watch owns comparing, events and pacing | [`snapshot`](interface.md#snapshot) |
+| D-5 | Closed host list | `gh` sends `GH_TOKEN` to any `*.ghe.com`, and `glab` sends its token to a full-URL endpoint's host; a crafted PR URL must never receive a token. One exception stays, as a residual risk reported upstream: `glab` repeats `Private-Token` when a declared host redirects a read to another host. So answers are checked for host and project, which detects an accidental redirect, not a hostile host; on `wrong_host_response` the message says the token may have reached another host and should be rotated. Writes use a canonical path or numeric id and need the exact documented answer per endpoint | [Hosts](interface.md#hosts), [Invoking the backends](interface.md#invoking-the-backends), [Residual risks](interface.md#residual-risks) |
+| D-6 | Token selected per host, ambient tokens never inherited; a caller-set config dir never gets the keyring's bus variables | `gh` ignores `GH_TOKEN` for enterprise hosts; an ambient token may belong to another host. With the bus passed, a config dir holding no token still sends the keyring's. Testing the directory instead does not hold, since any `glab` run writes files there, so the variables go whenever the caller set the dir; the macOS Keychain stays a residual risk | [Credentials](interface.md#credentials) |
+| D-7 | One strict schema with `null` as an honest answer | a guessed value leads a consumer to act wrongly; per-host extras would become contracts. Null where a host cannot say: GitLab's PR-level `additions` and `deletions`, a GitLab file's `additions` and `deletions` when it has no fragment, a capped `changed_files`, `approvals_at_head` (D-25). No `--raw`: no consumer used it, it had no schema and it was a terminal risk; `gh api` and `glab api` serve debugging | [Unknown values](interface.md#unknown-values) |
+| D-8 | GitLab request instance is a system note id, `null` when unmatched; one note can name several reviewers; a first sight of a null instance starts once | the only REST-readable signal; failure misses a re-request rather than repeating a paid review. Only system notes count. Membership cannot say a request finished, since a GitLab reviewer stays listed after a review and after a merge, so each request has a `state`. `review_started` is `outstanding`, because creating a draft sets it. A missing note must not silently leave a real request unreviewed, which is why a first sight starts once | [Review requests](interface.md#review-requests) |
+| D-9 | `--auto --expected-head` refused on GitHub; `--auto` is human-only on both hosts and refuses `draft`, `conflicts`, `checks_failing`; on a merge queue or train it and any non-human merge refuse | live verification: a later push merges the new head, see below. No consumer needs `--auto`, since a harness rule uses a plain merge on purpose, and human-only removes base-switch exposure while armed for automation. A human's plain merge on a queue goes to the host with `sha`, so forgectl can still merge there | [Merge order](interface.md#merge-order) |
+| D-10 | Read before and after a merge, and again after a hook or dialog; an interactive run pins what the human saw, for a flag not given; overriding `not_ready` is a human action, advisory and recorded | owner bypass merges past failing checks with a plain 200; closed PRs can merge; a merged PR with a wrong sha reports `merged: true`. forgectl cannot stop a same-user process claiming to be human, so it does not claim to; the audit record shows how the claim was made | [Merge order](interface.md#merge-order), [Human actions](interface.md#human-actions) |
+| D-11 | Any failing or pending check blocks (except GitLab `allow_failure`); one host mapping and one aggregation; `none` is not passing; a non-human merge requires `ci.state: passing` | with no branch rules, GitHub reports nothing blocking; a merge past failing CI should take a human. Flaky optional checks need `--override-blocks`, accepted as the conservative default. Host rollups cannot serve: a skipped-only head rolls up as success on GitHub and a GitLab `mergeable` says nothing about CI. Stale evidence folds into `pending`, so `ci.state` needs no second field; what it proves is stated in the interface. There is no `checks_failing` without a failing check, so `--auto` can arm before a pipeline starts. Zero checks is not a blocker, so a repo without CI still reads as ready for a human; automation needs evidence. No heuristic about "a repo with CI", which an `on: pull_request`-only setup would defeat, and no opt-out, because no setting lowers a safety rule | [CI object](interface.md#ci-object), [Blocker codes](interface.md#blocker-codes), [Merge order](interface.md#merge-order) |
+| D-12 | No branch deletion | `DELETE ref` closes a stacked PR permanently on GitHub; the host's own setting retargets it | [Merge method](interface.md#merge-method) |
+| D-13 | Reviews are all-or-nothing, with a dedupe key that covers text only; a GitLab review publishes only when the account's drafts on the MR are exactly forgectl's; a review comment needs a line | one bad line rejects a GitHub review; GitLab has no review object; retries duplicate on both. Dedupe suppresses text; state is read and, on GitLab, completed; an existing state suppresses only the state step. GitHub's post is atomic, so a hit there with the state gone is no retry: it exits `outcome_partial` and never re-approves over a dismissal. In every body, case-insensitive `forgectl:dedupe:` has its second colon replaced by `-`, and only the exact last non-empty line of a comment by the account's id matches, so other accounts' comments cannot match. A key can still be guessed: a process able to post under this account can plant one with other text, and a writer can edit one in, so `already_posted` means the key was seen, not that this text is there. `bulk_publish` sends all of the caller's drafts, including hand-made ones, and returns no ids, so forgectl lists before and just before publishing, and reads back afterwards. File-level comments are out: `POST /reviews` rejects them; a GraphQL `addPullRequestReview` thread without a line is atomic, but undocumented, for one host only, and pr-comment moves such findings to the body anyway | [Post order](interface.md#post-order), [Dedupe key](interface.md#dedupe-key), [Position validation](interface.md#position-validation) |
+| D-14 | Neutralize lines starting with `/` by one space, on both hosts | fences, quotes and comments can be broken out of; a prefix held in every case tried; a space is visible and survives copying. A backslash (`\/`) would also beat a bot that trims lines, but every line starting with `/` is touched, including paths in code blocks, where it would corrupt copied text | [Neutralizing](interface.md#neutralizing) |
+| D-15 | Replace control characters and invisible look-alikes with visible markers, also in one-line fields, errors and hook stderr | stripping would hide Trojan Source from a reviewer; same-line replacement keeps positions. One-line fields also mark tab and LF, since a title or path must not start a new line. All variation selectors are marked, U+FE0F included: with no exception there is no judgment for an implementer to guess, and emoji render slightly differently | [Sanitizing](interface.md#sanitizing) |
+| D-16 | Bounded read retries; no write retry, also before sending; one budget plus a reserve for verification | a 502 should not fail a cron run; a retried post duplicates. Telling "not sent" apart would need a table of stderr wordings. Backoff 1 s doubling to 8 s; readiness tries: `merge` 5 in 10 s, `show` and `snapshot` 3 in 4 s, `prs` none; merge verification polls for 10 s; 15 s is reserved after a write. A failed page fails the read, while a host-imposed cap gives `complete: false` | [Reliability](interface.md#reliability) |
+| D-17 | GitLab floor 15.6; detect by field where a response shows it, read the version only for the rest | a self-managed instance lags; `--auto` safety depends on 17.7. `bulk_publish` takes `reviewer_state` from about 19.2, but GraphQL `mergeRequestRequestChanges` stays, as one path across versions | [Host versions](interface.md#host-versions) |
+| D-18 | Hooks on external actions only, including `resolve` and `unresolve`; bodies never in payloads | reads have no effect and pr-watch polls constantly; policies must not be steered by untrusted text. `resolve` removes a merge blocker, so a policy must be able to veto it | [Hooks](interface.md#hooks) |
+| D-19 | `self_approval` refused by forgectl | GitLab let a token approve its own MR with the author-approval setting off (free tier) | [`approve`](interface.md#approve) |
+| D-20 | `browse` is a read-focused browser with merge; `m` merges in process | posting from a TUI would bypass pr-comment's drafts. With `m` acting in process, the result file has no `merge` intent, so no adapter can merge twice. `m` has no override, which stays a deliberate CLI action. Forge text renders with markup disabled | [TUI](interface.md#tui) |
+| D-21 | No repo derived from cwd | a read in an untrusted directory would add git as a dependency, and consumers always have the id (design guide section 5) | [Identifiers](interface.md#identifiers) |
+| D-22 | `approve --body-file` added | attribution on approvals is mandatory for automatic actions (architecture section 14), so an approval needs a body. On GitLab the note goes first, then the approval, so a failed approval is `outcome_partial` and a retry completes it | [`approve`](interface.md#approve) |
+| D-23 | `merge`, `review` and `approve` pin the base as well as the head; an approval older than the PR's latest retarget does not count at `approvals_at_head` | a base switch with auto-merge armed merged into an unprotected branch, and non-writers may retarget. No host takes a base on its merge call, so forgectl compares on each read and at verification; a small gap stays, and is named. A reviewed head can otherwise land on a base nobody reviewed. A flapping base always leaves a retarget newer than the approval, so the count needs no time window and no public `base_changed_at`. `review` and `approve` have no exception by event, since a comment's positions depend on the base too. A host's own retarget of a stacked PR costs a re-approval for automation on GitHub; GitLab has no re-approval path, so `approvals_at_head` does not count that approval | [Merge order](interface.md#merge-order), [Post order](interface.md#post-order), [PR object](interface.md#pr-object), [Residual risks](interface.md#residual-risks) |
+| D-24 | GitLab's merge method is a project setting; forgectl validates, reports what merged and never rebases | there is no per-merge method: `squash` conflicts never error, and `squash:false` at merge does nothing. `/rebase` would change the head. `squash=true` on a refused merge sticks on the MR, so it goes only after the checks pass. `merged_head_sha` is GitLab's `sha`, the pre-merge head on every method; the merged commit is `merge_commit_sha`, else `squash_commit_sha`, else `sha` | [Merge method](interface.md#merge-method) |
+| D-25 | GitLab `reviews` is empty, by decision; `approvals_at_head` is the field automation reads | GitLab has no review objects, and each patch to a synthesized list (null ids, timestamps, bodies, no marker, no order) produced another problem. `latest_by_reviewer`, `review_requests[].state` and notes are real. An approval carries no head on GitLab, so `approvals_at_head` is null unless approvals reset on push; `approved_at` against `/versions` could place one in time, and is not used, since an inferred answer would gate a merge. Because automation reads it, a stranger must not be able to supply it, so it counts only accounts with push rights (D-31) | [Reviews](interface.md#reviews), [PR object](interface.md#pr-object) |
+| D-26 | `compare` added; no `commits` | pr-comment posts only through forgectl and has no checkout, so without `compare` re-anchoring cannot tell moved code from changed code. No consumer names `commits`, and it can be added compatibly. `diff` must mean from..to, as re-anchoring applies its hunks to old line numbers, and both hosts' documented endpoints default to merge-base..to, the same only on `ahead`. So `diff` is null on `behind` and `diverged`, and the consumer moves those findings to the body. The cost is re-anchoring after a rebase; a comment is never placed on a wrong line under a human's account. If a direct form proves to work, a non-null `diff` there is additive | [`compare`](interface.md#compare) |
+| D-27 | Ids are typed and checked against the PR before any write | a wrong id must not touch another PR; GitLab reaches ids only under their parent, and GitHub's node ids are global, so forgectl looks them up | [Identifiers](interface.md#identifiers), [Post order](interface.md#post-order) |
+| D-28 | A configured credential that yields nothing fails; comparisons use account ids | a silent fall-through would change the identity. One bot reads three ways and a bare `dependabot` is a different REST account, so logins are not an identity; self-approval and dedupe compare numeric ids. Refusing on "the author committed the head" is not added: commit authorship is spoofable, so it would be false assurance | [Credentials](interface.md#credentials), [Bot detection](interface.md#bot-detection) |
+| D-29 | Two audit records per write; no writable audit, no action | an `attempted` record closes the crash window between the host call and the record, which a compliance audit cares about | [Audit and log](interface.md#audit-and-log) |
+| D-30 | Removed as no consumer needs them: `instance_source`, hook `labels`, `comments --include-system`, `prs --include-teams`, `prs --head-branch`, `export --log`, `files[].patch_available`, comment `author_association`, `merge_base_sha` on the PR object, `files[].generated`, `comment.system` | checked against the consumers' designs. Each is a contract to keep. `files[].generated` also has no GitHub source. `diff` keeps `merge_base_sha`, so `show` costs no `/compare`; the PR's `author_association` stays for tiering | [Normalized objects](interface.md#normalized-objects) |
+| D-31 | Approvals count push rights | on a public GitHub repo with no required-review rule, any account can submit the approval a merge rule requires, and no consumer could tell. `approvals_at_head` counts accounts known to have push rights, other than the author: a false `0` is safe, a false `1` is not. `approvals` stays a display count, which excludes only what is known to be ineligible. A non-writer's `changes_requested` stays visible and no longer blocks. On GitLab this costs one member read per approver, only on projects that reset approvals on push, and a failed read leaves the approval uncounted | [Reviews](interface.md#reviews), [PR object](interface.md#pr-object), [Blocker codes](interface.md#blocker-codes) |
+
+## Resolved open topics
+
+| Topic (architecture section 20) | Resolution |
+|---|---|
+| Backend abstraction | D-1, D-7: one adapter per host behind one normalized model |
+| GitLab re-request detection | D-8 |
+| Forks, stacked PRs | `head.is_fork`, `head.repo`, `head_fetch_ref`, a fork MR's pipeline read from its project; stacks not modeled, a non-default `base.ref` shows them, D-12 protects them |
+| Head match for `merge --auto --expected-head` | D-9: GitHub none that holds; GitLab `sha` with cancel-on-push from 17.7, for a human only |
+
+## Live verification
+
+Against `gh` 2.72.0 and `glab` 1.127.0, github.com and gitlab.com (19.6-pre, free tier), November 2026, with one account per host.
+
+| Behavior | Verdict | Regression test |
 |---|---|---|
+| GitHub `--auto` with a head match, then a push while the required check is pending | merges the new head: 18 of 18, plus 3 of 3 without a match; classic protection and rulesets; plain and force pushes | `live` |
+| Same, push just after the check passed | 14 of 15 merged the new head, 1 disabled `head_mismatch` | `live` |
+| `update-branch`, or an owner's base switch, with auto-merge armed | new head merges; a base switch left it armed and merged into the unprotected branch, before the check the old base required had finished | `live` |
+| GitHub enabling auto-merge on a clean or unstable PR | refused with `in clean status`, `in unstable status`, not enabled; `gh pr merge --auto` merges at once instead | `live` |
+| A base on the merge call | none on either host: extra REST body params and GitLab `target_branch` are ignored, and GraphQL rejects them; a retargeted GitHub PR merges to the new base with the old `sha` | `live` |
+| GitLab retarget with auto-merge armed | cancels it, with a system note | `live` |
+| GitHub's own retarget of a stacked PR, and a manual one | the host's shows on the timeline as `automatic_base_change_succeeded`, a manual `PATCH` as `BaseRefChangedEvent`, so the lookup takes both item types | `live` |
+| Retarget with an approval given before it, then a read, on GitHub and on GitLab | not yet observed; see Still to verify | `live` |
+| GitHub merge with `sha` mismatch | 409, `gh` exit 1; no wrong head merged in 6 race trials | `live` |
+| GitHub merge of a merged PR with a wrong sha | 200 `merged: true` | `live` |
+| GitHub merge of a closed PR | merges if its check passed and the base did not move | `live` |
+| GitHub owner with bypass | REST merges past a pending or failed required check | `live` |
+| GitLab push after auto-merge set | cancels it, also a force-push and also when set without `sha` | `live` |
+| GitLab `sha` mismatch on merge and approve | 409 | `live` |
+| `glab mr merge` without a TTY | merged at once with a pipeline running, 3 of 3 | not used by forgectl |
+| GitLab auto-merge on draft, conflict, failed pipeline, with the pipeline setting on | 200 and stays set; a retried job can then merge. This is why `--auto` refuses them | `live` |
+| GitLab auto-merge with the pipeline setting off | failed, canceled or skipped pipeline: 405, not merged; none or passed: merges at once; running: arms | `live` |
+| GitLab plain merge with the pipeline setting off | merges on failed, skipped and running pipelines, with `detailed_merge_status: mergeable` throughout, so `ci` is read separately | `live` |
+| GitLab skipped-only head | pipeline status `skipped`; forgectl reads `ci.state: none` | `live` |
+| A status on a skipped GitLab head; a same-name status against a failed job | not yet observed | `live` |
+| GitLab moved target on `ff` and `rebase_merge` | bare 405 naming no reason; a wrong `sha` gets 409, which wins; no server-side rebase at merge | `live` |
+| GitLab conflict on `ff` and `rebase_merge` | reads `need_rebase` with `has_conflicts: true`, so `need_rebase` can hide conflicts | `live` |
+| GitLab `sha` after a merge | the pre-merge head on every method; `merge_commit_sha`, else `squash_commit_sha`, else `sha` equals the target tip; after a manual rebase the old head stays in `/versions` | `live` |
+| GitLab squash | no per-merge method; `squash_on_merge` and `squash_commit_sha` are the truth, not `squash`; `squash=true` on a 405 sticks on the MR | `live` |
+| GitLab quick actions | run from notes, replies, discussions, published drafts, descriptions and note edits, on any line; breakouts from fences and quotes; a leading space or zero-width space stopped every case; titles safe; `/merge` needs a head sha param. BOM, U+2029, FS, GS and RS were not tried, so the `live` test adds them | `live`, table tests from the same cases |
+| GitLab position outside the diff | 400; never a silent general note; a garbage `line_code` is stored | `live` |
+| GitHub file-level comment in `POST /reviews` | `subject_type` rejected, 422. GraphQL `addPullRequestReview` with a thread and no line is atomic, undocumented, and not used | `live` |
+| GitHub comment under a renamed file's old path | stored silently under the old path, so validation requires the new one; `side` takes `LEFT`, `RIGHT`, default `RIGHT` | `live` |
+| GitHub review while the account has a pending one | 422, `can only have one pending review`; issue comments still work | `live` |
+| GitLab `bulk_publish` | publishes all of the caller's drafts on that MR, including one made by hand, and none on other MRs; 204 with no ids | `live` |
+| GitLab review ids | nothing returns them; notes are read back, and stored bodies have commands stripped | `live` |
+| A posted body with a trailing newline and a neutralized first line, compared with its stored form | not yet observed; see Still to verify | `live` |
+| GitLab reviewer states | all six produced; creating a draft sets `review_started`; a push changes none; a reviewer stays listed after a review and after a merge | `live` |
+| GitLab reviewer notes | creation with reviewers writes `requested review from @x`; re-sending the same set adds none; a non-member id is dropped with a 200; two in one action give one note, `requested review from @a and @b` (from source and a public sample, not a two-account run) | `live`, table tests |
+| A second `APPROVE` by one account at one head on GitHub | not yet observed; see Still to verify | `live` |
+| GitLab `POST /approve` when already approved | 401, like a credential failure; `user_has_approved` predicts it and `user_can_approve` does not | `live` |
+| GitLab approvals | carry no head sha; survive a push on the free tier | `live` |
+| GitLab ids under the wrong MR | 404 and nothing changes; no global note lookup; resolving a plain note's discussion gives 403 | `live` |
+| Old head on a post | GitHub accepted; not outdated. GitLab moved to the new head | `live` |
+| Retried post | duplicates on both | `live` |
+| GitHub body limits | review body and issue comment 262144 bytes, though the error says 65536; inline comment no limit seen up to 1,000,000 bytes | `live` |
+| Truncation | `gh pr view --json files` and `commits` stop at 100; `/pulls/N/files` at 3001 of 4156, no signal; diff 406 above 300 files; `/pulls/N/commits` keeps the last 250 | `live` |
+| `gh pr view --json number` | makes no network call, returns the given number with a bad token | not used by forgectl |
+| GitHub request instance | `RRE_` id matches across REST and GraphQL; a re-request gets a new id; a review clears it with no event | `live` (shape from public PRs) |
+| `user-review-requested:` | excludes team-only requests | `live` |
+| Team requests | hidden from non-members; only `/requested_reviewers` lists them | fixture |
+| `author_association` | misses people with write access; permission endpoint needs push access (403) | fixture |
+| GitHub login forms | one bot reads `dependabot[bot]` in REST, `dependabot` in GraphQL, `app/dependabot` in `gh`; REST `users/dependabot` is a different account; ids match across REST and GraphQL; `databaseId` needs per-type fragments; lookup ignores case | `live` |
+| A GitHub head with an older commit date | the last listed commit is not the head: with decreasing dates, commits list as `3, 1, 2`, where 3 is the head. So forgectl compares `oid` with `headRefOid` | `live` |
+| GitHub check states | no checks: null rollup, `CLEAN`. Skipped-only: rollup `SUCCESS`, `CLEAN`. Startup failure: null rollup, `CLEAN`, no check run. Unregistered required check: `BLOCKED`, absent from the rollup, an unexplained cause until the code table names it. A job timeout concludes `CANCELLED` | `live` |
+| `gh api graphql` with `errors` | exit 1, though HTTP is 200; full body with any partial data on stdout; `--jq` is skipped, so forgectl never uses it | `live` |
+| Project rename | `glab` follows the 301 and resends the token on the same host; a write through the old path gets 405 | `live` |
+| Redirect from a fake server | `glab` repeats `Private-Token` to another host on a read; `gh` does not, and turns a POST into a GET with a final 200 | process test |
+| `gh auth token --hostname` | returns an ambient token for any host; `glab auth token` has no `--hostname` | process test |
+| `updated_at` | GitHub misses checks, status, resolves, edits; GitLab moves at most about once a minute (inferred from timing) and not on pipeline end | documented |
+| `gh` with `-R` or a valid URL in a hostile directory | no child process; without them it runs git and uses a planted remote; malformed URLs fall through to git | process test |
+| `glab` in a hostile directory | always runs read-only git; no planted command fired; a cwd remote can redirect the token to a configured host | process test |
+| Token variables | `gh` needs `GH_ENTERPRISE_TOKEN` on enterprise hosts; `*.ghe.com` gets `GH_TOKEN`; `glab` needs `GITLAB_HOST`, `--hostname` rejects ports | process test |
+| `GITLAB_HOST` keeps `api_prefix`; `--hostname` drops it | `--hostname` wins over `GITLAB_HOST`, so a prefix set beside it is lost and the token goes to the root path. See the table under [Testing](#testing) | process test |
+| An empty config dir with a login in the OS keyring | with a fake Secret Service on a private bus, `gh auth token` prints the stored token and `glab api` sends it; `gh api` refuses. With no bus, `gh auth token` finds no token. So a caller-set config dir gets no bus variables | process test, with a fake Secret Service as fixture |
+| `glab` defaults | telemetry and update checks on; needs a writable config dir | process test |
+| Control characters | hosts store them; `gh` rewrites ESC to `^[`, passes CR and bidi; GitLab returns them raw | table tests |
+| 304 responses | free on GitHub, `gh` exits 1; use quota on GitLab | not used in v1 |
 
-## Questions for the design session
+### Still to verify
 
-1. How are the GitHub and GitLab backends abstracted (one normalized model, per-backend adapters, which fields are normalized)?
-2. How is a GitLab review re-request detected?
-3. How are edge cases handled: PRs from forks, stacked PRs?
-4. Which head-match option does each backend offer for `merge --auto --expected-head`, and which backends must refuse with `no_head_match`?
+Each has a conservative default in place.
+
+| Item | Default |
+|---|---|
+| A self-managed GitLab: version, `requested review from` wording, creation-time reviewers | version fallbacks; `instance: null` on no match, and a first sight starts once |
+| A two-account run: combined reviewer notes, `bulk_publish` not touching another account's drafts | the documented note form is parsed; forgectl compares draft ids before publishing |
+| `glab` with a private CA (`GLAB_CA_CERT`, `SSL_CERT_FILE`); a stored login under a custom config dir | environment passed per the mode; D-2's CA risk stays recorded |
+| GitLab child pipelines | `pending` if the parent pipeline is unfinished |
+| GitHub `TIMED_OUT`, `STALE`, `STARTUP_FAILURE`, `WAITING`, `REQUESTED`, `EXPECTED`, never seen live | mapped from the schema; an unmapped value is `pending` |
+| GitLab rebase while auto-merge is armed (`retain_auto_merge_with_automatic_rebase`, 19.3) | step 9's head comparison applies |
+| Armed GitHub auto-merge retargeted to another protected base | `--auto` is human-only and warns |
+| GitLab `/repository/compare` status and fork commits; GitHub compare's cap and diff media type; a direct form of each | `unavailable`, or null `diff` on `diverged` |
+| `bulk_publish` floor; `/users/:id` `bot` on old GitLab | a publish failure leaves nothing visible; `is_bot: null` |
+| REST `users/x%5Bbot%5D` and `collaborators/x[bot]/permission` | `access` gives `null` on an unclear answer |
+| `reset_approvals_on_push` on a paid GitLab tier | `approvals_at_head: null` |
+| GitHub pushes by a second human writer; repos requiring reviews | `no_head_match` already covers `--auto` |
+| Fork PR writes on both hosts; deleted head project on GitLab | reads as observed on public projects |
+| GitHub merge queues, GitLab merge trains, and field visibility per role | refusal when true or null; a hidden GitLab field reads `false` |
+| `glab` exit behavior on a real 429 | classified from status and body |
+| Group-inherited and invited GitLab membership; a blocked member (from docs, not observed) | `members/all`; `null` on 401 or 403; anything but `state: active` is false |
+| Tokens without `read:org`, and the type of the GraphQL error they get | `teams_visible: false`; a differently typed error fails the read |
+| Self-approval with required approvals on a paid GitLab tier | `self_approval` applies regardless |
+| A second `APPROVE` by one account at one head on GitHub | the `POST` is sent; a refusal is `host_rejected` with nothing lost |
+| `PUT /discussions/:id` status, `DELETE /draft_notes/:id` status | a 2xx with no proof is `outcome_unknown` |
+| A non-writer's approval on GitHub with a second account; which accounts `approved_by` holds on a paid GitLab tier; one account with both `approved_by` and `requested_changes` | not counted without `can_push: true` |
+| Whether an approval survives a retarget on each host | forgectl discounts it regardless |
+| Self-managed wording of the retarget note | a note with other wording reads as no retarget |
+| `pipeline_id` on `/statuses`; a status on a commit with a real pipeline | an unclear answer has no counted check, so `none` |
+| Merged-results and merge-train pipelines on a paid tier | `for_current_head: false`, so `pending` |
+| `/diffs`' first version, and a binary file's empty fragment | `unsupported_host_version`; `too_large`, which is safe |
+| A posted body with a trailing newline and a neutralized first line, compared with its stored form | the comparison in [Post order](interface.md#post-order) step 11 |
+| A self-managed instance whose `external_url` differs from the API host | `wrong_host_response` |
+| GitLab `position` for a `line_range`; GitHub comment-level `startLine` on a single line | as tabled in [Threads and comments](interface.md#threads-and-comments) |
+| macOS, including whether `gh` and `glab` reach the Keychain under a custom config dir | local check before 1.0; treated as reached, a residual risk |
+
+### Upstream report
+
+`glab` repeating `Private-Token` on a cross-host redirect of a read is to be reported to the `glab` project, as an item of the implementation plan.
+
+## Modules
+
+| Module | Responsibility |
+|---|---|
+| `cli` | argparse, human and JSON output, exit codes |
+| `identifiers` | parsing PR references and repo ids, integer check, closed-host check |
+| `hosts` | backend per host, token selection, `me` resolution |
+| `gateway` | two entry points: forge calls (environment, cwd, argv, status parsing, timeouts, typed errors), and other processes (hooks, `token_command`, the browser), which share the substitutable runner and differ in environment rules |
+| `backends/github`, `backends/gitlab` | REST and GraphQL calls, pagination, mapping into the model. `backends/github` maps GraphQL logins to the REST form |
+| `model` | normalized dataclasses, blocker codes, tri-states |
+| `sanitize` | visible markers |
+| `neutralize` | leading-space rule |
+| `merge`, `post` | the fixed orders |
+| `hooks`, `audit`, `jsonlog`, `config` | per the design guide |
+| `tui` | `browse`, imported only with the extra |
+
+The GitHub backend reads a snapshot with one GraphQL query (1 request, 1 point in live verification), and a second when the last listed commit is not the head, and uses REST where GraphQL lacks data: `/requested_reviewers` for hidden teams, the merge call, `/files`, and `/compare` for `compare` and for the merge base in `diff`, so `show` costs no `/compare`. The GitLab backend uses REST, with several calls per snapshot, and GraphQL only for `mergeRequestRequestChanges`. `prs` is GitHub GraphQL search with a qualifier string built from validated parts, and GitLab `/merge_requests` with `scope=all` plus filters.
+
+## Data model
+
+None persisted: see [Normalized objects](interface.md#normalized-objects) and [Files](interface.md#files).
+
+## Concurrency
+
+No locks are needed: forgectl has no shared state. `audit.jsonl` and `log.jsonl` are appended with single `O_APPEND` writes; a write has an `attempted` record and an outcome record sharing an `attempt_id`, so records from concurrent runs pair up. Two concurrent merges of one PR are settled by the host and by the read after the merge; two concurrent posts with one dedupe key may both post, as documented.
+
+## Error handling
+
+The gateway turns every child result into either parsed data or a typed error (status class, retry hint, sanitized message). Backends map host wording to codes in one table each, tested from recorded samples, so a changed message fails a test rather than a merge. An unmapped 4xx is `host_rejected`, which carries the status and message.
+
+## Testing
+
+- **Unit:** an in-process fake gateway; normalization against recorded responses from live verification, scrubbed of account names and emails before they enter this repo; golden `--json` output validated against `schemas/`. Gateway cases include a stored body with commands stripped, a 200 with `errors`, a null mutation result, a failed page, oversized and malformed bodies, and a title holding `[@click=...]` in the TUI.
+- **Process:** the real CLI with fake `gh` and `glab` first on `PATH`, logging argv, environment and cwd, asserting the safety rules: exactly one token variable, an empty cwd, no untrusted text in argv, telemetry off. Further cases: a redirecting fake server; `token_command` with an ambient token, and one that yields nothing; a planted `.git` in the parent directory; `.`, empty and relative `PATH` entries; a caller-set config dir, on both backends, with and without a login in a fake OS keyring, where the child gets no bus variable and sends no stored token; a FIFO, a final symlink and a parent symlink as an input path; an empty `modified` fragment from GitLab; `glab` routing, per the table below.
+- **`live`** (marker, deselected by default, never in CI): re-checks each `live` row above against throwaway repos, so a host change shows up as a failure.
+- **Table tests:** `sanitize`, with each listed code point, and `neutralize`, from the cases tried live; reference and login parsers, from hostile references (traversal, `@`, `%`, `\`, non-ASCII, ports, userinfo); dedupe matching; U+FE0F; Post order's cases, on each host: comments plus an existing approval, a bodyless approve plus an existing approval, a bodyless approve plus an approval older than a retarget, a dedupe hit plus a dismissed `request_changes` or approval.
+
+`glab` routing cases, against a loopback fake server with a fake token, where the instance lives under `/<prefix>`:
+
+| Environment and flag | Request | Token sent |
+|---|---|---|
+| `GITLAB_HOST=<host>/<prefix>`, `--hostname <host>` | `GET /api/v4/user` | yes |
+| `GITLAB_HOST=<host>/<prefix>` alone | `GET /<prefix>/api/v4/user` | yes |
+| `GITLAB_HOST=<host>`, `--hostname <host>` | `GET /api/v4/user` | yes |
+| `--hostname <host>` alone | `GET /api/v4/user` | no, with a warning that the credential was not sent |

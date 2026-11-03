@@ -1,33 +1,61 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "forgectl/log",
+  "$id": "forgectl/log.json",
   "title": "forgectl log.jsonl record",
+  "description": "error for exit 1; warn for refusals, vetoes, escalations, exit 12 and an unmatched instance note; info otherwise; debug for --verbose. URLs are recorded without userinfo. Secrets never appear.",
   "type": "object",
   "properties": {
     "ts": {
-      "type": "string",
-      "format": "date-time"
+      "$ref": "defs.json#/$defs/ts"
     },
     "level": {
-      "type": "string",
       "enum": [
-        "debug",
-        "info",
+        "error",
         "warn",
-        "error"
+        "info",
+        "debug"
       ]
     },
     "event": {
-      "type": "string"
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
     },
-    "message": {
-      "type": "string"
+    "pr": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "host": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/host"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "details": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "x-untrusted": true,
+      "description": "Untrusted: may hold host text."
     }
   },
+  "additionalProperties": false,
   "required": [
     "ts",
     "level",
-    "event"
-  ],
-  "additionalProperties": true
+    "event",
+    "pr",
+    "host",
+    "details"
+  ]
 }

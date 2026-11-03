@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/cli/diff.json",
+  "title": "diff output (--json)",
+  "type": "object",
+  "properties": {
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "head_sha": {
+      "$ref": "../defs.json#/$defs/sha"
+    },
+    "base_sha": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/sha"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "merge_base_sha": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/sha"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "diff": {
+      "type": "string",
+      "x-untrusted": true,
+      "description": "Untrusted: the sanitized unified diff; for reading, not for git apply."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "pr",
+    "head_sha",
+    "base_sha",
+    "merge_base_sha",
+    "diff"
+  ]
+}

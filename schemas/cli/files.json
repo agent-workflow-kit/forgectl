@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/cli/files.json",
+  "title": "files output",
+  "type": "object",
+  "properties": {
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "head_sha": {
+      "$ref": "../defs.json#/$defs/sha"
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/file"
+      }
+    },
+    "files_complete": {
+      "type": "boolean",
+      "description": "GitHub: the list's length equals changed_files. GitLab: pagination reached the end."
+    },
+    "changed_files": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "pr",
+    "head_sha",
+    "files",
+    "files_complete",
+    "changed_files"
+  ]
+}

@@ -10,7 +10,7 @@ standalone: no harness, bus, shared library or shared contracts package is requi
 - `../awkit-docs/architecture.md`: this tool's §5.1 entry and its §20 entry (plus the sections
   listed in `docs/design.md`).
 - `../awkit-docs/design-guide.md`: conventions every awkit tool follows.
-- `docs/design.md`: this tool's design doc, constraints and open topics.
+- `docs/interface.md`: the normative rules; `docs/design.md`: rationale and decisions; `docs/plan.md`: implementation plan.
 
 ## Rules
 
@@ -31,9 +31,8 @@ standalone: no harness, bus, shared library or shared contracts package is requi
 
 ## Workflow
 
-1. Start with a design session that resolves the open topics in `docs/design.md`.
-2. Write `docs/interface.md` and `schemas/`.
-3. Implement test-first.
+1. Follow `docs/interface.md` and `schemas/`, and update them first if the interface changes.
+2. Implement test-first, in the order of `docs/plan.md`.
 
 ## Repository workflow
 

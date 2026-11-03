@@ -1,5 +1,82 @@
-# Example config for forgectl. Location: ~/.config/forgectl/config.yaml (drop-ins: config.d/*.yaml). Keys are defined in docs/interface.md once designed.
+# forgectl example config: every key with its built-in default.
+# Location: ~/.config/forgectl/config.yaml (XDG respected), plus config.d/*.yaml in lexical order.
+# Merging: maps merge, hook lists append, other lists replace.
+# Precedence: flags, per-repo override, environment, global config, defaults.
+# Environment: FORGECTL_TIMEOUT, FORGECTL_RETRIES, FORGECTL_GH_BIN and FORGECTL_GLAB_BIN set the
+# matching top-level keys. Structured config cannot be set from the environment.
+# Durations: seconds as a positive number, or <number><unit> with unit ms, s, m, h or d ("30s");
+# a bare number string ("90") means seconds; zero is refused.
+# Schema: schemas/config.json. Invalid config exits 2 (config_invalid), naming the key.
+
+me:
+  # The <user> in human:<user>. null: the OS username, or human:unknown if that fails the pattern.
+  name: null
+  # Your login on each backend, for `me` in `prs` filters. null: the authenticated user.
+  github: null
+  gitlab: null
+
+# Executables: a bare name, resolved only against absolute PATH entries, or an absolute path.
+# They are looked up only when that backend is needed.
+gh_bin: gh
+glab_bin: glab
+
+# Budget for the host calls of a command: the clock runs only during them, and stops for dialogs
+# and hooks. Hooks are bounded by their own timeouts.
+timeout: 60s
+
+# Read retries (0 to 10). 0 also turns off readiness retries. A write is never retried.
+retries: 3
+
+# github.com (backend github) and gitlab.com (backend gitlab) are built in. Any other host must be
+# declared here with its backend; a PR, --repo or --host naming an undeclared host exits 20.
+# Remove the line `hosts: {}` to use the example below.
+hosts: {}
 # hosts:
-#   <host>:
-#     token_env: ...
+#   github.com:
+#     # Variable holding the token (default null). A configured credential that yields nothing
+#     # exits 12 (auth_required); the stored login is not used.
+#     token_env: GITHUB_EXAMPLE_TOKEN
+#   gitlab.example.com:
+#     # Required for any host that is not built in: github or gitlab.
+#     backend: gitlab
+#     # Variable holding the token (default null).
+#     token_env: GITLAB_EXAMPLE_TOKEN
+#     # argv producing the token (default null): no shell, 10 s timeout, stdin /dev/null; an
+#     # argument equal to {host} becomes the host; stdout minus the trailing newline is the token,
+#     # which must be one line of printable ASCII with no space. Tried after token_env. The stored
+#     # login of gh or glab is used only when neither is configured.
+#     token_command: [example-secret-tool, lookup, "{host}"]
+#     # Your login on this host (default null); takes priority over me.gitlab.
+#     me: example-user
+#     # GitLab under a path (default null).
+#     api_prefix: /gitlab
+
+# Per-repo overrides, keyed by repo id. Only merge_method in v1: no setting lowers a safety rule.
+repos: {}
+# repos:
+#   gitlab.example.com/group/project:
+#     # squash, merge or rebase (default null). --method wins over this. With neither, GitHub uses
+#     # the only allowed method if exactly one is, else exits 2; GitLab uses the project's setting.
+#     # The key matches the canonical path, ignoring case.
+#     merge_method: squash
+
+# Hooks, each a list of entries (default []). cmd runs through sh -c in its own process group.
+# Exit 0 continues; on a pre- hook, exit 13 escalates and any other failure or a timeout vetoes;
+# post- failures are logged and warned, never fatal. The payload is JSON on stdin and never holds
+# a body. Only post- hooks may set async.
 hooks: {}
+# hooks:
+#   pre-merge:
+#     - cmd: example-merge-gate
+#       # Default 30s.
+#       timeout: 30s
+#   post-merge:
+#     - cmd: example-notify
+#       timeout: 30s
+#       # Default false.
+#       async: true
+#   pre-post:
+#     - cmd: example-post-gate
+#   post-post:
+#     - cmd: example-notify
+#       async: false

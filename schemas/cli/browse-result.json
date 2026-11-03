@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/cli/browse-result.json",
+  "title": "browse --result-file content",
+  "type": "object",
+  "properties": {
+    "intent": {
+      "enum": [
+        "open",
+        "back"
+      ],
+      "description": "open means o was used; otherwise back."
+    },
+    "selected": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/pr"
+      },
+      "maxItems": 1,
+      "description": "Zero or one PR, in the pr form."
+    },
+    "merged": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/pr"
+      },
+      "description": "The PRs merged with m."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "intent",
+    "selected",
+    "merged"
+  ]
+}

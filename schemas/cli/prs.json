@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/cli/prs.json",
+  "title": "prs output",
+  "description": "Printed on exit 0, and on exit 12 (partial_results) with errors listing the hosts that failed.",
+  "type": "object",
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/pr_list_item"
+      }
+    },
+    "complete": {
+      "type": "boolean",
+      "description": "false if older items were cut, including by GitHub's 1000-result search limit."
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/host_error"
+      }
+    },
+    "hosts_queried": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/host"
+      }
+    },
+    "rate_limit": {
+      "$ref": "../defs.json#/$defs/rate_limit"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "items",
+    "complete",
+    "errors",
+    "hosts_queried",
+    "rate_limit"
+  ]
+}
