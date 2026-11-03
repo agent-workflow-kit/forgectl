@@ -277,6 +277,114 @@ def test_hostile_input_is_usage_error_exit_2(
     assert "usage" in err
 
 
+# `-h` is the help flag only when it is exactly `-h`; `-h<anything>` must not be read as it.
+HELP_LOOKALIKES = ["-hh", "-hx", "-h=x", "-https://example.com/o/r/pull/1", "-help", "-h-h"]
+
+
+@pytest.fixture
+def private_home(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+
+
+def _help_free(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, str, str]:
+    try:
+        code = main(["--json", *argv], tty=NO_TTY)
+    except SystemExit as exc:  # a help or version exit leaks out of main
+        pytest.fail(f"{argv} exited via SystemExit({exc.code})")
+    out, err = capsys.readouterr()
+    assert "usage: forgectl" not in out, out
+    return code, out, err
+
+
+@pytest.mark.usefixtures("private_home")
+@pytest.mark.parametrize("bad", HELP_LOOKALIKES)
+@pytest.mark.parametrize("command", sorted(VALID))
+def test_help_lookalike_after_the_command_is_usage(
+    command: str, bad: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = _help_free([*VALID[command], bad], capsys)
+    assert code == 2, (out, err)
+    assert envelope(out)["code"] == "usage"
+
+
+@pytest.mark.usefixtures("private_home")
+@pytest.mark.parametrize("bad", HELP_LOOKALIKES)
+@pytest.mark.parametrize("command", sorted(VALID))
+def test_help_lookalike_right_after_the_command_is_usage(
+    command: str, bad: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    valid = VALID[command]
+    code, out, err = _help_free([valid[0], bad, *valid[1:]], capsys)
+    assert code == 2, (out, err)
+    assert envelope(out)["code"] == "usage"
+
+
+@pytest.mark.usefixtures("private_home")
+@pytest.mark.parametrize("bad", HELP_LOOKALIKES)
+@pytest.mark.parametrize(
+    "argv",
+    [
+        [],
+        ["--timeout", "{bad}"],
+        ["--config", "{bad}"],
+    ],
+    ids=["before-command", "as-timeout-value", "as-config-value"],
+)
+def test_help_lookalike_in_global_position_is_usage(
+    argv: list[str], bad: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    argv = [a.replace("{bad}", bad) for a in argv] or [bad]
+    code, out, err = _help_free([*argv, "whoami"], capsys)
+    assert code == 2, (out, err)
+    assert envelope(out)["code"] == "usage"
+
+
+@pytest.mark.usefixtures("private_home")
+@pytest.mark.parametrize("bad", HELP_LOOKALIKES)
+def test_help_lookalike_as_an_option_value_is_usage(
+    bad: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for argv in (
+        ["comment", PR, "--body-file", bad, "--expected-head", H1],
+        ["merge", PR, "--expected-head", bad, "--expected-base", "main"],
+        ["prs", "--author", bad],
+        ["prs", "--author", "me", "--limit", bad],
+    ):
+        code, out, err = _help_free(argv, capsys)
+        assert code in {1, 2}, (argv, out, err)
+        assert code != 0
+
+
+@pytest.mark.usefixtures("private_home")
+@pytest.mark.parametrize("bad", HELP_LOOKALIKES)
+def test_help_lookalike_after_double_dash_is_never_help(
+    bad: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # After `--` it is a positional value, never a flag; it must not print help or exit 0.
+    code, out, err = _help_free(["show", "--", bad], capsys)
+    assert code != 0, (out, err)
+
+
+@pytest.mark.usefixtures("private_home")
+@pytest.mark.parametrize("command", sorted(VALID))
+@pytest.mark.parametrize("flag", ["-h", "--help"])
+def test_exact_help_flag_still_exits_zero(
+    command: str, flag: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main([command, flag], tty=NO_TTY)
+    assert exc.value.code == 0
+    assert "usage: forgectl" in capsys.readouterr().out
+
+
+@pytest.mark.usefixtures("private_home")
+@pytest.mark.parametrize("bad", ["-v", "-q", "-V", "-j", "-vq", "-hv", "-vh"])
+def test_no_other_short_flags_exist(bad: str, capsys: pytest.CaptureFixture[str]) -> None:
+    code, out, err = _help_free(["show", PR, bad], capsys)
+    assert code == 2, (out, err)
+
+
 def test_usage_error_without_json_prints_text_only(capsys: pytest.CaptureFixture[str]) -> None:
     code, out, err = run(capsys, ["show"])
     assert (code, out) == (2, "")
