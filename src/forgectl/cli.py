@@ -10,7 +10,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from types import FrameType
 
-from . import registry
+from . import gateway, registry
 from .config import load_config
 from .errors import ForgectlError
 from .humanactions import Tty, build_context, default_me_name
@@ -118,6 +118,8 @@ def _dispatch(argv: list[str], tty: Tty | None) -> int:
 
 
 def main(argv: list[str] | None = None, *, tty: Tty | None = None) -> int:
+    if argv is None:
+        gateway.harden_process()  # a real invocation only: a token lives in this process's memory
     argv = list(sys.argv[1:] if argv is None else argv)
     # The signal handlers stay installed while an error is printed, so a signal then still ends
     # the run as 128+N rather than a default-handler death in the middle of the output.
