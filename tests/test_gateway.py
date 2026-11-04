@@ -2028,6 +2028,66 @@ def test_signals_during_the_kill_grace_still_kill_the_group_and_reraise_the_firs
     assert group_members(pid) == [] and not Path(f"/proc/{pid}").exists()
 
 
+def test_a_signal_during_dir_cleanup_of_an_ordinary_error_is_raised_not_noted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ordinary error is leaving ``private_dirs`` and a SIGINT lands while the dirs are being
+    removed: the KeyboardInterrupt propagates (the error is its context), it is not a note."""
+    real_remove = gw.remove_tree
+
+    def remove_with_sigint(path: str) -> None:
+        os.kill(os.getpid(), signal.SIGINT)  # held until the mask is restored
+        real_remove(path)
+
+    monkeypatch.setattr(gw, "remove_tree", remove_with_sigint)
+    before = blocked_mask()
+    roots: list[str] = []
+    with pytest.raises(KeyboardInterrupt) as raised:  # noqa: PT012
+        with gw.private_dirs(plain_env(), config=True) as dirs:
+            roots.append(dirs.root)
+            raise gw._error("network_error", "boom")
+    assert isinstance(raised.value.__context__, ForgectlError)
+    assert raised.value.__context__.code == "network_error"
+    (root,) = roots
+    assert not os.path.exists(root)
+    assert blocked_mask() == before
+
+
+def test_a_signal_during_process_cleanup_of_an_ordinary_error_is_raised_not_noted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ordinary error after the spawn starts the cleanup; a SIGINT held during it propagates
+    once the mask is restored, and the group is still killed and the leader reaped."""
+    real_stop = gw._Leader.stop_group
+    started: list[int] = []
+
+    def stop_with_sigint(self: Any) -> None:
+        os.kill(os.getpid(), signal.SIGINT)  # held until the leader is reaped
+        real_stop(self)
+
+    def fail_after_spawn(pid: int, pgid: int) -> None:
+        started.append(pid)
+        raise gw._error("internal", "after the spawn")
+
+    monkeypatch.setattr(gw._Leader, "stop_group", stop_with_sigint)
+    before = blocked_mask()
+    try:
+        with pytest.raises(KeyboardInterrupt) as raised:
+            gw.run_process(
+                python_child("import time;time.sleep(30)"), env=plain_env(),
+                cwd=os.environ["TMPDIR"], timeout=30, on_start=fail_after_spawn,
+            )  # fmt: skip
+    finally:
+        for pid in started:  # only the child this test started, if the code under test left it
+            if group_members(pid):
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(pid, signal.SIGKILL)
+    assert isinstance(raised.value.__context__, ForgectlError)
+    assert blocked_mask() == before
+    (pid,) = started
+    assert group_members(pid) == [] and not Path(f"/proc/{pid}").exists()
+
+
 def test_a_failure_right_after_the_spawn_restores_the_mask_and_kills_the_child(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

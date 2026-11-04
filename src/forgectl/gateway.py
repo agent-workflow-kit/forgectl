@@ -622,20 +622,27 @@ def _block_signals() -> Any:
 
 def _restore_signals(old: Any, in_flight: BaseException | None = None) -> None:
     """Restore the mask; a signal held meanwhile is delivered now. If an exception is already on
-    its way out, whatever that delivery raises is noted on it instead of replacing it."""
+    its way out, what that delivery raises is settled against it (see ``_settle``)."""
     if old is None:
         return
     try:
         signal.pthread_sigmask(signal.SIG_SETMASK, old)
     except BaseException as late:
-        if in_flight is None:
+        if in_flight is None or _settle(in_flight, late) is late:
             raise
-        _note(in_flight, late)
 
 
-def _note(in_flight: BaseException, late: BaseException) -> None:
+def _settle(in_flight: BaseException, late: BaseException) -> BaseException:
+    """Return the exception that goes on propagating when ``late`` is raised during the cleanup
+    after ``in_flight``. A signal-derived ``late`` (any non-``Exception``) replaces an ordinary
+    in-flight error, with that error as its context, so a signal is never lost; anything else is
+    noted on ``in_flight``, which keeps propagating."""
+    if isinstance(in_flight, Exception) and not isinstance(late, Exception):
+        late.__context__ = in_flight
+        return late
     with contextlib.suppress(Exception):
         in_flight.add_note(f"forgectl: during cleanup also: {type(late).__name__}: {late}")
+    return in_flight
 
 
 def _popen(
@@ -676,22 +683,24 @@ def _cleanup_after(
     proc: subprocess.Popen[bytes],
     leader: _Leader | None,
     selector: selectors.BaseSelector,
-) -> None:
-    """End the group, close the pipes and reap the leader after ``exc``; never raises: anything
-    that goes wrong here is noted on ``exc``."""
+) -> BaseException:
+    """End the group, close the pipes and reap the leader after ``exc``; never raises. Returns
+    the exception to propagate: ``exc``, or a signal-derived one raised here (see ``_settle``)."""
+    outgoing = exc
     if leader is None:
         leader = _Leader.bare(proc)
     try:
         leader.stop_group()
     except BaseException as late:
-        _note(exc, late)
+        outgoing = _settle(outgoing, late)
     _close_streams(proc, selector)
     try:
         leader.reap()
     except BaseException as late:
-        _note(exc, late)
+        outgoing = _settle(outgoing, late)
     finally:
         leader.close()
+    return outgoing
 
 
 def run_process(
@@ -710,9 +719,10 @@ def run_process(
     At ``timeout`` seconds, or when stdout passes ``max_stdout``, the whole group gets SIGTERM and,
     after ``KILL_GRACE``, SIGKILL. Any exception raised while the child runs (a signal handler's
     ``SystemExit``, ``KeyboardInterrupt``) ends the group the same way, with SIGINT, SIGTERM and
-    SIGHUP held until the leader is reaped, and propagates unchanged: a second signal or a failed
-    reap is noted on it, never raised instead. Only the PID started here, and the group it leads,
-    are ever signaled; the leader is reaped last.
+    SIGHUP held until the leader is reaped, and propagates: a second signal or a failed reap is
+    noted on it, except that a signal during the cleanup of an ordinary error is raised in its
+    place (the error is its context), so a signal is never lost. Only the PID started here, and
+    the group it leads, are ever signaled; the leader is reaped last.
     """
     if not timeout > 0 or math.isinf(timeout):
         raise ValueError("timeout must be positive and finite")
@@ -736,10 +746,13 @@ def run_process(
         result = _collect(proc, leader, selector, stdin, timeout, max_stdout, max_stderr)
     except BaseException as exc:
         held = old_mask if masked else _block_signals()
+        outgoing: BaseException = exc
         try:
-            _cleanup_after(exc, proc, leader, selector)
+            outgoing = _cleanup_after(exc, proc, leader, selector)
         finally:
-            _restore_signals(held, exc)
+            _restore_signals(held, outgoing)
+        if outgoing is not exc:
+            raise outgoing from exc
         raise
     _close_streams(proc, selector)
     leader.close()
