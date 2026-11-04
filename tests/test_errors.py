@@ -14,7 +14,7 @@ from forgectl.errors import (
     usage,
 )
 
-from .cli_schema_check import validate
+from .harness.schemas import validate
 
 DEFS = json.loads((Path(__file__).parent.parent / "schemas" / "defs.json").read_text())["$defs"]
 

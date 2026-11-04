@@ -17,7 +17,7 @@ from forgectl.config import load_config
 from forgectl.humanactions import Tty
 from forgectl.registry import Invocation
 
-from .cli_schema_check import validate
+from .harness.schemas import validate
 
 PR = "github.com/o/r#1"
 TTY = Tty(stdin=True, stderr=True)

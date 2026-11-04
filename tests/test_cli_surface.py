@@ -15,7 +15,7 @@ from forgectl.errors import EXIT_BY_CODE, ForgectlError, refused
 from forgectl.humanactions import Tty, require_confirmation
 from forgectl.registry import Invocation
 
-from .cli_schema_check import validate
+from .harness.schemas import validate
 
 PR = "github.com/o/r#1"
 H1 = "a" * 40
