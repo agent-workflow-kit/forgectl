@@ -7,6 +7,7 @@ import json
 import os
 import re
 import signal
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -209,6 +210,36 @@ def test_a_failed_first_append_is_audit_unavailable_and_nothing_follows(
         attempt.begin()
     assert caught.value.code == "audit_unavailable" and caught.value.exit_code == 12
     assert not (tmp_path / "x").exists()
+
+
+@pytest.mark.parametrize("bad", [0o666, 0o620, 0o602])
+def test_an_existing_audit_file_others_can_write_is_audit_unavailable(
+    state: Path, bad: int
+) -> None:
+    state.mkdir(parents=True, mode=0o700)
+    path = state / "audit.jsonl"
+    path.write_text("")
+    path.chmod(bad)
+    with pytest.raises(ForgectlError) as caught:
+        Attempt(state, context()).begin()
+    assert caught.value.code == "audit_unavailable" and caught.value.exit_code == 12
+    with pytest.raises(ForgectlError) as checked:
+        audit.check_writable(state)
+    assert checked.value.code == "audit_unavailable"
+    assert path.read_text() == ""
+
+
+@pytest.mark.parametrize("good", [0o600, 0o644])
+def test_an_existing_audit_file_others_cannot_write_is_used_unchanged(
+    state: Path, good: int
+) -> None:
+    state.mkdir(parents=True, mode=0o700)
+    path = state / "audit.jsonl"
+    path.write_text("")
+    path.chmod(good)
+    Attempt(state, context()).begin()
+    assert len(records(state)) == 1
+    assert stat.S_IMODE(path.stat().st_mode) == good
 
 
 def test_a_failed_second_append_is_audit_failed_with_the_outcome_in_details(

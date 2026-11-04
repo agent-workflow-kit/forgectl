@@ -276,6 +276,28 @@ def test_a_state_directory_others_can_write_is_refused(
     assert code == 12 and "audit_unavailable" in err
 
 
+@pytest.mark.parametrize("bad", [0o666, 0o620, 0o602])
+def test_an_audit_file_others_can_write_is_refused(
+    state: Path, capsys: pytest.CaptureFixture[str], bad: int
+) -> None:
+    put(state, record("2026-01-01T00:00:00Z"))
+    (state / "audit.jsonl").chmod(bad)
+    code, out, err = run(capsys, "--json", "export")
+    assert code == 12
+    assert json.loads(out)["error"]["code"] == "audit_unavailable"
+    assert "audit_unavailable" in err
+
+
+@pytest.mark.parametrize("good", [0o600, 0o644])
+def test_an_audit_file_others_cannot_write_is_exported(
+    state: Path, capsys: pytest.CaptureFixture[str], good: int
+) -> None:
+    put(state, record("2026-01-01T00:00:00Z"))
+    (state / "audit.jsonl").chmod(good)
+    code, out, _ = run(capsys, "export")
+    assert code == 0 and out.count("\n") == 1
+
+
 def test_export_does_not_create_the_state_directory(
     state: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

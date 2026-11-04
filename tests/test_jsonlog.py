@@ -78,6 +78,54 @@ def test_a_group_or_world_writable_directory_is_refused(state: Path) -> None:
     assert not (state / "audit.jsonl").exists()
 
 
+BAD_FILE_MODES = [0o666, 0o620, 0o602]
+GOOD_FILE_MODES = [0o600, 0o644]
+
+
+@pytest.mark.parametrize("name", ["audit.jsonl", "log.jsonl"])
+@pytest.mark.parametrize("bad", BAD_FILE_MODES)
+def test_an_existing_file_writable_by_group_or_others_is_refused(
+    state: Path, name: str, bad: int
+) -> None:
+    state.mkdir(parents=True, mode=0o700)
+    path = state / name
+    path.write_text("keep\n")
+    path.chmod(bad)
+    with pytest.raises(JsonlError):
+        jsonlog.append(state, name, {"a": 1})
+    with pytest.raises(JsonlError):
+        jsonlog.check_appendable(state, name)
+    with pytest.raises(JsonlError):
+        jsonlog.open_read(state, name)
+    assert path.read_text() == "keep\n"
+    assert mode(path) == bad
+
+
+@pytest.mark.parametrize("name", ["audit.jsonl", "log.jsonl"])
+@pytest.mark.parametrize("good", GOOD_FILE_MODES)
+def test_an_existing_file_not_writable_by_group_or_others_is_accepted_unchanged(
+    state: Path, name: str, good: int
+) -> None:
+    state.mkdir(parents=True, mode=0o700)
+    path = state / name
+    path.write_text("")
+    path.chmod(good)
+    jsonlog.append(state, name, {"a": 1})
+    assert mode(path) == good
+    assert path.read_text() == '{"a":1}\n'
+
+
+@pytest.mark.parametrize("bad", BAD_FILE_MODES)
+def test_log_event_only_warns_for_an_unsafe_log_file(state: Path, bad: int) -> None:
+    state.mkdir(parents=True, mode=0o700)
+    path = state / "log.jsonl"
+    path.write_text("")
+    path.chmod(bad)
+    warning = jsonlog.log_event(state, "info", "x")
+    assert warning is not None and "log not written" in warning
+    assert path.read_text() == ""
+
+
 # --- symlinks, types, owners ------------------------------------------------------------------
 
 
@@ -347,7 +395,8 @@ def test_a_record_at_the_cap_still_goes_after_a_fragment(state: Path) -> None:
 
 def test_missing_parents_are_created_0700_under_a_permissive_umask(tmp_path: Path) -> None:
     state = tmp_path / "home" / ".local" / "state" / "forgectl"
-    (tmp_path / "home").mkdir(mode=0o755)
+    (tmp_path / "home").mkdir()
+    (tmp_path / "home").chmod(0o755)
     old = os.umask(0)
     try:
         jsonlog.append(state, "audit.jsonl", {"a": 1})

@@ -152,6 +152,8 @@ def _check_file(fd: int) -> None:
         raise JsonlError("not a regular file")
     if info.st_uid != os.geteuid() or info.st_nlink != 1:
         raise JsonlError("file is not this user's single-link file")
+    if info.st_mode & 0o022:
+        raise JsonlError("file is writable by group or others")
 
 
 def _open_append(directory: Path, name: str) -> int:
