@@ -307,10 +307,10 @@ def test_error_message_and_stderr_are_sanitized(capsys: pytest.CaptureFixture[st
 def test_parse_error_never_echoes_raw_control_characters(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    code, out, err = run(capsys, ["--json", "nope\x1b[31m‮"])
+    code, out, err = run(capsys, ["--json", "nope\x1b[31m\u202e"])
     assert code == 2
     assert "\x1b" not in out + err
-    assert "‮" not in out + err
+    assert "\u202e" not in out + err
 
 
 @pytest.mark.parametrize(
@@ -509,10 +509,10 @@ def test_success_without_json_prints_readable_text(capsys: pytest.CaptureFixture
 
 
 def test_human_output_is_never_raw(capsys: pytest.CaptureFixture[str]) -> None:
-    registry.HANDLERS["show"] = lambda inv: {"title": "evil\x1b]0;x\x07‮"}
+    registry.HANDLERS["show"] = lambda inv: {"title": "evil\x1b]0;x\x07\u202e"}
     code, out, _ = run(capsys, ["show", PR])
     assert code == 0
-    assert "\x1b" not in out and "‮" not in out and "\x07" not in out
+    assert "\x1b" not in out and "\u202e" not in out and "\x07" not in out
 
 
 @pytest.mark.parametrize("code_name", sorted(EXIT_BY_CODE))

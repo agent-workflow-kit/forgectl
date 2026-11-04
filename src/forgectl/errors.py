@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .textsafe import sanitize_text
+from .sanitize import sanitize_text
 
 EXIT_BY_CODE: dict[str, int] = {
     "internal": 1,
@@ -95,6 +95,8 @@ def truncate_utf8(text: str, limit: int) -> str:
     return data[:limit].decode("utf-8", errors="ignore")
 
 
+# TODO(#10): apply sanitize_line to fields marked x-one-line in schemas/ (sanitize_tree applies
+# sanitize_text to every string value and does not touch dict keys)
 def sanitize_tree(value: Any) -> Any:
     if isinstance(value, str):
         return sanitize_text(value)
