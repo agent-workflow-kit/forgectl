@@ -19,6 +19,10 @@ def isolated_environment(
         if name.startswith(("FORGECTL_", "XDG_")):
             monkeypatch.delenv(name)
     monkeypatch.setenv("HOME", str(home))
+    # Files the tests create by hand must not depend on the caller's umask: the audit and log
+    # files are refused when group- or world-writable.
+    previous = os.umask(0o077)
     for name in ("CONFIG", "DATA", "STATE", "CACHE"):
         monkeypatch.setenv(f"XDG_{name}_HOME", str(Path(home) / f".xdg-{name.lower()}"))
     yield
+    os.umask(previous)
