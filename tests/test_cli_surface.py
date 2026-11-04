@@ -278,7 +278,11 @@ def test_hostile_input_is_usage_error_exit_2(
 
 
 # `-h` is the help flag only when it is exactly `-h`; `-h<anything>` must not be read as it.
-HELP_LOOKALIKES = ["-hh", "-hx", "-h=x", "-https://example.com/o/r/pull/1", "-help", "-h-h"]
+URL_LOOKALIKE = "-https://github.com/o/r/pull/1"
+HELP_LOOKALIKES = ["-hh", "-hx", "-h=x", URL_LOOKALIKE, "-help", "-h-h"]
+# Every subparser shares the same `_Parser`, so the full token list runs against one
+# representative command and every command gets the single URL-shaped token.
+REPRESENTATIVE = "show"
 
 
 @pytest.fixture
@@ -299,27 +303,39 @@ def _help_free(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int
 
 @pytest.mark.usefixtures("private_home")
 @pytest.mark.parametrize("bad", HELP_LOOKALIKES)
-@pytest.mark.parametrize("command", sorted(VALID))
 def test_help_lookalike_after_the_command_is_usage(
-    command: str, bad: str, capsys: pytest.CaptureFixture[str]
+    bad: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    code, out, err = _help_free([*VALID[command], bad], capsys)
+    code, out, err = _help_free([*VALID[REPRESENTATIVE], bad], capsys)
     assert code == 2, (out, err)
     assert envelope(out)["code"] == "usage"
 
 
 @pytest.mark.usefixtures("private_home")
 @pytest.mark.parametrize("bad", HELP_LOOKALIKES)
-@pytest.mark.parametrize("command", sorted(VALID))
-def test_help_lookalike_right_after_the_command_is_usage(
-    command: str, bad: str, capsys: pytest.CaptureFixture[str]
+def test_help_lookalike_in_pr_position_is_usage(
+    bad: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    valid = VALID[command]
+    valid = VALID[REPRESENTATIVE]
     code, out, err = _help_free([valid[0], bad, *valid[1:]], capsys)
     assert code == 2, (out, err)
     assert envelope(out)["code"] == "usage"
 
 
+@pytest.mark.usefixtures("private_home")
+@pytest.mark.parametrize("command", sorted(VALID))
+def test_url_lookalike_in_pr_position_is_usage_for_every_command(
+    command: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    valid = VALID[command]
+    code, out, err = _help_free([valid[0], URL_LOOKALIKE, *valid[1:]], capsys)
+    assert code == 2, (out, err)
+    assert envelope(out)["code"] == "usage"
+
+
+# The PR-position and before-command tests are the ones that catch #51. The option-value,
+# `--timeout`/`--config` value and `--` tests pin behavior argparse already gives (it reads
+# `-hx` as an option, not a value, for nargs=None), as a guard against regressions.
 @pytest.mark.usefixtures("private_home")
 @pytest.mark.parametrize("bad", HELP_LOOKALIKES)
 @pytest.mark.parametrize(
@@ -346,14 +362,14 @@ def test_help_lookalike_as_an_option_value_is_usage(
     bad: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
     for argv in (
-        ["comment", PR, "--body-file", bad, "--expected-head", H1],
+        ["comment", PR, "--body-file", bad],
         ["merge", PR, "--expected-head", bad, "--expected-base", "main"],
         ["prs", "--author", bad],
         ["prs", "--author", "me", "--limit", bad],
     ):
         code, out, err = _help_free(argv, capsys)
-        assert code in {1, 2}, (argv, out, err)
-        assert code != 0
+        assert code == 2, (argv, out, err)
+        assert envelope(out)["code"] == "usage"
 
 
 @pytest.mark.usefixtures("private_home")
@@ -367,8 +383,10 @@ def test_help_lookalike_after_double_dash_is_never_help(
 
 
 @pytest.mark.usefixtures("private_home")
-@pytest.mark.parametrize("command", sorted(VALID))
-@pytest.mark.parametrize("flag", ["-h", "--help"])
+@pytest.mark.parametrize(
+    ("command", "flag"),
+    [(REPRESENTATIVE, "--help"), *((command, "-h") for command in sorted(VALID))],
+)
 def test_exact_help_flag_still_exits_zero(
     command: str, flag: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
