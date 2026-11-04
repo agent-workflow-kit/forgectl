@@ -16,7 +16,7 @@ import pytest
 
 from .harness.forges import FAKEBIN, Call, FakeForges
 from .harness.procs import ProcessRegistry
-from .harness.safety import FIXED_SETTINGS, reference_env
+from .harness.safety import FIXED_SETTINGS, NO_BUS_ADDRESS, reference_env
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -370,7 +370,9 @@ def test_glab_auth_token_has_no_hostname_flag(run: Runner) -> None:
     assert done.stderr.endswith("  Try --help for usage.\n\n")
 
 
-# glab routing: the table in design.md, "glab routing cases".
+# glab routing: the table in design.md, "glab routing cases". The gateway produces only row 2
+# (and ``--hostname gitlab.com`` for gitlab.com); rows 1, 3 and 4 are the fake's own behavior,
+# kept so a gateway that added ``--hostname`` would visibly lose the prefix or the token.
 
 
 def glab_call(run: Runner, forges: FakeForges, args: list[str], env: dict[str, str]) -> Call:
@@ -398,6 +400,16 @@ def test_glab_routing_host_with_prefix_alone_keeps_the_prefix(
 ) -> None:
     call = glab_call(run, forges, [], {"GITLAB_HOST": "gl.example.test/pre"})
     assert call.request["url"] == "https://gl.example.test/pre/api/v4/user"  # type: ignore[index]
+    assert call.token_sent == "tok-fixture-0001"
+
+
+def test_glab_routing_host_without_prefix_and_hostname_flag(
+    run: Runner, forges: FakeForges
+) -> None:
+    call = glab_call(
+        run, forges, ["--hostname", "gl.example.test"], {"GITLAB_HOST": "gl.example.test"}
+    )
+    assert call.request["url"] == "https://gl.example.test/api/v4/user"  # type: ignore[index]
     assert call.token_sent == "tok-fixture-0001"
 
 
@@ -468,6 +480,25 @@ def test_glab_full_url_endpoint_sends_its_token_to_the_named_host(
     call = only(forges)
     assert call.request["full_url_endpoint"] and call.token_sent  # type: ignore[index]
     assert call.request["url"].startswith("https://elsewhere.example.test")  # type: ignore[index]
+
+
+def test_glab_1_89_mode_with_no_credential_says_unauthenticated_and_sends_nothing(
+    run: Runner, forges: FakeForges
+) -> None:
+    forges.glab_unauthenticated_without_credential()
+    forges.answer("glab", "user", body={})
+    done = run(
+        "glab",
+        ["api", "--hostname", "gitlab.com", "-i", "user"],
+        host="gitlab.com",
+        drop=("GITLAB_TOKEN",),
+    )
+    assert (done.returncode, done.stdout) == (1, "")
+    assert "  Unauthenticated." in done.stderr and "   ERROR  " in done.stderr
+    assert only(forges).request is None
+    # with a credential the mode changes nothing
+    run("glab", ["api", "--hostname", "gitlab.com", "user"], host="gitlab.com")
+    assert forges.calls()[-1].token_sent == "tok-fixture-0001"
 
 
 def test_glab_with_no_credential_is_anonymous(run: Runner, forges: FakeForges) -> None:
@@ -612,18 +643,44 @@ def test_keyring_login_needs_the_session_bus(
     assert no_bus.returncode == 1
     runtime = str(tmp_path / "runtime")
     for bus in ({"DBUS_SESSION_BUS_ADDRESS": "unix:path=/x"}, {"XDG_RUNTIME_DIR": runtime}):
-        done = run("gh", token_args, drop=("GH_TOKEN",), env_extra=bus)
+        done = run("gh", token_args, drop=("GH_TOKEN", "DBUS_SESSION_BUS_ADDRESS"), env_extra=bus)
         assert (done.returncode, done.stdout) == (0, "ring-tok\n")
-        api = run("gh", ["api", "--hostname", "github.com", "x"], drop=("GH_TOKEN",), env_extra=bus)
+        api = run(
+            "gh",
+            ["api", "--hostname", "github.com", "x"],
+            drop=("GH_TOKEN", "DBUS_SESSION_BUS_ADDRESS"),
+            env_extra=bus,
+        )
         assert api.returncode == 4
         run(
             "glab",
             ["api", "--hostname", "gitlab.com", "user"],
             host="gitlab.com",
-            drop=("GITLAB_TOKEN",),
+            drop=("GITLAB_TOKEN", "DBUS_SESSION_BUS_ADDRESS"),
             env_extra=bus,
         )
         assert forges.calls()[-1].token_sent == "ring-gl"
+
+
+def test_with_no_bus_variable_the_default_per_user_socket_reaches_the_keyring(
+    run: Runner, forges: FakeForges, tmp_path: Path
+) -> None:
+    """gh 2.87.3 dials /run/user/<uid>/bus when neither bus variable is set."""
+    runtime = str(tmp_path / "runtime")
+    forges.keyring_login("gh", "github.com", "ring-tok")
+    token_args = ["auth", "token", "--hostname", "github.com"]
+    absent = run("gh", token_args, drop=("GH_TOKEN", "DBUS_SESSION_BUS_ADDRESS"))
+    assert absent.returncode == 1
+    forges.default_bus_socket(present=True)
+    present = run("gh", token_args, drop=("GH_TOKEN", "DBUS_SESSION_BUS_ADDRESS"))
+    assert (present.returncode, present.stdout) == (0, "ring-tok\n")
+    unusable = run(
+        "gh",
+        token_args,
+        drop=("GH_TOKEN",),
+        env_extra={"DBUS_SESSION_BUS_ADDRESS": NO_BUS_ADDRESS, "XDG_RUNTIME_DIR": runtime},
+    )
+    assert unusable.returncode == 1  # the fixed address wins over everything else
 
 
 def test_environment_is_logged_as_received_not_as_python_rewrote_it(
@@ -710,17 +767,24 @@ def test_die_after_answering_kills_the_fake_with_that_signal(
 
 
 def redirect_run(
-    run: Runner, forges: FakeForges, backend: str, method: str, status: int, location: str
+    run: Runner,
+    forges: FakeForges,
+    backend: str,
+    method: str,
+    status: int,
+    location: str,
+    *,
+    body: bool = True,
 ) -> tuple[subprocess.CompletedProcess[str], Call]:
     forges.answer(backend, "start", status=status, redirect=location)
     forges.answer(backend, endpoint_re="landed", body={"final": True}, headers={"X-Hop": "2"})
     host = "ghe.example.test" if backend == "gh" else "gitlab.com"
-    args = ["api", "-i", "-X", method, "--input", "-", "start"]
+    args = ["api", "-i", "-X", method, *(["--input", "-"] if body else []), "start"]
     if backend == "gh":
         args[1:1] = ["--hostname", host]
     else:
         args[1:1] = ["--hostname", "gitlab.com"]
-    done = run(backend, args, host=host, stdin='{"a":"b"}')
+    done = run(backend, args, host=host, stdin='{"a":"b"}' if body else None)
     return done, only(forges)
 
 
@@ -756,21 +820,39 @@ def test_glab_repeats_its_token_on_a_redirect_to_another_host(
     assert call.requests[1]["host"] == "other.example.test"
 
 
-@pytest.mark.parametrize(
-    ("status", "method", "body"),
-    [
-        (301, "GET", None),
-        (302, "GET", None),
-        (307, "POST", '{"a":"b"}'),
-        (308, "POST", '{"a":"b"}'),
-    ],
-)
-def test_a_redirected_post_follows_go_method_rules(
-    run: Runner, forges: FakeForges, status: int, method: str, body: str | None
+@pytest.mark.parametrize("backend", ["gh", "glab"])
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+@pytest.mark.parametrize("status", [301, 302, 303])
+def test_a_301_302_or_303_turns_any_method_into_a_bodyless_get(
+    run: Runner, forges: FakeForges, backend: str, method: str, status: int
 ) -> None:
-    _, call = redirect_run(run, forges, "gh", "POST", status, "/api/v3/landed")
+    """Go's net/http, as gh 2.87.3 and glab 1.89.0 use it: only the GET's answer is shown."""
+    done, call = redirect_run(run, forges, backend, method, status, "/landed")
     hop = call.requests[1]
-    assert (hop["method"], hop["body"]) == (method, body)
+    assert (hop["method"], hop["body"]) == ("GET", None)
+    assert done.returncode == 0 and done.stdout.startswith("HTTP/2.0 200 OK\n")
+    assert done.stdout.count("HTTP/2.0") == 1
+
+
+@pytest.mark.parametrize("backend", ["gh", "glab"])
+@pytest.mark.parametrize("status", [307, 308])
+def test_a_307_or_308_on_a_body_from_stdin_is_shown_not_followed(
+    run: Runner, forges: FakeForges, backend: str, status: int
+) -> None:
+    done, call = redirect_run(run, forges, backend, "POST", status, "/landed")
+    assert len(call.requests) == 1 and call.exit == 1
+    assert done.returncode == 1
+    assert done.stdout.startswith(f"HTTP/2.0 {status} ")
+    assert "Location: " in done.stdout
+
+
+@pytest.mark.parametrize("status", [307, 308])
+def test_a_307_or_308_without_a_body_is_followed_keeping_the_method(
+    run: Runner, forges: FakeForges, status: int
+) -> None:
+    done, call = redirect_run(run, forges, "gh", "DELETE", status, "/api/v3/landed", body=False)
+    hop = call.requests[1]
+    assert (hop["method"], hop["body"], done.returncode) == ("DELETE", None, 0)
 
 
 # The developer launchers in tests/fakebin.

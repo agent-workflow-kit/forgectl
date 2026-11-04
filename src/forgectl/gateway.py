@@ -11,17 +11,18 @@ fake runner and so one place decides which token reaches which host. It owns:
 - routing (``gh --hostname`` always; ``glab`` by the routing table) and one percent-encoding
   function for every path segment and query value;
 - the child as the leader of its own process group, a deadline that kills the whole group (SIGTERM,
-  then SIGKILL) and size caps on both streams;
+  then SIGKILL, only while the leader is unreaped) and size caps on both streams;
 - status from the ``-i`` headers (never from the exit code or message text), the typed errors of
   the reliability tables, GraphQL result checks and the answer identity check.
 
 Reads are not retried here (``reads.py`` owns the retry loop and pagination); a write is never
 retried. A signal that reaches the main thread while a child runs terminates the child's group,
 removes the private directories and propagates unchanged: for a write, ``audit.Attempt`` records
-``outcome_unknown`` as it unwinds.
+``outcome_unknown`` as it unwinds. SIGINT, SIGTERM and SIGHUP are held while that cleanup runs, and
+nothing raised during it replaces the exception already on its way out.
 
 ``run_external`` is the second entry point (hooks, ``token_command``, the browser): the same
-process-group and exact-PID rules, the stored-login environment and no forge parsing.
+process-group rules and no forge parsing, with an explicit environment mode per use.
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
@@ -64,6 +65,7 @@ MAX_TOKEN = 4096
 MAX_MESSAGE = 300
 
 Backend = Literal["github", "gitlab"]
+ExternalMode = Literal["hook", "browser", "token_command"]
 Shape = Literal["any", "object", "list"]
 
 # Never reach a child (the environment is built from scratch; the names are listed so a test and
@@ -77,6 +79,7 @@ TOKEN_VARIABLES = (
     "GITLAB_ACCESS_TOKEN",
     "OAUTH_TOKEN",
 )
+_NEVER_EXTRA = frozenset({"GH_HOST", "GH_REPO", "GH_FORCE_TTY", "CLICOLOR_FORCE"})
 FIXED_SETTINGS = {
     "GH_PROMPT_DISABLED": "1",
     "GH_NO_UPDATE_NOTIFIER": "1",
@@ -102,6 +105,13 @@ _PASSTHROUGH = (
     "GLAB_CA_CERT",
 )
 _BUS_VARIABLES = ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR")
+# Where the session bus must stay unused, the child gets this address, which fails at once: with
+# no bus variable at all gh 2.87.3 still dials the default /run/user/<uid>/bus socket.
+NO_BUS_ADDRESS = "unix:path=/nonexistent/forgectl-no-bus"
+_FALLBACK_TMPDIR = "/tmp"
+_HELD_SIGNALS = frozenset({signal.SIGINT, signal.SIGTERM, signal.SIGHUP})
+_HAS_WAITID = hasattr(os, "waitid")  # Linux: exit is seen without reaping
+_HAS_KQUEUE = hasattr(select, "kqueue")  # macOS, BSD: EVFILT_PROC / NOTE_EXIT, the same
 _FALLBACK_PATH = "/usr/bin:/bin"
 _INSTALL = {
     "gh": "brew install gh (or see https://cli.github.com/)",
@@ -123,8 +133,10 @@ _FORBIDDEN_HEADERS = frozenset(
 )
 _HEADER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,63}\Z")
 _HEADER_VALUE = re.compile(r"^[\x20-\x7e]{0,512}\Z")
-_HOST = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?\Z")
-_API_PREFIX = re.compile(r"^(?:/[A-Za-z0-9._~-]{1,64}){1,8}\Z")
+_HOST_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+_HOST_NAME = re.compile(rf"^{_HOST_LABEL}(?:\.{_HOST_LABEL})*\Z")
+_PORT = re.compile(r"^[1-9][0-9]{0,4}\Z")
+_API_PREFIX = re.compile(r"^(?:/(?!\.\.?(?:/|\Z))[A-Za-z0-9._-]{1,64}){1,8}\Z")
 _FIRST_SEGMENT = re.compile(r"^[A-Za-z0-9]")
 _TOKEN = re.compile(rf"^[\x21-\x7e]{{1,{MAX_TOKEN}}}\Z")
 _STATUS_LINE = re.compile(rb"^HTTP/[0-9](?:\.[0-9])? ([0-9]{3})(?: [^\r\n]*)?$")
@@ -191,12 +203,31 @@ def build_endpoint(segments: Sequence[str], query: Sequence[tuple[str, str]] = (
 # -- Targets, environment and private directories -------------------------------------------
 
 
+def _valid_host(host: object) -> bool:
+    """DNS labels joined by dots (lowercase ASCII), with an optional port 1-65535."""
+    if not isinstance(host, str) or not host.isascii():
+        return False
+    name, colon, port = host.partition(":")
+    if not (len(name) <= 253 and _HOST_NAME.match(name)):
+        return False
+    return not colon or (bool(_PORT.match(port)) and int(port) <= 65535)
+
+
 @dataclass(frozen=True)
 class Target:
     """The host a call goes to and how it authenticates.
 
     ``token`` set is token mode (the one token variable of the interface's Credentials table);
-    None is stored-login mode. TODO(#8): hosts.py builds this from config and credentials.
+    None is stored-login mode. The host is lowercased first: every routing and token decision
+    uses the lowercase form.
+
+    TODO(#8): hosts.py builds this from config and credentials, and must supply: the token
+    variable per host (``token_variable`` decides it from the host here); the configured name for
+    ``auth_required.details.variable``; the backend for a ``token_command`` (``run_external`` in
+    mode ``token_command`` requires it); which host kinds need an ``api_prefix``; refusing a port
+    on a GitHub host at config load (refused here as ``config_invalid``); lowercase, canonical
+    config host keys; and config's host and ``api_prefix`` patterns aligned with ``_valid_host``
+    and ``_API_PREFIX`` here (port range 1-65535, label length, ``~``, segment count and length).
     """
 
     backend: Backend
@@ -207,12 +238,21 @@ class Target:
     def __post_init__(self) -> None:
         if self.backend not in ("github", "gitlab"):
             raise ValueError(f"unknown backend {self.backend!r}")
-        if not isinstance(self.host, str) or not _HOST.match(self.host):
+        if not isinstance(self.host, str) or not self.host.isascii():
             raise ValueError("host is not a plain host name with an optional port")
+        object.__setattr__(self, "host", self.host.lower())  # hosts are case-insensitive
+        if not _valid_host(self.host):
+            raise ValueError("host is not a plain host name with an optional port")
+        if self.backend == "github" and ":" in self.host:
+            raise _error(
+                "config_invalid",
+                f"hosts.{self.host}: a GitHub host takes no port (gh refuses one)",
+                details={"key": f"hosts.{self.host}"},
+            )
         if self.api_prefix:
             if self.backend != "gitlab" or self.host == "gitlab.com":
                 raise ValueError("api_prefix is only for self-managed GitLab hosts")
-            if not _API_PREFIX.match(self.api_prefix) or ".." in self.api_prefix.split("/"):
+            if not isinstance(self.api_prefix, str) or not _API_PREFIX.match(self.api_prefix):
                 raise ValueError("api_prefix must be /segment[/segment...] with no trailing slash")
         if self.token is not None and not _TOKEN.match(self.token):
             raise _error(
@@ -284,11 +324,25 @@ class PrivateDirs:
     config: str  # empty, mode 0700 (created for token mode)
 
 
+def _usable_dir(value: str | None) -> bool:
+    return bool(
+        value
+        and "\0" not in value
+        and os.path.isabs(value)
+        and os.path.isdir(value)
+        and os.access(value, os.W_OK | os.X_OK)
+    )
+
+
 def _tmpdir(source: Mapping[str, str]) -> str:
-    value = source.get("TMPDIR", "")
-    if value and os.path.isabs(value) and "\0" not in value and os.path.isdir(value):
-        return value
-    return tempfile.gettempdir()
+    """``TMPDIR`` from ``source`` only, if absolute, an existing directory and writable; else the
+    fixed ``/tmp`` under the same checks. Never the process environment or the cwd."""
+    value = source.get("TMPDIR")
+    if _usable_dir(value):
+        return value  # type: ignore[return-value]
+    if _usable_dir(_FALLBACK_TMPDIR):
+        return _FALLBACK_TMPDIR
+    raise _error("internal", "no usable temporary directory: TMPDIR and /tmp are both unusable")
 
 
 def _mkdir_private(path: str) -> None:
@@ -330,7 +384,12 @@ def private_dirs(source: Mapping[str, str], *, config: bool) -> Iterator[Private
     try:
         yield dirs
     finally:
-        remove_tree(dirs.root)
+        in_flight = sys.exc_info()[1]
+        held = _block_signals()
+        try:
+            remove_tree(dirs.root)
+        finally:
+            _restore_signals(held, in_flight)
 
 
 def _home(source: Mapping[str, str]) -> str:
@@ -358,9 +417,12 @@ def build_environment(
 
     ``target`` set means a forge call: token mode (``target.token``) adds the one token variable
     and the private config dir; stored-login mode adds the caller's config variables and, unless
-    the caller named this backend's config dir, the session bus variables. ``GITLAB_HOST`` carries
-    the host and API prefix for any GitLab host but gitlab.com. ``GH_FORCE_TTY``,
-    ``CLICOLOR_FORCE``, ``GH_REPO`` and ``GH_HOST`` are never set.
+    the caller named this backend's config dir, the session bus variables. Where the bus is not
+    passed (token mode, or the caller's own config dir) ``DBUS_SESSION_BUS_ADDRESS`` is the fixed
+    unusable ``NO_BUS_ADDRESS``. ``backend`` None (no forge program) keeps the bus unless the
+    caller named either config dir. ``GITLAB_HOST`` carries the host and API prefix for any GitLab
+    host but gitlab.com. ``GH_FORCE_TTY``, ``CLICOLOR_FORCE``, ``GH_REPO`` and ``GH_HOST`` are
+    never set.
     """
     env: dict[str, str] = {
         "PATH": child_path(source.get("PATH")),
@@ -376,6 +438,7 @@ def build_environment(
     if target is not None and target.token is not None:
         env[target.token_variable] = target.token
         env[target.config_dir_variable] = dirs.config
+        env["DBUS_SESSION_BUS_ADDRESS"] = NO_BUS_ADDRESS
     else:
         for name in ("GH_CONFIG_DIR", "GLAB_CONFIG_DIR", "XDG_CONFIG_HOME"):
             value = _clean(source.get(name))
@@ -391,6 +454,8 @@ def build_environment(
                 value = _clean(source.get(name))
                 if value is not None:
                     env[name] = value
+        else:
+            env["DBUS_SESSION_BUS_ADDRESS"] = NO_BUS_ADDRESS
     if target is not None and target.backend == "gitlab" and target.host != "gitlab.com":
         env["GITLAB_HOST"] = target.host + target.api_prefix
     return env
@@ -435,27 +500,67 @@ def _signal_group(pgid: int, signum: int) -> None:
 
 
 class _Leader:
-    """The group leader: exit is observed without reaping it, so its PID stays reserved."""
+    """The group leader: exit is observed without reaping it, so its PID stays reserved.
+
+    Linux: ``waitid(WNOWAIT)`` and a pidfd to wait on. Without waitid (macOS): a kqueue
+    ``EVFILT_PROC``/``NOTE_EXIT`` filter, which also leaves the leader unreaped. With neither,
+    ``poll()`` reaps it, so its group is never signaled after that.
+    """
 
     def __init__(self, proc: subprocess.Popen[bytes]) -> None:
         self.proc = proc
         self.pidfd: int | None = None
+        self.kqueue: Any = None
         self.exited = False
-        if hasattr(os, "pidfd_open"):
+        self.mode = "waitid" if _HAS_WAITID else "kqueue" if _HAS_KQUEUE else "poll"
+        if self.mode == "waitid" and hasattr(os, "pidfd_open"):
             with contextlib.suppress(OSError):
                 self.pidfd = os.pidfd_open(proc.pid)
+        elif self.mode == "kqueue":
+            kq: Any = select  # the kqueue names exist only where kqueue does
+            self.kqueue = kq.kqueue()
+            try:
+                watch = kq.kevent(
+                    proc.pid,
+                    filter=kq.KQ_FILTER_PROC,
+                    flags=kq.KQ_EV_ADD | kq.KQ_EV_ONESHOT,
+                    fflags=kq.KQ_NOTE_EXIT,
+                )
+                self.kqueue.control([watch], 0, 0)
+            except ProcessLookupError:  # it already exited (and is not reaped: we never waited)
+                self.exited = True
+            except BaseException:
+                self.kqueue.close()
+                raise
+
+    @classmethod
+    def bare(cls, proc: subprocess.Popen[bytes]) -> _Leader:
+        """A leader that opens nothing: for cleanup when building the real one failed."""
+        leader = cls.__new__(cls)
+        leader.proc, leader.pidfd, leader.kqueue, leader.exited = proc, None, None, False
+        leader.mode = "waitid" if _HAS_WAITID else "poll"
+        return leader
+
+    @property
+    def wait_fd(self) -> int | None:
+        """A descriptor that becomes readable when the leader exits, if there is one."""
+        if self.pidfd is not None:
+            return self.pidfd
+        return self.kqueue.fileno() if self.kqueue is not None else None
 
     def check(self) -> bool:
         if self.exited:
             return True
-        if hasattr(os, "waitid"):
+        if self.mode == "waitid":
             try:
                 found = os.waitid(os.P_PID, self.proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
             except ChildProcessError:
                 found = None
                 self.exited = True
             self.exited = self.exited or found is not None
-        else:  # no waitid (macOS): polling reaps, so the group is not signaled afterwards
+        elif self.mode == "kqueue" and self.kqueue is not None:
+            self.exited = bool(self.kqueue.control(None, 1, 0))
+        else:  # no waitid, no kqueue: polling reaps, so the group is not signaled afterwards
             self.exited = self.proc.poll() is not None
         return self.exited
 
@@ -464,19 +569,28 @@ class _Leader:
         return self.proc.returncode is not None
 
     def stop_group(self) -> None:
-        """SIGTERM the group, wait up to ``KILL_GRACE`` for the leader, then SIGKILL the group."""
+        """SIGTERM the group, wait up to ``KILL_GRACE`` for the leader, then SIGKILL the group.
+
+        The SIGKILL is sent however the wait ends (an exception from a signal handler included),
+        as long as the leader is unreaped.
+        """
         pgid = self.proc.pid
         if not self.reaped:
             _signal_group(pgid, signal.SIGTERM)
-        end = time.monotonic() + KILL_GRACE
-        while not self.check() and time.monotonic() < end:
-            self._sleep(min(0.02, max(0.0, end - time.monotonic())))
-        if not self.reaped:
-            _signal_group(pgid, signal.SIGKILL)
+        try:
+            end = time.monotonic() + KILL_GRACE
+            while not self.check() and time.monotonic() < end:
+                self._sleep(min(0.02, max(0.0, end - time.monotonic())))
+        finally:
+            if not self.reaped:
+                _signal_group(pgid, signal.SIGKILL)
 
     def _sleep(self, seconds: float) -> None:
         if self.pidfd is not None:
             select.select([self.pidfd], [], [], seconds)
+        elif self.kqueue is not None:
+            if self.kqueue.control(None, 1, seconds):
+                self.exited = True
         else:
             time.sleep(seconds)
 
@@ -493,17 +607,35 @@ class _Leader:
             with contextlib.suppress(OSError):
                 os.close(self.pidfd)
             self.pidfd = None
+        if self.kqueue is not None:
+            with contextlib.suppress(OSError):
+                self.kqueue.close()
+            self.kqueue = None
 
 
-def _block_signals() -> list[int] | set[int] | None:
+def _block_signals() -> Any:
+    """Hold SIGINT, SIGTERM and SIGHUP (main thread only); returns the mask to restore."""
     if threading.current_thread() is not threading.main_thread():
         return None
-    return signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+    return signal.pthread_sigmask(signal.SIG_BLOCK, _HELD_SIGNALS)
 
 
-def _restore_signals(old: Any) -> None:
-    if old is not None:
+def _restore_signals(old: Any, in_flight: BaseException | None = None) -> None:
+    """Restore the mask; a signal held meanwhile is delivered now. If an exception is already on
+    its way out, whatever that delivery raises is noted on it instead of replacing it."""
+    if old is None:
+        return
+    try:
         signal.pthread_sigmask(signal.SIG_SETMASK, old)
+    except BaseException as late:
+        if in_flight is None:
+            raise
+        _note(in_flight, late)
+
+
+def _note(in_flight: BaseException, late: BaseException) -> None:
+    with contextlib.suppress(Exception):
+        in_flight.add_note(f"forgectl: during cleanup also: {type(late).__name__}: {late}")
 
 
 def _popen(
@@ -530,6 +662,38 @@ def _popen(
     )
 
 
+def _close_streams(proc: subprocess.Popen[bytes], selector: selectors.BaseSelector) -> None:
+    with contextlib.suppress(OSError, ValueError):
+        selector.close()
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        if stream is not None:
+            with contextlib.suppress(OSError, ValueError):
+                stream.close()
+
+
+def _cleanup_after(
+    exc: BaseException,
+    proc: subprocess.Popen[bytes],
+    leader: _Leader | None,
+    selector: selectors.BaseSelector,
+) -> None:
+    """End the group, close the pipes and reap the leader after ``exc``; never raises: anything
+    that goes wrong here is noted on ``exc``."""
+    if leader is None:
+        leader = _Leader.bare(proc)
+    try:
+        leader.stop_group()
+    except BaseException as late:
+        _note(exc, late)
+    _close_streams(proc, selector)
+    try:
+        leader.reap()
+    except BaseException as late:
+        _note(exc, late)
+    finally:
+        leader.close()
+
+
 def run_process(
     argv: Sequence[str],
     *,
@@ -545,37 +709,41 @@ def run_process(
 
     At ``timeout`` seconds, or when stdout passes ``max_stdout``, the whole group gets SIGTERM and,
     after ``KILL_GRACE``, SIGKILL. Any exception raised while the child runs (a signal handler's
-    ``SystemExit``, ``KeyboardInterrupt``) ends the group the same way and propagates. Only the PID
-    started here, and the group it leads, are ever signaled; the leader is reaped last.
+    ``SystemExit``, ``KeyboardInterrupt``) ends the group the same way, with SIGINT, SIGTERM and
+    SIGHUP held until the leader is reaped, and propagates unchanged: a second signal or a failed
+    reap is noted on it, never raised instead. Only the PID started here, and the group it leads,
+    are ever signaled; the leader is reaped last.
     """
     if not timeout > 0 or math.isinf(timeout):
         raise ValueError("timeout must be positive and finite")
+    selector = selectors.DefaultSelector()  # before the spawn: nothing can fail between the two
     old_mask = _block_signals()
     try:
         proc = _popen(argv, env, cwd, stdin is not None, old_mask)
-    except BaseException:
-        _restore_signals(old_mask)
+    except BaseException as exc:
+        with contextlib.suppress(OSError, ValueError):
+            selector.close()
+        _restore_signals(old_mask, exc)
         raise
-    leader = _Leader(proc)
-    selector = selectors.DefaultSelector()
+    leader: _Leader | None = None
+    masked = True
     try:
+        leader = _Leader(proc)
+        masked = False
         _restore_signals(old_mask)  # a signal held during the spawn is delivered here, covered
         if on_start is not None:
             on_start(proc.pid, proc.pid)
-        return _collect(proc, leader, selector, stdin, timeout, max_stdout, max_stderr)
-    except BaseException:
-        leader.stop_group()
-        raise
-    finally:
-        selector.close()
-        for stream in (proc.stdin, proc.stdout, proc.stderr):
-            if stream is not None:
-                with contextlib.suppress(OSError, ValueError):
-                    stream.close()
+        result = _collect(proc, leader, selector, stdin, timeout, max_stdout, max_stderr)
+    except BaseException as exc:
+        held = old_mask if masked else _block_signals()
         try:
-            leader.reap()
+            _cleanup_after(exc, proc, leader, selector)
         finally:
-            leader.close()
+            _restore_signals(held, exc)
+        raise
+    _close_streams(proc, selector)
+    leader.close()
+    return result
 
 
 def _collect(
@@ -602,8 +770,8 @@ def _collect(
             selector.register(proc.stdin, selectors.EVENT_WRITE, "in")
         else:
             proc.stdin.close()
-    if leader.pidfd is not None:
-        selector.register(leader.pidfd, selectors.EVENT_READ, "exit")
+    if leader.wait_fd is not None:
+        selector.register(leader.wait_fd, selectors.EVENT_READ, "exit")
     exited_at: float | None = None
     timed_out = False
     while pipes or exited_at is None:
@@ -617,7 +785,7 @@ def _collect(
             if left <= 0:
                 break
             wait = min(wait, left)
-        elif leader.pidfd is None:
+        elif leader.wait_fd is None:
             wait = min(wait, 0.05)
         for key, _events in selector.select(wait):
             tag = key.data
@@ -828,8 +996,29 @@ def _retry_after(headers: Mapping[str, str]) -> float | None:
     return max(0.0, when.timestamp() - time.time())
 
 
-def _host_message(body: bytes) -> str:
-    """The host's ``message`` string, sanitized and cut; empty if there is none."""
+def _redact(text: str, secret: str | None) -> str:
+    """``text`` with the token and its percent-encoded forms replaced by ``[redacted]``."""
+    if not secret or not text:
+        return text
+    forms = {
+        secret,
+        urllib.parse.quote(secret, safe=""),
+        urllib.parse.quote(secret),
+        urllib.parse.quote_plus(secret),
+    }
+    for form in sorted(forms, key=len, reverse=True):
+        text = text.replace(form, "[redacted]")
+    return text
+
+
+def shown_text(text: str, secret: str | None, limit: int = MAX_MESSAGE) -> str:
+    """Host- or child-derived text for a message: redacted first, then sanitized (one line,
+    control characters marked), then cut, so a cut can never leave part of a token behind."""
+    return sanitize_line(_redact(text, secret))[:limit]
+
+
+def _host_message(body: bytes, secret: str | None) -> str:
+    """The host's ``message`` string, redacted, sanitized and cut; empty if there is none."""
     try:
         doc = parse_json(body)
     except ValueError:
@@ -837,18 +1026,21 @@ def _host_message(body: bytes) -> str:
     text = doc.get("message") if isinstance(doc, dict) else None
     if not isinstance(text, str):
         return ""
-    return sanitize_line(text)[:MAX_MESSAGE]
+    return shown_text(text, secret)
 
 
-def verify_identity(observed: object, *, host: str, project: str | None = None) -> None:
+def verify_identity(
+    observed: object, *, host: str, project: str | None = None, secret: str | None = None
+) -> None:
     """The answer's own URL must be on the expected host (and project, if one is given).
 
-    Raises ``wrong_host_response``. This detects an accidental redirect, not a hostile host.
+    Raises ``wrong_host_response``; ``details.observed`` is the URL redacted of ``secret`` (the
+    call's token), sanitized and cut. This detects an accidental redirect, not a hostile host.
     """
     ok = False
     shown = ""
     if isinstance(observed, str):
-        shown = sanitize_line(observed)[:MAX_MESSAGE]
+        shown = shown_text(observed, secret)
         try:
             parts = urllib.parse.urlsplit(observed)
         except ValueError:
@@ -934,8 +1126,11 @@ class Gateway:
         """One ``gh api`` or ``glab api`` call.
 
         ``write`` marks a call that changes the host (never retried here; a failure after the
-        request may have been sent is ``outcome_unknown``). ``expect_status`` (writes) is the
-        documented success status set: another 2xx is ``outcome_unknown``. ``shape`` is the
+        request may have been sent is ``outcome_unknown``); every method but GET is one, except
+        the GraphQL POST of a query. ``expect_status`` (required for a write) is the documented
+        success status set: another 2xx is ``outcome_unknown``. gh and glab follow a 301, 302 or
+        303 by sending a GET without the body and show only its answer, so a redirected write
+        arrives here as that GET's answer. ``shape`` is the
         documented body: a list where one object is documented on a write is ``host_rejected``.
         ``passthrough`` lists non-2xx statuses the caller maps itself (409, 405...): they return
         as a ``Response`` instead of raising.
@@ -945,6 +1140,10 @@ class Gateway:
             raise ValueError(f"unusable method {method!r}")
         if write and method == "GET":
             raise ValueError("a write is not a GET")
+        if write and expect_status is None:
+            raise ValueError("a write names its documented success status (expect_status)")
+        if not write and method != "GET" and not _graphql:
+            raise ValueError(f"a {method} changes the host: pass write=True")
         if body is not None and method == "GET":
             raise ValueError("a GET has no body")
         endpoint = build_endpoint(segments, query)
@@ -955,6 +1154,9 @@ class Gateway:
         remaining = self.budget.remaining()
         if remaining <= 0:
             raise _error("network_error", "the time budget ran out before the call; nothing sent")
+        # TODO(#20): every write proof must reject a redirected GET's answer (a 301/302/303 the
+        # CLIs followed as a body-less GET): PUT/PATCH merge through step 9's re-read, PUT
+        # discussions must match the requested ``resolved``, DELETE draft notes by read-back.
         with private_dirs(self.environ, config=target.token is not None) as dirs:
             env = build_environment(self.environ, dirs=dirs, backend=target.backend, target=target)
             try:
@@ -1007,6 +1209,8 @@ class Gateway:
         """
         if allow_errors and write:
             raise ValueError("allow_errors is for reads")
+        if write and not mutation:
+            raise ValueError("a GraphQL write names its mutation field (its proof)")
         if not isinstance(query, str) or not query:
             raise ValueError("a GraphQL query is a non-empty constant string")
         document = {"query": query, "variables": dict(variables or {})}
@@ -1021,20 +1225,27 @@ class Gateway:
             _graphql=True,
         )
         body = response.data
+        secret = target.token
         errors = body.get("errors")
-        failed = errors is not None and errors != []
+        failed = errors is not None and errors != []  # present, not null, not an empty list
         data = body.get("data")
         result = data.get(mutation) if mutation is not None and isinstance(data, dict) else None
         if failed:
-            if allow_errors:
-                if not isinstance(data, dict):
-                    raise _error("upstream_error", "the host answered errors and no data")
-                return GraphQLResult(data=data, errors=tuple(_as_list(errors)))
             if write and result is not None:  # a result and errors: it may have landed
                 raise _error(
                     "outcome_unknown", "the mutation answered a result together with errors"
                 )
-            raise _graphql_error(errors)
+            if not isinstance(errors, list):  # not GraphQL's shape: never a partial answer
+                raise _error(
+                    "host_rejected",
+                    "GraphQL: the host answered errors that are not a list",
+                    details={"status": response.status},
+                )
+            if allow_errors:
+                if not isinstance(data, dict):
+                    raise _error("upstream_error", "the host answered errors and no data")
+                return GraphQLResult(data=data, errors=tuple(errors))
+            raise _graphql_error(errors, response.headers, response.status, secret)
         if not isinstance(data, dict):
             raise self._bad_answer(write, "the host answered no data")
         if mutation is not None:
@@ -1044,7 +1255,7 @@ class Gateway:
             if payload_errors not in (None, []):
                 raise _error(
                     "host_rejected",
-                    "the host refused the mutation: " + _graphql_text(payload_errors),
+                    "the host refused the mutation: " + _graphql_text(payload_errors, secret),
                     details={"status": response.status},
                 )
         return GraphQLResult(data=data, errors=())
@@ -1109,7 +1320,6 @@ class Gateway:
     ) -> Response:
         secret = target.token
         where = f"{target.host}/{endpoint.partition('?')[0]}"
-        unsure = "outcome_unknown" if write else None
 
         def failure(read_code: str, message: str, **kwargs: Any) -> ForgectlError:
             """A transport or protocol failure: a write may have landed."""
@@ -1125,9 +1335,18 @@ class Gateway:
         if parsed is None:
             if target.backend == "github" and result.returncode == 4 and not result.stdout:
                 raise _error("auth_required", f"{target.host}: no credential for gh (it exited 4)")
-            note = _redact(
-                sanitize_line(result.stderr.decode("utf-8", errors="replace").strip())[:200],
-                secret,
+            if (
+                target.backend == "gitlab"
+                and target.token is None
+                and result.returncode != 0
+                and b"Unauthenticated." in result.stderr
+            ):  # glab 1.89 with no credential: it sent nothing
+                raise _error(
+                    "auth_required",
+                    f"{target.host}: no credential for glab (it answered Unauthenticated.)",
+                )
+            note = shown_text(
+                result.stderr.decode("utf-8", errors="replace").strip(), secret, limit=200
             )
             raise failure(
                 "network_error",
@@ -1135,6 +1354,8 @@ class Gateway:
                 + (f": {note}" if note else ""),
             )
         status, headers, raw = parsed
+        if status < 200:  # an informational status is never the answer
+            raise failure("upstream_error", f"{where}: only an informational status {status}")
         if status in passthrough:
             return Response(status, headers, _decode(raw, parse, tolerant=True), result.returncode)
         if 200 <= status < 300:
@@ -1143,7 +1364,7 @@ class Gateway:
                 raise failure("upstream_error", f"{where}: {status} but exit {result.returncode}")
             if write and expect_status is not None and status not in expect_status:
                 raise _error(
-                    unsure or "outcome_unknown",
+                    "outcome_unknown",
                     f"{where}: unexpected status {status}; the write may have landed",
                 )
             try:
@@ -1185,7 +1406,7 @@ class Gateway:
         *,
         write: bool,
     ) -> ForgectlError:
-        host_text = _redact(_host_message(raw), target.token)
+        host_text = _host_message(raw, target.token)
         suffix = f": {host_text}" if host_text else ""
         retry = _retry_after(headers)
         rate = status == 429 or (
@@ -1220,7 +1441,9 @@ class Gateway:
         argv: Sequence[str],
         *,
         timeout: float,
+        mode: ExternalMode,
         backend: Backend | None = None,
+        token_env_names: Collection[str] = (),
         extra_env: Mapping[str, str] | None = None,
         stdin: bytes | None = None,
         max_stdout: int = MAX_STDOUT,
@@ -1228,23 +1451,46 @@ class Gateway:
     ) -> ProcessResult:
         """The second entry point: hooks, ``token_command`` and the browser.
 
-        Same rules as a forge call (no shell, its own process group, an exact-PID deadline kill, a
-        private empty cwd removed afterwards, a from-scratch stored-login environment with the
-        fixed settings), without the forge parsing, the budget or any token variable.
-        ``extra_env`` adds variables (``FORGECTL_HOOK`` and the like) but never a token variable.
-        Raises ``ExecutableMissing`` when ``argv[0]`` is not on an absolute ``PATH`` entry.
+        Same process rules as a forge call (no shell, its own process group, the deadline kill of
+        that group, a private empty cwd removed afterwards), without the forge parsing or the
+        budget. The environment depends on ``mode``:
+
+        - ``hook`` and ``browser``: forgectl's environment minus every token variable: the
+          ambient list, each configured ``token_env`` and each name in ``token_env_names``
+          (interface: Hooks; TUI). The browser keeps DISPLAY, BROWSER and the like.
+        - ``token_command``: the stored-login environment built from scratch for ``backend``
+          (required), bus rule included (interface: Credentials).
+
+        ``extra_env`` adds variables (``FORGECTL_HOOK`` and the like) but never a token variable,
+        ``GH_HOST``, ``GH_REPO``, ``GH_FORCE_TTY``, ``CLICOLOR_FORCE`` or a NUL; any of those is a
+        programming error (``ValueError``). Raises ``ExecutableMissing`` when ``argv[0]`` is not on
+        an absolute ``PATH`` entry.
         """
         if not argv or not all(isinstance(a, str) and "\0" not in a for a in argv):
             raise ValueError("argv must be non-empty strings without NUL")
-        for name in extra_env or ():
-            if name in TOKEN_VARIABLES or name in ("GH_HOST", "GH_REPO", "GH_FORCE_TTY"):
+        if mode not in ("hook", "browser", "token_command"):
+            raise ValueError(f"unknown mode {mode!r}")
+        if mode == "token_command" and backend is None:
+            raise ValueError("a token_command runs for one backend: pass backend")
+        withheld = self._token_names(token_env_names)
+        for name, value in (extra_env or {}).items():
+            if "\0" in name or "\0" in value:
+                raise ValueError("extra_env holds a NUL")
+            if name in withheld or name in _NEVER_EXTRA:
                 raise ValueError(f"extra_env may not set {name}")
         exe = resolve_executable(argv[0], self.environ.get("PATH"), key="command")
         if exe is None:
             raise ExecutableMissing(argv[0])
         with private_dirs(self.environ, config=False) as dirs:
-            env = build_environment(self.environ, dirs=dirs, backend=backend)
-            env.update({k: v for k, v in (extra_env or {}).items() if "\0" not in k + v})
+            if mode == "token_command":
+                env = build_environment(self.environ, dirs=dirs, backend=backend)
+            else:
+                env = {
+                    k: v
+                    for k, v in self.environ.items()
+                    if k not in withheld and "\0" not in k and "\0" not in v
+                }
+            env.update(extra_env or {})
             try:
                 return self._runner(
                     [exe, *argv[1:]],
@@ -1258,6 +1504,12 @@ class Gateway:
                 )
             except (FileNotFoundError, PermissionError, NotADirectoryError):
                 raise ExecutableMissing(argv[0]) from None
+
+    def _token_names(self, extra: Collection[str]) -> frozenset[str]:
+        """Every variable that may hold a token: the ambient list, each configured
+        ``token_env`` and the names the caller passes."""
+        configured = {h.token_env for h in self.config.config.hosts.values() if h.token_env}
+        return frozenset({*TOKEN_VARIABLES, *configured, *extra})
 
 
 def _header_args(headers: Mapping[str, str] | None, *, has_body: bool) -> list[str]:
@@ -1286,39 +1538,37 @@ def _encode_body(body: Any) -> bytes:
 
 
 def _decode(raw: bytes, parse: Literal["json", "text"], *, tolerant: bool) -> Any:
-    if parse == "text":
-        return raw.decode("utf-8")
     try:
-        return parse_json(raw)
-    except ValueError:
+        return raw.decode("utf-8") if parse == "text" else parse_json(raw)
+    except ValueError:  # UnicodeDecodeError included
         if tolerant:  # a pass-through status: the caller reads what it can
             return None
         raise
-
-
-def _redact(text: str, secret: str | None) -> str:
-    return text.replace(secret, "[redacted]") if secret and text else text
 
 
 def _as_list(errors: Any) -> list[Any]:
     return errors if isinstance(errors, list) else [errors]
 
 
-def _graphql_text(errors: Any) -> str:
+def _graphql_text(errors: Any, secret: str | None) -> str:
     parts: list[str] = []
     for item in _as_list(errors)[:3]:
         message = item.get("message") if isinstance(item, dict) else item
-        parts.append(sanitize_line(str(message))[:100])
+        parts.append(shown_text(str(message), secret, limit=100))
     return "; ".join(parts)
 
 
-def _graphql_error(errors: Any) -> ForgectlError:
+def _graphql_error(
+    errors: Any, headers: Mapping[str, str], status: int, secret: str | None
+) -> ForgectlError:
     types = {item.get("type") for item in _as_list(errors) if isinstance(item, dict)}
-    text = _graphql_text(errors)
+    text = _graphql_text(errors, secret)
     if "RATE_LIMITED" in types:
-        return _error("rate_limited", f"GraphQL: rate limited: {text}")
+        return _error(
+            "rate_limited", f"GraphQL: rate limited: {text}", retry_after=_retry_after(headers)
+        )
     if "NOT_FOUND" in types:
         return _error("not_found", f"GraphQL: not found: {text}")
     if "FORBIDDEN" in types:
         return _error("permission_denied", f"GraphQL: forbidden: {text}")
-    return _error("host_rejected", f"GraphQL: {text}", details={"status": 200})
+    return _error("host_rejected", f"GraphQL: {text}", details={"status": status})

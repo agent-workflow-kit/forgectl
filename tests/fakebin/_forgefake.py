@@ -11,14 +11,20 @@ newest verified behavior per program; a divergence is recorded, not silently res
   LF, Go-canonical header names sorted, CRLF header lines), ``--silent``, ``--input -``, fields
   in the query string with ``-X GET`` or ``--input``, HTTP errors (exit 1, body on stdout,
   ``<prog>: <message> (HTTP N)`` or ``<prog>: HTTP N`` on stderr), 304 (exit 1), GraphQL
-  ``errors`` with HTTP 200 (exit 1, full body on stdout), redirects (followed; the token rules
-  of each program), no credential (``gh``: exit 4).
+  ``errors`` with HTTP 200 (exit 1, full body on stdout), redirects (Go's net/http rules, as
+  both programs use it: 301, 302 and 303 turn any method into a GET without a body and only the
+  last answer is shown; 307 and 308 keep method and body, but a body from stdin cannot be resent,
+  so the 3xx itself is shown and the program exits 1; the token rules of each program), no
+  credential (``gh``: exit 4; ``glab``: anonymous, or, in the opt-in glab 1.89.0 mode, a boxed
+  ``Unauthenticated.``, exit 1, nothing sent).
 - ``gh auth token`` (returns an ambient token for any host, the gh 2.72.0 row; gh 2.87.3 is
   host-scoped) and ``glab auth token`` (no ``--hostname`` flag), ``--version``.
 - ``gh`` token variables: a variable that does not apply to the host gives an anonymous request
   (gh 2.87.3); exit 4 only when no token variable is set at all and there is no stored login.
-- ``gh api`` reads only file logins; ``gh auth token`` and ``glab`` also reach a keyring login,
-  only when a session bus variable (``DBUS_SESSION_BUS_ADDRESS`` or ``XDG_RUNTIME_DIR``) is set.
+- ``gh api`` reads only file logins; ``gh auth token`` and ``glab`` also reach a keyring login
+  when the session bus is reachable: ``DBUS_SESSION_BUS_ADDRESS`` or ``XDG_RUNTIME_DIR`` set, or
+  neither set and the default per-user socket present (gh 2.87.3 dials ``/run/user/<uid>/bus``;
+  the fake uses the per-test path in ``script.json``). ``NO_BUS_ADDRESS`` is never reachable.
 - ``glab`` routing: ``GITLAB_HOST`` (alias ``GL_HOST``) keeps its path prefix, ``--hostname``
   drops it and wins, and an environment token is sent only to the host ``GITLAB_HOST`` names
   (default gitlab.com); GraphQL goes to ``<prefix>/api/graphql``.
@@ -55,6 +61,7 @@ NOT_MODELLED = 70
 HANG_CAP = 120.0  # seconds; a scripted hang never outlives a forgotten test by more
 MAX_REDIRECTS = 10
 STATE_VAR = "FORGEFAKE_STATE"
+NO_BUS_ADDRESS = "unix:path=/nonexistent/forgectl-no-bus"  # the gateway's unusable bus
 REPO = Path(__file__).resolve().parents[2]
 
 REASONS = {
@@ -368,7 +375,13 @@ class Fake:
         return leaves.get(key) or None
 
     def bus_reachable(self) -> bool:
-        return bool(self.env.get("DBUS_SESSION_BUS_ADDRESS") or self.env.get("XDG_RUNTIME_DIR"))
+        address = self.env.get("DBUS_SESSION_BUS_ADDRESS")
+        if address == NO_BUS_ADDRESS:
+            return False
+        if address or self.env.get("XDG_RUNTIME_DIR"):
+            return True
+        default = self.script.get("default_bus_socket") or f"/run/user/{os.getuid()}/bus"
+        return os.path.exists(default)
 
     def keyring_login(self, host: str) -> str | None:
         """A login kept in the OS keyring: reachable only with a session bus variable."""
@@ -635,6 +648,8 @@ class Fake:
             self.say(f"warning: {warnings[-1]}\n")
         if token is None:
             source, token = self.stored_token(host)
+        if token is None and self.script.get("glab_1_89_no_credential"):
+            raise self.fail(1, glab_box("Unauthenticated.", hint=False))
         path = endpoint.lstrip("/")
         full = bool(re.match(r"https?://", endpoint, re.I))
         if full:
@@ -713,10 +728,8 @@ class Fake:
         location = urllib.parse.urljoin(request["url"], rule["redirect"]["location"])
         parts = urllib.parse.urlsplit(location)
         method, body = request["method"], request.get("body")
-        if status in (301, 302, 303):
-            if status == 303 and method not in ("GET", "HEAD"):
-                method = "GET"
-            if status in (301, 302) and method == "POST":
+        if status in (301, 302, 303):  # Go: any method but GET and HEAD becomes GET, no body
+            if method not in ("GET", "HEAD"):
                 method = "GET"
             body = None
         initial = urllib.parse.urlsplit(self.summary["request"]["url"]).netloc
@@ -740,7 +753,12 @@ class Fake:
         rule = self.choose(request, stdin_text)
         current = request
         hops: list[dict[str, Any]] = []
+        shown_location: str | None = None
         while rule.get("redirect"):
+            if rule.get("status", 302) in (307, 308) and current.get("body") is not None:
+                # Go cannot resend a body read from stdin: the 3xx itself is the answer.
+                shown_location = rule["redirect"]["location"]
+                break
             if len(hops) >= MAX_REDIRECTS:
                 raise self.fail(1, f"{self.backend}: stopped after {MAX_REDIRECTS} redirects")
             current = self.follow(current, rule)
@@ -768,6 +786,8 @@ class Fake:
         if status in (204, 304):
             body = b""
         scripted = {"Content-Type": "application/json; charset=utf-8", **rule.get("headers", {})}
+        if shown_location is not None:
+            scripted["Location"] = shown_location
         headers = {canonical_header(k): v for k, v in scripted.items()}
         if self.on(values, "include"):
             head = f"HTTP/2.0 {status} {REASONS.get(status, 'Status')}\n"
@@ -780,7 +800,7 @@ class Fake:
             self.say(rule["stderr"])
         if "exit" in rule:
             raise Exit(rule["exit"])
-        if status >= 400 or status == 304:
+        if status >= 300:  # 304, a 3xx not followed, and every error
             message = self.error_message(body)
             text = f"{message} (HTTP {status})" if message else f"HTTP {status}"
             self.say(f"{self.backend}: {text}\n")

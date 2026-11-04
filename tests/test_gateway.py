@@ -8,11 +8,15 @@ against ``safety.reference_env`` alone.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import select
 import signal
 import sys
+import threading
 import time
+import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -159,14 +163,19 @@ def test_path_int(value: object, ok: bool) -> None:
 @pytest.mark.parametrize(
     "host",
     ["", "a/b", "a@b", "a b", "-a.test", "a.test\n", "a..", "x:99999999", "a.test:", "é.test",
-     "a" * 300, "a.test/x", "[::1]"],
+     "a" * 300, "a.test/x", "[::1]", "a..b", "a.-b", "a-.b", "x:0", "x:65536", "x:00443",
+     "\u212a.test", "a.test:8443\n"],
 )  # fmt: skip
 def test_target_refuses_hostile_hosts(host: str) -> None:
     with pytest.raises(ValueError):
         Target("gitlab", host)
 
 
-@pytest.mark.parametrize("prefix", ["gitlab", "/gitlab/", "/a/../b", "//a", "/a b", "/a?x", "/"])
+@pytest.mark.parametrize(
+    "prefix",
+    ["gitlab", "/gitlab/", "/a/../b", "//a", "/a b", "/a?x", "/", "/.", "/./x", "/a/.", "/..",
+     "/gitlab\n"],
+)  # fmt: skip
 def test_target_refuses_bad_api_prefixes(prefix: str) -> None:
     with pytest.raises(ValueError):
         Target("gitlab", "git.example.test", api_prefix=prefix)
@@ -194,6 +203,33 @@ def test_a_token_that_is_not_one_printable_ascii_word_is_refused_without_echo(to
 )  # fmt: skip
 def test_token_variable_by_backend_and_host(target: Target, variable: str) -> None:
     assert target.token_variable == variable
+
+
+def test_a_target_host_is_lowercased_before_any_routing_or_token_decision(
+    fake_forges: FakeForges,
+) -> None:
+    assert Target("github", "GitHub.com", token=TOKEN).token_variable == "GH_TOKEN"
+    assert Target("github", "Acme.GHE.com", token=TOKEN).token_variable == "GH_TOKEN"
+    assert Target("github", "GHE.Example.Test", token=TOKEN).host == "ghe.example.test"
+    with pytest.raises(ValueError):
+        Target("gitlab", "GitLab.com", api_prefix="/x")  # gitlab.com, whatever its case
+    script_ok(fake_forges, "glab")
+    script_ok(fake_forges, "gh")
+    gateway = make_gateway(fake_forges)
+    gateway.api(Target("gitlab", "GitLab.COM", token=TOKEN), "GET", ["user"])
+    gateway.api(Target("github", "GitHub.com", token=TOKEN), "GET", ["user"])
+    glab, gh = fake_forges.calls()
+    assert_call_safe(glab, host="gitlab.com")
+    assert_call_safe(gh, host="github.com")
+    assert glab.token_sent == TOKEN and gh.token_sent == TOKEN
+
+
+def test_a_github_host_with_a_port_is_refused_naming_the_host() -> None:
+    with pytest.raises(ForgectlError) as raised:
+        Target("github", "ghe.example.test:8443", token=TOKEN)
+    assert raised.value.code == "config_invalid"
+    assert raised.value.details == {"key": "hosts.ghe.example.test:8443"}
+    assert Target("gitlab", "git.example.test:8443").host == "git.example.test:8443"
 
 
 # -- Environment, cwd and argv through the fakes (both modes) ----------------------------------
@@ -257,7 +293,9 @@ def test_stored_login_mode_passes_the_callers_config_dirs_and_no_bus_for_them(
     assert_call_safe(call, host=target.host, mode="stored", caller_config_dir=True)
     assert call.env[var] == str(config)
     assert call.token_sent == "stored-token-9"
-    assert call.config_entries is None or call.env.get(var) == str(config)
+    # the caller's directory is used as it is: nothing private is made or put in it
+    assert call.config_dir == str(config)
+    assert call.config_entries == ["hosts.yml" if target.backend == "github" else "config.yml"]
     spawned.assert_gone()
 
 
@@ -440,6 +478,25 @@ def test_resolve_executable_rules(tmp_path: Path) -> None:
         assert raised.value.code == "config_invalid"
 
 
+def test_resolve_executable_never_finds_a_program_in_the_cwd_through_a_relative_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    here = tmp_path / "here"
+    here.mkdir()
+    planted = here / "tool"
+    planted.write_text("#!/bin/sh\n")
+    planted.chmod(0o755)
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    real = real_dir / "tool"
+    real.write_text("#!/bin/sh\n")
+    real.chmod(0o755)
+    monkeypatch.chdir(here)
+    assert gw.resolve_executable("tool", ".") is None
+    assert gw.resolve_executable("tool", ":") is None
+    assert gw.resolve_executable("tool", f".{os.pathsep}{real_dir}") == str(real)
+
+
 def test_missing_gh_is_tool_missing_only_for_github_and_names_the_install_command(
     fake_forges: FakeForges,
 ) -> None:
@@ -555,7 +612,7 @@ def test_untrusted_values_are_encoded_and_never_in_option_position(
         )
         *flags, sep, endpoint = call.argv
         assert sep == "--" and endpoint.startswith("repos/")
-        assert all(a == a for a in flags)
+        assert not any(value in flag for flag in flags)
         assert value not in endpoint or value.isalnum()
         assert not Path("pwned").exists() and not (Path(call.cwd).parent / "pwned").exists()
         assert call.request is not None and not call.request["file_fields"]
@@ -585,7 +642,7 @@ def test_body_with_a_lone_surrogate_or_nan_is_refused_before_a_process_starts(
     gateway = make_gateway(fake_forges)
     for body in ({"body": "a\ud800"}, {"n": float("nan")}):
         with pytest.raises(ValueError):
-            gateway.api(GH, "POST", ["x"], body=body, write=True)
+            gateway.api(GH, "POST", ["x"], body=body, write=True, expect_status=frozenset({201}))
     assert fake_forges.calls() == []
 
 
@@ -595,6 +652,35 @@ def test_body_with_a_lone_surrogate_or_nan_is_refused_before_a_process_starts(
      {"X-A\nB": "x"}, {"X-A": "a\nb"}, {"X A": "x"}, {"": "x"}, {"X-A": "é"}],
 )  # fmt: skip
 def test_headers_that_could_carry_a_credential_or_break_framing_are_refused(
+    fake_forges: FakeForges, headers: dict[str, str]
+) -> None:
+    gateway = make_gateway(fake_forges)
+    with pytest.raises(ValueError):
+        gateway.api(GH, "GET", ["x"], headers=headers)
+    assert fake_forges.calls() == []
+
+
+def mixed_case(name: str) -> str:
+    return "".join(c.upper() if i % 2 == 0 else c.lower() for i, c in enumerate(name))
+
+
+@pytest.mark.parametrize("name", sorted(gw._FORBIDDEN_HEADERS))
+def test_every_denied_header_is_refused_in_any_case(fake_forges: FakeForges, name: str) -> None:
+    gateway = make_gateway(fake_forges)
+    for spelled in (name, name.upper(), mixed_case(name)):
+        with pytest.raises(ValueError):
+            gateway.api(GH, "GET", ["x"], headers={spelled: "x"})
+    assert fake_forges.calls() == []
+
+
+def test_the_denied_header_list_holds_every_credential_and_framing_header() -> None:
+    assert {"authorization", "proxy-authorization", "private-token", "job-token",
+            "deploy-token", "cookie", "host", "content-length", "transfer-encoding",
+            "connection"} <= gw._FORBIDDEN_HEADERS  # fmt: skip
+
+
+@pytest.mark.parametrize("headers", [{"X-A": "v\n"}, {"X-A\n": "v"}])
+def test_a_header_with_a_trailing_newline_is_refused(
     fake_forges: FakeForges, headers: dict[str, str]
 ) -> None:
     gateway = make_gateway(fake_forges)
@@ -655,6 +741,8 @@ def stub_gateway(tmp_path: Path, runner: Callable[..., ProcessResult], **kwargs:
 
 
 def call_of(gateway: Gateway, *, write: bool = False, **kwargs: Any) -> Any:
+    if write:
+        kwargs.setdefault("expect_status", frozenset({200}))
     return gateway.api(GH, "POST" if write else "GET", ["x"], write=write, **kwargs)
 
 
@@ -669,6 +757,7 @@ READ_TABLE = [
     (500, "upstream_error"), (502, "upstream_error"), (503, "upstream_error"),
     (400, "host_rejected"), (405, "host_rejected"), (409, "host_rejected"), (410, "host_rejected"),
     (422, "host_rejected"), (301, "host_rejected"), (304, "host_rejected"),
+    (307, "host_rejected"), (308, "host_rejected"),
 ]  # fmt: skip
 
 
@@ -684,8 +773,9 @@ def test_read_status_table(tmp_path: Path, status: int, code: str) -> None:
 WRITE_TABLE = [
     (401, "auth_required"), (403, "permission_denied"), (404, "not_found"), (429, "rate_limited"),
     (500, "outcome_unknown"), (502, "outcome_unknown"), (503, "outcome_unknown"),
-    (400, "host_rejected"), (422, "host_rejected"), (301, "host_rejected"), (302, "host_rejected"),
-    (409, "host_rejected"),
+    (400, "host_rejected"), (422, "host_rejected"), (409, "host_rejected"),
+    # gh and glab show a 3xx only when they do not follow it: a 307 or 308 on a body from stdin
+    (307, "host_rejected"), (308, "host_rejected"),
 ]  # fmt: skip
 
 
@@ -755,6 +845,63 @@ def test_host_message_is_sanitized_cut_and_never_decides_the_code(tmp_path: Path
     assert len(err.message) < 600
 
 
+def test_an_informational_status_is_never_a_success(tmp_path: Path) -> None:
+    for status in (100, 101, 103):
+        runner = stub(head(status) + b"{}", code=0)
+        assert code_of(stub_gateway(tmp_path, runner)).code == "upstream_error", status
+        assert code_of(stub_gateway(tmp_path, runner), write=True).code == "outcome_unknown"
+
+
+def test_a_token_straddling_the_message_cuts_never_leaks_a_prefix(tmp_path: Path) -> None:
+    secret = "tok" + "s" * 60
+    target = Target("github", "github.com", token=secret)
+    for pad in range(150, 205, 7):
+        stderr = ("e" * pad + secret + " tail").encode()
+        with pytest.raises(ForgectlError) as raised:
+            stub_gateway(tmp_path, stub(b"", stderr=stderr, code=1)).api(target, "GET", ["x"])
+        assert "toks" not in raised.value.message and "sss" not in raised.value.message, pad
+    for pad in range(250, 305, 7):
+        body = json.dumps({"message": "m" * pad + secret}).encode()
+        with pytest.raises(ForgectlError) as raised:
+            stub_gateway(tmp_path, stub(head(422) + body, code=1)).api(target, "GET", ["x"])
+        assert "toks" not in raised.value.message and "sss" not in raised.value.message, pad
+
+
+def test_a_percent_encoded_token_in_stderr_is_redacted(tmp_path: Path) -> None:
+    secret = "glpat-a/b+c=d"
+    target = Target("gitlab", "gitlab.com", token=secret)
+    for form in (urllib.parse.quote(secret, safe=""), urllib.parse.quote(secret), secret):
+        stderr = f"GET https://x.example.test/?t={form} failed\nsecond line".encode()
+        with pytest.raises(ForgectlError) as raised:
+            stub_gateway(tmp_path, stub(b"", stderr=stderr, code=1)).api(target, "GET", ["x"])
+        assert form not in raised.value.message and "[redacted]" in raised.value.message
+        assert "second line" in raised.value.message  # all of stderr, newlines escaped
+        assert "\n" not in raised.value.message
+
+
+def test_a_token_in_graphql_errors_never_reaches_a_message(tmp_path: Path) -> None:
+    doc = {"data": None, "errors": [{"type": "X", "message": f"bad {TOKEN} here"}]}
+    with pytest.raises(ForgectlError) as raised:
+        graphql_gateway(tmp_path, doc, code=1).graphql(GH, QUERY)
+    assert TOKEN not in raised.value.message and "[redacted]" in raised.value.message
+    doc = {"data": {"addReview": {"errors": [{"message": f"no {TOKEN}"}]}}}
+    with pytest.raises(ForgectlError) as raised:
+        graphql_gateway(tmp_path, doc).graphql(GH, MUTATION, write=True, mutation="addReview")
+    assert raised.value.code == "host_rejected"
+    assert TOKEN not in raised.value.message and "[redacted]" in raised.value.message
+
+
+def test_a_token_in_an_observed_url_is_redacted() -> None:
+    with pytest.raises(ForgectlError) as raised:
+        gw.verify_identity(
+            f"https://evil.example.test/x?private_token={TOKEN}",
+            host="git.example.test",
+            secret=TOKEN,
+        )
+    observed = (raised.value.details or {})["observed"]
+    assert TOKEN not in observed and "[redacted]" in observed
+
+
 def test_a_token_in_stderr_or_a_host_message_never_reaches_a_message(tmp_path: Path) -> None:
     gateway = stub_gateway(
         tmp_path,
@@ -816,9 +963,10 @@ def test_a_timeout_is_network_error_on_a_read_and_outcome_unknown_on_a_write(
 def test_oversized_and_unfinished_answers_are_errors_never_partial_data(tmp_path: Path) -> None:
     flag_sets: list[dict[str, Any]] = [{"stdout_truncated": True}, {"streams_incomplete": True}]
     for flags in flag_sets:
-        runner = stub(head(200) + b'{"a":', **flags)
-        assert code_of(stub_gateway(tmp_path, runner)).code == "upstream_error"
-        assert code_of(stub_gateway(tmp_path, runner), write=True).code == "outcome_unknown"
+        for body in (b'{"a":', b"{}"):  # a valid answer is refused too: the flag decides
+            runner = stub(head(200) + body, **flags)
+            assert code_of(stub_gateway(tmp_path, runner)).code == "upstream_error", flags
+            assert code_of(stub_gateway(tmp_path, runner), write=True).code == "outcome_unknown"
 
 
 MALFORMED = [
@@ -843,6 +991,12 @@ def test_a_success_status_with_a_failing_exit_is_not_a_success(tmp_path: Path) -
 def test_text_mode_is_strict_utf8(tmp_path: Path) -> None:
     err = code_of(stub_gateway(tmp_path, stub(head(200) + b"\xff")), parse="text")
     assert err.code == "upstream_error"
+
+
+def test_a_passthrough_status_in_text_mode_tolerates_invalid_utf8(tmp_path: Path) -> None:
+    gateway = stub_gateway(tmp_path, stub(head(409) + b"\xff", code=1))
+    response = call_of(gateway, passthrough=frozenset({409}), parse="text")
+    assert (response.status, response.data) == (409, None)
 
 
 @pytest.mark.parametrize("shape", ["object", "list"])
@@ -955,6 +1109,51 @@ def test_a_redirected_gh_post_that_ends_in_a_list_is_host_rejected_and_the_token
     call = only_call(fake_forges)
     assert call.requests[-1]["method"] == "GET"  # gh turned the POST into a GET
     assert call.requests[-1]["token_sent"] is None  # and sent no token to the other host
+
+
+def test_a_patch_redirected_by_a_301_reaches_the_gateway_as_the_gets_answer(
+    fake_forges: FakeForges,
+) -> None:
+    """gh and glab turn a 301/302/303 into a body-less GET and show only its answer: the
+    gateway cannot see the redirect, so a write's proof must reject the GET's answer
+    (TODO(#20) in gateway.py)."""
+    fake_forges.answer("gh", endpoint_re="pulls/1$", method="PATCH", redirect="/x", status=301)
+    fake_forges.answer("gh", endpoint="x", method="GET", body={"number": 1, "title": "old"})
+    gateway = make_gateway(fake_forges)
+    response = gateway.api(
+        GH, "PATCH", ["repos", "o", "r", "pulls", "1"], body={"title": "new"},
+        write=True, shape="object", expect_status=frozenset({200}),
+    )  # fmt: skip
+    assert (response.status, response.data) == (200, {"number": 1, "title": "old"})
+    hop = only_call(fake_forges).requests[-1]
+    assert (hop["method"], hop["body"]) == ("GET", None)
+
+
+def test_a_post_redirected_by_a_301_to_a_200_where_201_is_documented_is_outcome_unknown(
+    fake_forges: FakeForges,
+) -> None:
+    fake_forges.answer("gh", endpoint_re="comments$", method="POST", redirect="/x", status=301)
+    fake_forges.answer("gh", endpoint="x", method="GET", body={"id": 1})
+    with pytest.raises(ForgectlError) as raised:
+        make_gateway(fake_forges).api(
+            GH, "POST", ["repos", "o", "r", "issues", "1", "comments"], body={"body": "hi"},
+            write=True, shape="object", expect_status=frozenset({201}),
+        )  # fmt: skip
+    assert raised.value.code == "outcome_unknown"
+
+
+@pytest.mark.parametrize("status", [307, 308])
+def test_a_write_answered_307_or_308_is_shown_not_followed_and_is_host_rejected(
+    fake_forges: FakeForges, status: int
+) -> None:
+    fake_forges.answer("gh", endpoint_re="comments$", redirect="/x", status=status)
+    with pytest.raises(ForgectlError) as raised:
+        make_gateway(fake_forges).api(
+            GH, "POST", ["repos", "o", "r", "issues", "1", "comments"], body={"body": "hi"},
+            write=True, shape="object", expect_status=frozenset({201}),
+        )  # fmt: skip
+    assert (raised.value.code, raised.value.details) == ("host_rejected", {"status": status})
+    assert len(only_call(fake_forges).requests) == 1
 
 
 def test_a_redirected_glab_read_is_caught_by_the_identity_check(fake_forges: FakeForges) -> None:
@@ -1121,6 +1320,53 @@ def test_graphql_mutation_checks(tmp_path: Path) -> None:
     assert raised.value.code == "upstream_error"  # the same on a read: never partial data
 
 
+def test_a_read_naming_a_mutation_key_with_a_result_and_forbidden_is_permission_denied(
+    tmp_path: Path,
+) -> None:
+    doc = {"data": {"addReview": {"id": "1"}}, "errors": [{"type": "FORBIDDEN", "message": "x"}]}
+    with pytest.raises(ForgectlError) as raised:
+        graphql_gateway(tmp_path, doc, code=1).graphql(GH, MUTATION, mutation="addReview")
+    assert raised.value.code == "permission_denied"
+
+
+@pytest.mark.parametrize("errors", [{}, "", 0, False])
+def test_present_non_list_graphql_errors_on_a_read_are_host_rejected(
+    tmp_path: Path, errors: Any
+) -> None:
+    for allow in (False, True):
+        with pytest.raises(ForgectlError) as raised:
+            graphql_gateway(tmp_path, {"data": {"a": 1}, "errors": errors}, code=1).graphql(
+                GH, QUERY, allow_errors=allow
+            )
+        assert raised.value.code == "host_rejected", (errors, allow)
+
+
+def test_graphql_rate_limited_carries_retry_after_and_host_rejected_the_real_status(
+    tmp_path: Path,
+) -> None:
+    doc = json.dumps({"errors": [{"type": "RATE_LIMITED", "message": "slow"}]}).encode()
+    gateway = stub_gateway(tmp_path, stub(head(200, {"Retry-After": "11"}) + doc, code=1))
+    with pytest.raises(ForgectlError) as raised:
+        gateway.graphql(GH, QUERY)
+    assert (raised.value.code, raised.value.retry_after) == ("rate_limited", 11.0)
+    doc = json.dumps({"data": None, "errors": [{"message": "odd"}]}).encode()
+    gateway = stub_gateway(tmp_path, stub(head(203) + doc, code=1))
+    with pytest.raises(ForgectlError) as raised:
+        gateway.graphql(GH, QUERY)
+    assert (raised.value.code, raised.value.details) == ("host_rejected", {"status": 203})
+
+
+def test_a_write_needs_its_proof_and_a_changing_method_needs_write(tmp_path: Path) -> None:
+    gateway = stub_gateway(tmp_path, stub(head(200) + b'{"data":{}}'))
+    with pytest.raises(ValueError):
+        gateway.graphql(GH, MUTATION, write=True)  # no mutation key: no proof
+    with pytest.raises(ValueError):
+        gateway.api(GH, "POST", ["x"], body={"a": 1}, write=True)  # no expect_status
+    for method in ("POST", "PUT", "PATCH", "DELETE"):
+        with pytest.raises(ValueError):
+            gateway.api(GH, method, ["x"])  # a change of state passed as a read
+
+
 def test_graphql_mutation_must_answer_exactly_200(tmp_path: Path) -> None:
     gateway = graphql_gateway(tmp_path, {"data": {"addReview": {"id": "1"}}}, status=202)
     with pytest.raises(ForgectlError) as raised:
@@ -1128,7 +1374,7 @@ def test_graphql_mutation_must_answer_exactly_200(tmp_path: Path) -> None:
     assert raised.value.code == "outcome_unknown"
 
 
-def test_a_failed_graphql_page_fails_the_read_not_the_first_page_alone(
+def test_each_graphql_call_is_judged_alone_and_a_502_after_a_200_fails_that_call(
     fake_forges: FakeForges,
 ) -> None:
     fake_forges.answer("gh", endpoint="graphql", times=1, body={"data": {"page": 1}})
@@ -1178,37 +1424,17 @@ def test_glab_routing_rows_the_gateway_produces(
     assert (call.token_sent == TOKEN) is token_sent
 
 
-def test_api_prefix_is_kept_through_gitlab_host_and_hostname_would_drop_it(
+def test_api_prefix_is_kept_through_gitlab_host_and_no_hostname_flag(
     fake_forges: FakeForges,
 ) -> None:
-    """The two rows of the routing table that decide it: ``--hostname`` wins over
-    ``GITLAB_HOST`` and loses the prefix, so the gateway never names it for a prefixed host."""
+    """The gateway's half of the routing table: a prefixed host gets ``GITLAB_HOST`` with its
+    prefix and never ``--hostname`` (which would drop it: the fake's rows are tested in
+    ``tests/test_harness_fakes.py``)."""
     script_ok(fake_forges, "glab")
     make_gateway(fake_forges).api(GL_PREFIX, "GET", ["user"])
     ours = only_call(fake_forges)
     assert ours.env["GITLAB_HOST"] == "git.example.test/gitlab" and "--hostname" not in ours.argv
-    # What the fake does when the flag is added anyway (the mistake this guards against):
-    gateway = make_gateway(fake_forges)
-    original = Gateway.__dict__["_argv"]
-    try:
-        Gateway._argv = staticmethod(  # type: ignore[method-assign]
-            lambda exe, t, m, e, h, *, has_body: [
-                exe,
-                "api",
-                "--hostname",
-                t.host,
-                "-i",
-                "-X",
-                m,
-                "--",
-                e,
-            ]
-        )
-        gateway.api(GL_PREFIX, "GET", ["user"])
-    finally:
-        Gateway._argv = original  # type: ignore[method-assign]
-    wrong = fake_forges.calls()[-1]
-    assert wrong.request is not None and urllib_path(wrong.request["url"]) == "/api/v4/user"
+    assert ours.argv[:1] == ["api"] and ours.argv[-2:] == ["--", "user"]
 
 
 def urllib_path(url: str) -> str:
@@ -1261,10 +1487,20 @@ def test_deadline_on_a_write_is_outcome_unknown_and_the_budget_gets_its_reserve(
     fake_forges.answer("gh", endpoint_re=".", hang=30)
     gateway = make_gateway(fake_forges, spawned, timeout=1.0)
     with pytest.raises(ForgectlError) as raised:
-        gateway.api(GH, "POST", ["x"], body={"a": 1}, write=True)
+        gateway.api(GH, "POST", ["x"], body={"a": 1}, write=True, expect_status=WROTE)
     assert raised.value.code == "outcome_unknown"
     spawned.assert_gone()
     assert gateway.budget.remaining() == pytest.approx(gw.WRITE_RESERVE, abs=0.5)
+
+
+WROTE = frozenset({201})
+
+
+def test_a_read_never_grants_the_write_reserve(fake_forges: FakeForges) -> None:
+    script_ok(fake_forges, "gh")
+    gateway = make_gateway(fake_forges, timeout=7.0)
+    gateway.api(GH, "GET", ["x"])
+    assert gateway.budget.total == 7.0
 
 
 def test_an_exhausted_budget_stops_before_any_process_starts(fake_forges: FakeForges) -> None:
@@ -1273,7 +1509,10 @@ def test_an_exhausted_budget_stops_before_any_process_starts(fake_forges: FakeFo
     gateway.budget.spent = 5.0
     for write in (False, True):
         with pytest.raises(ForgectlError) as raised:
-            gateway.api(GH, "POST" if write else "GET", ["x"], write=write)
+            if write:
+                gateway.api(GH, "POST", ["x"], write=True, expect_status=WROTE)
+            else:
+                gateway.api(GH, "GET", ["x"])
         assert raised.value.code == "network_error"
     assert fake_forges.calls() == []
 
@@ -1382,6 +1621,7 @@ def test_a_held_open_pipe_after_the_leader_exits_is_flagged_not_waited_for(
 
 def test_stdout_cap_kills_the_child_and_flags_it_without_reading_on() -> None:
     code = "import sys\nwhile True: sys.stdout.write('x'*65536); sys.stdout.flush()"
+    started = time.monotonic()
     result = gw.run_process(
         python_child(code),
         env=plain_env(),
@@ -1390,7 +1630,19 @@ def test_stdout_cap_kills_the_child_and_flags_it_without_reading_on() -> None:
         max_stdout=100_000,
     )
     assert result.stdout_truncated and len(result.stdout) == 100_000
+    assert not result.timed_out and time.monotonic() - started < 5
     assert group_members(result.pgid) == []
+
+
+@pytest.mark.parametrize(("size", "cut"), [(100_000, False), (150_000, True)])
+def test_stdout_cap_boundary(size: int, cut: bool) -> None:
+    code = f"import sys\nsys.stdout.buffer.write(b'x'*{size}); sys.stdout.flush()"
+    result = gw.run_process(
+        python_child(code), env=plain_env(), cwd=os.environ["TMPDIR"], timeout=30,
+        max_stdout=100_000,
+    )  # fmt: skip
+    assert result.stdout_truncated is cut
+    assert len(result.stdout) == 100_000
 
 
 def test_stderr_flood_is_capped_without_blocking_the_child() -> None:
@@ -1468,7 +1720,7 @@ def test_a_signal_during_a_call_kills_the_exact_group_removes_dirs_and_propagate
     try:
         signal.setitimer(signal.ITIMER_REAL, 0.8)
         with pytest.raises(Interrupted):
-            gateway.api(GH, "POST", ["x"], body={"a": 1}, write=True)
+            gateway.api(GH, "POST", ["x"], body={"a": 1}, write=True, expect_status=WROTE)
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, old)
@@ -1480,33 +1732,25 @@ def test_a_signal_during_a_call_kills_the_exact_group_removes_dirs_and_propagate
 
 
 DRIVER = r"""
-import json, os, signal, sys
+import sys
 from forgectl import gateway as gw
+from forgectl.cli import SignalExit, _signals
 from forgectl.config import LoadedConfig
 
-class Stop(SystemExit):
-    pass
-
-def handler(signum, frame):
-    raise Stop(128 + signum)
-
-signal.signal(signal.SIGTERM, handler)
-signal.signal(signal.SIGINT, handler)
-spawned = []
 def on_spawn(pid, pgid):
-    spawned.append([pid, pgid])
     print("STARTED", pid, pgid, flush=True)
 g = gw.Gateway(LoadedConfig.defaults(), timeout=60, on_spawn=on_spawn)
-try:
-    target = gw.Target("github", "github.com", token="fake-token-0001")
-    g.api(target, "POST", ["x"], body={"a": 1}, write=True)
-except Stop as exc:
-    print("STOPPED", exc.code, flush=True)
-    raise
+with _signals():  # the CLI's own handlers
+    try:
+        target = gw.Target("github", "github.com", token="fake-token-0001")
+        g.api(target, "POST", ["x"], body={"a": 1}, write=True, expect_status=frozenset({201}))
+    except SignalExit as exc:
+        print("STOPPED", exc.signum, flush=True)
+        sys.exit(128 + exc.signum)
 """
 
 
-@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT])
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT, signal.SIGHUP])
 def test_a_signal_sent_to_a_running_forgectl_process_ends_the_child_group_and_cleans_up(
     fake_forges: FakeForges, procs: ProcessRegistry, signum: int
 ) -> None:
@@ -1533,10 +1777,12 @@ def test_a_signal_sent_to_a_running_forgectl_process_ends_the_child_group_and_cl
     assert group_members(child_pgid) == []
     call = only_call(fake_forges)
     assert call.pid == child_pid and call.signals == ["SIGTERM"]
+    assert not Path(f"/proc/{child_pid}").exists()
     leftovers = [p for p in os.listdir(os.environ["TMPDIR"]) if p.startswith("forgectl-")]
     assert leftovers == []
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="PR_SET_DUMPABLE is Linux only")
 def test_harden_process_clears_the_dumpable_flag_in_the_process_that_calls_it(
     procs: ProcessRegistry,
 ) -> None:
@@ -1546,8 +1792,7 @@ def test_harden_process_clears_the_dumpable_flag_in_the_process_that_calls_it(
         "print(before,applied,libc.prctl(3,0,0,0,0))"
     )
     result = procs.run([sys.executable, "-c", code], env=forgectl_env_plain())
-    if sys.platform.startswith("linux"):
-        assert result.stdout.split() == ["1", "True", "0"]
+    assert result.stdout.split() == ["1", "True", "0"]
 
 
 def forgectl_env_plain() -> dict[str, str]:
@@ -1585,34 +1830,73 @@ def test_main_hardens_the_process_for_a_real_invocation_only(
 # -- The second entry point: hooks, token_command, the browser -------------------------------
 
 
-def test_run_external_runs_in_a_private_empty_cwd_with_the_stored_environment(
+ENV_DUMP = (
+    "import os,json;"
+    "print(json.dumps({'cwd':os.getcwd(),'ls':os.listdir('.'),'env':dict(os.environ)}))"
+)
+
+
+def config_with_token_env(*names: str) -> LoadedConfig:
+    from forgectl.config import Host
+
+    base = LoadedConfig.defaults()
+    hosts = {f"h{i}.example.test": Host(backend="gitlab", token_env=n) for i, n in enumerate(names)}
+    return LoadedConfig(
+        config=base.config.model_copy(update={"hosts": hosts}), config_hash="x", config_path=None
+    )
+
+
+def test_run_external_token_command_mode_gets_the_stored_login_environment(
     fake_forges: FakeForges, spawned: Spawned
 ) -> None:
     gateway = make_gateway(fake_forges, spawned, env=HOSTILE_ENV)
-    code = (
-        "import os,json;"
-        "print(json.dumps({'cwd':os.getcwd(),'ls':os.listdir('.'),'env':dict(os.environ)}))"
-    )
     result = gateway.run_external(
-        python_child(code), timeout=10, extra_env={"FORGECTL_HOOK": "pre-merge"}
+        python_child(ENV_DUMP), timeout=10, mode="token_command", backend="github"
     )
     seen = json.loads(result.stdout)
     assert seen["ls"] == [] and not Path(seen["cwd"]).exists()
     env = seen["env"]
-    for name in (
-        *gw.TOKEN_VARIABLES,
-        "GH_HOST",
-        "GH_REPO",
-        "PAGER",
-        "BROWSER",
-        "LD_PRELOAD",
-        "GIT_DIR",
-        "NO_PROMPT",
-    ):
+    for name in (*gw.TOKEN_VARIABLES, "GH_HOST", "GH_REPO", "PAGER", "BROWSER", "LD_PRELOAD",
+                 "GIT_DIR", "NO_PROMPT"):  # fmt: skip
         assert name not in env, name
-    assert env["FORGECTL_HOOK"] == "pre-merge" and env["GLAB_NO_PROMPT"] == "1"
+    assert env["GLAB_NO_PROMPT"] == "1"
     assert env["GIT_CEILING_DIRECTORIES"] == str(Path(seen["cwd"]).parent)
     assert all(os.path.isabs(e) for e in env["PATH"].split(os.pathsep))
+    spawned.assert_gone()
+    assert private_leftovers() == []
+    with pytest.raises(ValueError):
+        gateway.run_external(python_child(ENV_DUMP), timeout=10, mode="token_command")
+
+
+@pytest.mark.parametrize("mode", ["hook", "browser"])
+def test_hooks_and_the_browser_inherit_the_environment_minus_every_token_variable(
+    fake_forges: FakeForges, spawned: Spawned, tmp_path: Path, mode: str
+) -> None:
+    extra = {
+        "MY_FORGE_TOKEN": "configured-secret",
+        "OTHER_TOKEN": "passed-secret",
+        "DISPLAY": ":0",
+        "WAYLAND_DISPLAY": "wayland-0",
+        "WSL_DISTRO_NAME": "x",
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/x",
+    }
+    environ = forgectl_env(fake_forges, {**HOSTILE_ENV, **extra})
+    gateway = Gateway(
+        config_with_token_env("MY_FORGE_TOKEN"), timeout=20, environ=environ, on_spawn=spawned
+    )
+    result = gateway.run_external(
+        python_child(ENV_DUMP), timeout=10, mode=mode,  # type: ignore[arg-type]
+        token_env_names=("OTHER_TOKEN",), extra_env={"FORGECTL_HOOK": "pre-merge"},
+    )  # fmt: skip
+    seen = json.loads(result.stdout)
+    env = seen["env"]
+    assert seen["ls"] == [] and not Path(seen["cwd"]).exists()
+    for name in (*gw.TOKEN_VARIABLES, "MY_FORGE_TOKEN", "OTHER_TOKEN"):
+        assert name not in env, name
+    for name in ("BROWSER", "DISPLAY", "WAYLAND_DISPLAY", "WSL_DISTRO_NAME", "PAGER", "GH_HOST",
+                 "DBUS_SESSION_BUS_ADDRESS", "HOME"):  # fmt: skip
+        assert env[name] == environ[name], name
+    assert env["FORGECTL_HOOK"] == "pre-merge"
     spawned.assert_gone()
     assert private_leftovers() == []
 
@@ -1620,15 +1904,25 @@ def test_run_external_runs_in_a_private_empty_cwd_with_the_stored_environment(
 def test_run_external_refuses_token_variables_and_nul_and_finds_only_absolute_path_entries(
     fake_forges: FakeForges,
 ) -> None:
-    gateway = make_gateway(fake_forges, env={"PATH": ".:rel"})
+    environ = forgectl_env(fake_forges, {"PATH": ".:rel"})
+    gateway = Gateway(config_with_token_env("MY_FORGE_TOKEN"), timeout=5, environ=environ)
+    for name in ("GH_TOKEN", "GH_FORCE_TTY", "CLICOLOR_FORCE", "GH_HOST", "GH_REPO",
+                 "MY_FORGE_TOKEN"):  # fmt: skip
+        with pytest.raises(ValueError):
+            gateway.run_external(["x"], timeout=1, mode="hook", extra_env={name: "t"})
     with pytest.raises(ValueError):
-        gateway.run_external(["x"], timeout=1, extra_env={"GH_TOKEN": "t"})
+        gateway.run_external(
+            ["x"], timeout=1, mode="hook", token_env_names=("MINE",), extra_env={"MINE": "t"}
+        )
+    for bad in ({"A": "b\0c"}, {"A\0": "b"}):
+        with pytest.raises(ValueError):
+            gateway.run_external(["x"], timeout=1, mode="hook", extra_env=bad)
     with pytest.raises(ValueError):
-        gateway.run_external([], timeout=1)
+        gateway.run_external([], timeout=1, mode="hook")
     with pytest.raises(ValueError):
-        gateway.run_external(["a\0b"], timeout=1)
+        gateway.run_external(["a\0b"], timeout=1, mode="hook")
     with pytest.raises(gw.ExecutableMissing):
-        gateway.run_external(["sh", "-c", "true"], timeout=1)
+        gateway.run_external(["sh", "-c", "true"], timeout=1, mode="hook")
 
 
 def test_run_external_kills_the_whole_group_at_its_timeout(
@@ -1636,7 +1930,9 @@ def test_run_external_kills_the_whole_group_at_its_timeout(
 ) -> None:
     monkeypatch.setattr(gw, "KILL_GRACE", 0.3)
     gateway = make_gateway(fake_forges, spawned)
-    result = gateway.run_external(python_child(GRANDCHILD.format(ignore_term=True)), timeout=0.5)
+    result = gateway.run_external(
+        python_child(GRANDCHILD.format(ignore_term=True)), timeout=0.5, mode="hook"
+    )
     assert result.timed_out
     reap_orphans(result.pgid)
     spawned.assert_gone()
@@ -1645,8 +1941,9 @@ def test_run_external_kills_the_whole_group_at_its_timeout(
 def test_run_external_stdin_is_devnull_unless_given(fake_forges: FakeForges) -> None:
     gateway = make_gateway(fake_forges)
     code = "import sys;print(repr(sys.stdin.read()))"
-    assert gateway.run_external(python_child(code), timeout=10).stdout == b"''\n"
-    assert gateway.run_external(python_child(code), timeout=10, stdin=b"hi").stdout == b"'hi'\n"
+    run = gateway.run_external
+    assert run(python_child(code), timeout=10, mode="hook").stdout == b"''\n"
+    assert run(python_child(code), timeout=10, mode="hook", stdin=b"hi").stdout == b"'hi'\n"
 
 
 # -- Substitutable runner --------------------------------------------------------------------
@@ -1675,3 +1972,322 @@ def test_a_substituted_runner_sees_the_exact_argv_environment_and_cwd(tmp_path: 
     assert seen["env"]["GH_TOKEN"] == TOKEN and seen["cwd_exists"]
     assert not os.path.exists(seen["cwd"])
     assert TOKEN not in " ".join(seen["argv"])
+
+
+# -- Cleanup under signals (review round 1) ------------------------------------------------------
+
+IGNORES_TERM = "import signal,time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(60)"
+
+
+def blocked_mask() -> list[int]:
+    return sorted(int(s) for s in signal.pthread_sigmask(signal.SIG_BLOCK, []))
+
+
+def test_signals_during_the_kill_grace_still_kill_the_group_and_reraise_the_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A TERM-ignoring child; the first SIGALRM interrupts the call, a SIGINT arrives while
+    cleanup holds it, and a second SIGALRM (not held) lands in the grace. The group still gets
+    SIGKILL, the leader is reaped, and the first exception is the one that propagates."""
+    monkeypatch.setattr(gw, "KILL_GRACE", 1.5)
+    count = [0]
+
+    def alarm(signum: int, frame: Any) -> None:
+        count[0] += 1
+        if count[0] >= 2:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        raise Interrupted(count[0])
+
+    def send_sigint() -> None:
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})  # only the main thread gets it
+        time.sleep(0.9)
+        os.kill(os.getpid(), signal.SIGINT)
+
+    started: list[int] = []
+    before = blocked_mask()
+    old = signal.signal(signal.SIGALRM, alarm)
+    sender = threading.Thread(target=send_sigint, daemon=True)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 0.5, 0.8)  # at 0.5 s and 1.3 s
+        sender.start()
+        with pytest.raises(Interrupted) as raised:
+            gw.run_process(
+                python_child(IGNORES_TERM), env=plain_env(), cwd=os.environ["TMPDIR"],
+                timeout=30, on_start=lambda pid, pgid: started.append(pid),
+            )  # fmt: skip
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+        sender.join(5)
+    assert raised.value.args == (1,)
+    assert count[0] == 2  # the second one landed in the grace
+    notes = " ".join(getattr(raised.value, "__notes__", []))
+    assert "KeyboardInterrupt" in notes and "Interrupted" in notes
+    assert blocked_mask() == before
+    (pid,) = started
+    assert group_members(pid) == [] and not Path(f"/proc/{pid}").exists()
+
+
+def test_a_failure_right_after_the_spawn_restores_the_mask_and_kills_the_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spawned_procs: list[Any] = []
+    real_popen = gw._popen
+
+    def recording(*args: Any, **kwargs: Any) -> Any:
+        proc = real_popen(*args, **kwargs)
+        spawned_procs.append(proc)
+        return proc
+
+    def broken(self: Any, proc: Any) -> None:
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr(gw, "_popen", recording)
+    monkeypatch.setattr(gw._Leader, "__init__", broken)
+    before = blocked_mask()
+    with pytest.raises(OSError):
+        gw.run_process(
+            python_child("import time;time.sleep(30)"), env=plain_env(),
+            cwd=os.environ["TMPDIR"], timeout=30,
+        )  # fmt: skip
+    assert blocked_mask() == before
+    (proc,) = spawned_procs
+    assert proc.returncode is not None  # reaped
+    assert group_members(proc.pid) == []
+
+
+def test_a_selector_that_cannot_be_made_fails_before_anything_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started: list[int] = []
+
+    def boom() -> Any:
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr(gw.selectors, "DefaultSelector", boom)
+    monkeypatch.setattr(gw, "_popen", lambda *a, **k: started.append(1))
+    before = blocked_mask()
+    with pytest.raises(OSError):
+        gw.run_process(["true"], env=plain_env(), cwd=os.environ["TMPDIR"], timeout=5)
+    assert started == [] and blocked_mask() == before
+
+
+LEAVES_A_GRANDCHILD = (
+    "import subprocess,sys;"
+    "p=subprocess.Popen([sys.executable,'-I','-c','import time;time.sleep(30)'],"
+    "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);print(p.pid,flush=True)"
+)
+
+
+def kill_exact_orphan(pid: int, pgid: int) -> None:
+    """SIGKILL and reap one grandchild reparented to this process (a subreaper), after checking
+    through a pidfd that it is still our child in the expected group."""
+    fd = os.pidfd_open(pid)
+    try:
+        assert [m for m in group_members(pgid) if m[0] == pid], "not in the expected group"
+        os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG | os.WNOWAIT)  # type: ignore[attr-defined]
+        signal.pidfd_send_signal(fd, signal.SIGKILL)  # type: ignore[attr-defined]
+        os.waitid(os.P_PIDFD, fd, os.WEXITED)  # type: ignore[attr-defined]
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="needs pidfd and /proc")
+def test_without_waitid_or_kqueue_a_reaped_leaders_group_is_not_signaled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The last fallback: polling reaps the leader, so its group id may be reused and is never
+    signaled afterwards; a grandchild it left behind survives (documented, not wanted)."""
+    monkeypatch.setattr(gw, "_HAS_WAITID", False)
+    monkeypatch.setattr(gw, "_HAS_KQUEUE", False)
+    result = gw.run_process(
+        python_child(LEAVES_A_GRANDCHILD), env=plain_env(), cwd=os.environ["TMPDIR"], timeout=10
+    )
+    grandchild = int(result.stdout.split()[0])
+    try:
+        assert result.returncode == 0
+        assert [m for m in group_members(result.pgid) if m[0] == grandchild and m[2] != "Z"]
+    finally:
+        kill_exact_orphan(grandchild, result.pgid)
+
+
+@pytest.mark.skipif(not hasattr(select, "kqueue"), reason="kqueue only (macOS, BSD)")
+def test_with_kqueue_and_no_waitid_a_grandchild_dies_with_the_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gw, "_HAS_WAITID", False)
+    result = gw.run_process(
+        python_child(LEAVES_A_GRANDCHILD), env=plain_env(), cwd=os.environ["TMPDIR"], timeout=10
+    )
+    grandchild = int(result.stdout.split()[0])
+    assert result.returncode == 0
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(grandchild, 0)  # only a probe; never a signal to an unknown process
+        except ProcessLookupError:
+            break
+        with contextlib.suppress(ChildProcessError):
+            os.waitpid(grandchild, os.WNOHANG)
+        time.sleep(0.05)
+    else:
+        pytest.fail("the grandchild outlived its group")
+
+
+@pytest.mark.skipif(not hasattr(select, "kqueue"), reason="kqueue only (macOS, BSD)")
+def test_with_kqueue_a_deadline_still_kills_the_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gw, "_HAS_WAITID", False)
+    monkeypatch.setattr(gw, "KILL_GRACE", 0.4)
+    result = gw.run_process(
+        python_child(IGNORES_TERM), env=plain_env(), cwd=os.environ["TMPDIR"], timeout=0.5
+    )
+    assert result.timed_out and result.returncode == -9
+
+
+# -- Caps through the fake (review round 1) ---------------------------------------------------
+
+
+def test_the_gateway_stdout_cap_is_honored_and_stops_the_child_with_sigterm_first(
+    fake_forges: FakeForges, spawned: Spawned
+) -> None:
+    # 10 MB: the fake blocks writing it once the pipe is full, so it is still running at the cap
+    fake_forges.answer("gh", endpoint_re=".", body_text="x" * 1000, body_repeat=10_000)
+    gateway = make_gateway(fake_forges, spawned, timeout=20, max_stdout=1000)
+    started = time.monotonic()
+    with pytest.raises(ForgectlError) as raised:
+        gateway.api(GH, "GET", ["x"])
+    assert raised.value.code == "upstream_error"
+    assert time.monotonic() - started < 10
+    assert only_call(fake_forges).signals == ["SIGTERM"]
+    spawned.assert_gone()
+
+
+# -- Environment (review round 1) ----------------------------------------------------------------
+
+
+def test_a_relative_stored_mode_config_dir_is_made_absolute() -> None:
+    dirs = gw.PrivateDirs("/r", "/r/cwd", "/r/config")
+    source = {"PATH": "/usr/bin", "HOME": "/h", "GH_CONFIG_DIR": "rel/cfg"}
+    env = gw.build_environment(source, dirs=dirs, backend="github")
+    assert env["GH_CONFIG_DIR"] == os.path.abspath("rel/cfg")
+
+
+@pytest.mark.parametrize("value", ["relative", ".", "/nonexistent/forgectl-tmp", ""])
+def test_an_unusable_tmpdir_falls_back_to_tmp_never_the_cwd_or_the_process_tmpdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "relative").mkdir()
+    monkeypatch.chdir(work)
+    seen: dict[str, Any] = {}
+
+    def runner(argv: Sequence[str], **kw: Any) -> ProcessResult:
+        seen.update(cwd=kw["cwd"], tmpdir=kw["env"]["TMPDIR"])
+        return ProcessResult(1, 1, 0, head(200) + b"{}", b"")
+
+    gateway = stub_gateway(tmp_path, runner)
+    gateway._environ = {**gateway.environ, "TMPDIR": value}  # process TMPDIR stays the private one
+    gateway.api(GH, "GET", ["x"])
+    assert seen["tmpdir"] == os.path.realpath("/tmp")
+    assert os.path.dirname(os.path.dirname(seen["cwd"])) == os.path.realpath("/tmp")
+    assert os.listdir(work / "relative") == [] and sorted(os.listdir(work)) == ["relative"]
+
+
+def test_an_unwritable_tmpdir_falls_back_to_tmp(tmp_path: Path) -> None:
+    locked = tmp_path / "locked"
+    locked.mkdir(mode=0o500)
+    try:
+        assert gw._tmpdir({"TMPDIR": str(locked)}) == "/tmp"
+        assert gw._tmpdir({"TMPDIR": str(tmp_path)}) == str(tmp_path)
+    finally:
+        locked.chmod(0o700)
+
+
+@pytest.mark.parametrize("target", [GH, GL_SELF])
+def test_the_bus_is_made_unreachable_not_only_unnamed_where_it_must_not_be_used(
+    fake_forges: FakeForges, tmp_path: Path, target: Target
+) -> None:
+    """gh 2.87.3 finds the default per-user bus socket with no bus variable at all, so where
+    the bus must stay unused the gateway names a fixed unusable address instead."""
+    fake_forges.default_bus_socket(present=True)
+    fake_forges.keyring_login(target.program, target.host, "ring-token")
+    script_ok(fake_forges, target.program)
+    var = target.config_dir_variable
+    config = tmp_path / "my-config"
+    config.mkdir()
+    env = {
+        var: str(config),
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/x",
+        "XDG_RUNTIME_DIR": str(tmp_path / "run"),
+    }
+    gateway = make_gateway(fake_forges, env=env)
+    gateway.api(target, "GET", ["user"])  # token mode
+    stored = Target(target.backend, target.host)  # stored-login mode, the caller's own dir
+    if target.backend == "github":
+        with pytest.raises(ForgectlError):  # gh api reads only file logins: exit 4
+            gateway.api(stored, "GET", ["user"])
+    else:
+        gateway.api(stored, "GET", ["user"])
+    token_call, stored_call = fake_forges.calls()
+    for call in (token_call, stored_call):
+        assert call.env["DBUS_SESSION_BUS_ADDRESS"] == gw.NO_BUS_ADDRESS
+        assert "XDG_RUNTIME_DIR" not in call.env
+    assert_call_safe(token_call, host=target.host)
+    assert_call_safe(stored_call, host=target.host, mode="stored", caller_config_dir=True)
+    assert stored_call.token_sent != "ring-token"
+
+
+def test_the_fixed_unusable_bus_address_matches_the_harness() -> None:
+    from .harness.safety import NO_BUS_ADDRESS
+
+    assert gw.NO_BUS_ADDRESS == NO_BUS_ADDRESS == "unix:path=/nonexistent/forgectl-no-bus"
+
+
+def test_glab_1_89_with_no_credential_is_auth_required(fake_forges: FakeForges) -> None:
+    fake_forges.glab_unauthenticated_without_credential()
+    gateway = make_gateway(fake_forges, env={"GLAB_CONFIG_DIR": None, "XDG_CONFIG_HOME": None})
+    for write in (False, True):
+        with pytest.raises(ForgectlError) as raised:
+            if write:
+                gateway.api(Target("gitlab", "gitlab.com"), "POST", ["x"], body={},
+                            write=True, expect_status=WROTE)  # fmt: skip
+            else:
+                gateway.api(Target("gitlab", "gitlab.com"), "GET", ["user"])
+        assert raised.value.code == "auth_required"
+    assert [c.request for c in fake_forges.calls()] == [None, None]  # nothing was sent
+
+
+def test_a_hostile_caller_directory_cannot_steer_or_run_anything(
+    fake_forges: FakeForges, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "hostile"
+    git = repo / ".git"
+    (git / "hooks").mkdir(parents=True)
+    marker = tmp_path / "ran"
+    (git / "HEAD").write_text("ref: refs/heads/main\n")
+    (git / "config").write_text(
+        "[core]\n"
+        f"\tfsmonitor = touch {marker}\n"
+        f"\thooksPath = {repo}/hooks-dir\n"
+        '[remote "origin"]\n'
+        "\turl = https://evil.example.test/evil/repo.git\n"
+    )
+    (repo / "hooks-dir").mkdir()
+    for name in ("post-checkout", "pre-commit", "fsmonitor-watchman"):
+        hook = repo / "hooks-dir" / name
+        hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
+        hook.chmod(0o755)
+    monkeypatch.chdir(repo)
+    script_ok(fake_forges, "gh")
+    script_ok(fake_forges, "glab")
+    gateway = make_gateway(fake_forges)
+    gateway.api(GH, "GET", ["repos", "o", "r"])
+    gateway.api(GL, "GET", ["projects", "7"])
+    gateway.api(GL_SELF, "GET", ["projects", "7"])
+    for call in fake_forges.calls():
+        assert call.repo_context is None and call.cwd_real != str(repo)
+        assert "-R" not in call.argv and "--repo" not in call.argv
+        assert call.argv[-1] in ("repos/o/r", "projects/7")
+        assert_call_safe(call, host=call.request["host"] if call.request else "")
+    assert not marker.exists()

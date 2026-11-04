@@ -735,7 +735,9 @@ def test_partial_results_without_output_is_the_envelope(
 # --- signals ------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("sig", "expected"), [(signal.SIGTERM, 143), (signal.SIGINT, 130)])
+@pytest.mark.parametrize(
+    ("sig", "expected"), [(signal.SIGTERM, 143), (signal.SIGINT, 130), (signal.SIGHUP, 129)]
+)
 def test_a_signal_exits_128_plus_n_with_no_envelope(
     sig: signal.Signals, expected: int, capsys: pytest.CaptureFixture[str]
 ) -> None:

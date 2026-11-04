@@ -31,7 +31,7 @@ forgectl gives one normalized interface to pull requests on GitHub and merge req
 
 ### Hosts
 
-The set of hosts is **closed**. `github.com` (backend `github`) and `gitlab.com` (backend `gitlab`) are built in; any other host must be declared as `hosts.<host>.backend`. A PR, `--repo` or `--host` naming any other host exits 20 (`reason: unknown_host`) before any process starts. forgectl never probes a host to guess its backend, because a reference may come from third-party text and must never receive a token; this protects references, not a caller who controls the config.
+The set of hosts is **closed**. `github.com` (backend `github`) and `gitlab.com` (backend `gitlab`) are built in; any other host must be declared as `hosts.<host>.backend`. A PR, `--repo` or `--host` naming any other host exits 20 (`reason: unknown_host`) before any process starts. forgectl never probes a host to guess its backend, because a reference may come from third-party text and must never receive a token; this protects references, not a caller who controls the config. Host names are compared in lowercase. A GitHub host takes no port (`gh` refuses one).
 
 ### Human actions
 
@@ -267,8 +267,9 @@ Every call to a forge goes through one gateway:
 
 - **Executable.** `gh_bin` and `glab_bin` are a bare name or an absolute path. A bare name resolves only against absolute `PATH` entries. The child's `PATH` holds only absolute entries. A missing executable exits 12 (`tool_missing`) with the install command, only when that backend is needed.
 - **Environment built from scratch.** In both modes: `PATH`, `HOME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR`, proxy variables (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, lowercase forms), `SSL_CERT_FILE`, `SSL_CERT_DIR`, `GLAB_CA_CERT`, `GIT_CEILING_DIRECTORIES=<parent of the private cwd>`, and the fixed settings `GH_PROMPT_DISABLED=1`, `GH_NO_UPDATE_NOTIFIER=1`, `NO_COLOR=1`, `GLAB_SEND_TELEMETRY=false`, `GLAB_CHECK_UPDATE=false`, `GLAB_SHOW_WHATS_NEW=false`, `GLAB_NO_PROMPT=1`. `NO_PROMPT` is never set: `glab` 1.89 prints a deprecation warning to stdout when it is. `GH_FORCE_TTY`, `CLICOLOR_FORCE`, `GH_REPO` and `GH_HOST` never pass through.
-  - **Token mode** (forgectl supplies a token) adds the one token variable of [Credentials](#credentials), plus `GH_CONFIG_DIR` or `GLAB_CONFIG_DIR` pointing at a private empty directory.
-  - **Stored-login mode** adds the caller's `GH_CONFIG_DIR`, `GLAB_CONFIG_DIR` and `XDG_CONFIG_HOME`, plus `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR` unless the caller set [that backend's config dir](#credentials).
+  - **Token mode** (forgectl supplies a token) adds the one token variable of [Credentials](#credentials), plus `GH_CONFIG_DIR` or `GLAB_CONFIG_DIR` pointing at a private empty directory, and `DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent/forgectl-no-bus`.
+  - **Stored-login mode** adds the caller's `GH_CONFIG_DIR`, `GLAB_CONFIG_DIR` and `XDG_CONFIG_HOME`, plus the caller's `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR` unless the caller set [that backend's config dir](#credentials); then it adds `DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent/forgectl-no-bus` instead.
+  - The fixed bus address fails at once. Leaving the bus variables out is not enough: with neither set, `gh` 2.87.3 still reaches the session bus through the default `/run/user/<uid>/bus` socket.
 - **Empty private working directory.** `glab` always runs read-only git in its cwd, and `gh` does when not given a repo. Private directories are under `TMPDIR`, mode 0700. An ancestor repository cannot reroute a call, through the ceiling variable.
 - **Routing.** `gh`: `--hostname` on every call. `glab`: for gitlab.com, `--hostname gitlab.com` and no `GITLAB_HOST`; for any other host, `GITLAB_HOST=<host>[:port]<api_prefix>` and no `--hostname`, in both modes.
 - **Only `gh api` and `glab api`.** Endpoints are built only from validated parts, never from a URL as given. A full-URL endpoint is never used, because `glab` sends its token to whatever host it names.
@@ -279,8 +280,9 @@ Every call to a forge goes through one gateway:
 - **Pagination** is forgectl's own, by page parameters or GraphQL cursors, so a partial page never looks complete.
 - **Answers are checked for identity.** A PR, project or note response carries its URL or path; a host or project other than the expected one exits 12 (`wrong_host_response`). The canonical path comes from the first read; a rename on the same host is accepted. Hook `repo`, audit `target` and `repos.<id>` lookups use the canonical form. This detects an accidental redirect, not a hostile host. On `wrong_host_response` the message says the token may have reached another host and should be rotated.
 - **Writes** use the canonical path from the read on GitHub, and the numeric project id on GitLab. A write succeeds only on [its documented answer](#reliability); a `gh` POST turned into a GET therefore never reads as posted.
-- **Local failures.** An answer over the size cap (32 MiB), one that never ends, or one that is not strict UTF-8 JSON (a BOM, NaN, a duplicate key) is `upstream_error` on a read and `outcome_unknown` on a write; it is never returned as data. A 403 counts as a rate limit when it has `retry-after` or its message mentions a rate limit. A GraphQL write that answers a result together with `errors` is `outcome_unknown`.
-- **Children** run under the command's budget and are signaled only by their exact PID. On SIGINT or SIGTERM forgectl forwards the signal to the exact child PID and removes its temporary directories. A signal during a write: audit `outcome_unknown`, no `post-` hook, exit 12 `outcome_unknown`.
+- **Local failures.** These are `upstream_error` on a read and `outcome_unknown` on a write, and never returned as data: an answer over the size cap (32 MiB); output still held open by another process after the program exited; a 2xx with a nonzero exit (except `gh api graphql`'s exit 1 with `errors`); only a 1xx status; a body that is not strict UTF-8 JSON (a BOM, NaN, a duplicate key); on a read, a body that is not the documented object or list. An answer still arriving at the deadline is a timeout: `network_error` on a read, `outcome_unknown` on a write. On a write, a list where one object is documented is `host_rejected` and any other body that is not the documented shape is `outcome_unknown`. A GraphQL write that answers a result together with `errors` is `outcome_unknown`.
+- **Rate-limit rule.** A 403 counts as a rate limit when it has a `retry-after` header, or its message matches `rate limit`, `abuse detection` or `too many requests`, ignoring case. Both tables in [Reliability](#reliability) use this rule.
+- **Children** run under the command's budget, each as the leader of its own process group. At the deadline, or when forgectl gets SIGINT, SIGTERM or SIGHUP, the child's group gets SIGTERM and, 2 s later, SIGKILL. A group is signaled only while its leader is not yet reaped, so the group id cannot have been reused. Then forgectl removes the child's temporary directories. SIGHUP is handled as SIGTERM is. A signal during a write: audit `outcome_unknown`, no `post-` hook, exit 12 `outcome_unknown`.
 
 ## Reliability
 
@@ -288,13 +290,13 @@ Every call to a forge goes through one gateway:
 
 | Answer | Code |
 |---|---|
-| 401; `gh` rc 4 with no headers | `auth_required` |
-| 403 with `retry-after` or secondary-limit wording; 429 | `rate_limited` |
+| 401; `gh` rc 4 with no headers; `glab` saying `Unauthenticated.` with no credential | `auth_required` |
+| 403 under the [rate-limit rule](#invoking-the-backends); 429 | `rate_limited` |
 | other 403 | `permission_denied` |
 | 404 | `not_found` |
 | 5xx | `upstream_error` |
 | no status | `network_error` |
-| other 4xx | `host_rejected` |
+| any 3xx; other 4xx | `host_rejected` |
 
 **Readiness** values that are still being computed get a short retry: `merge` up to 5 tries in 10 s; `show` and `snapshot` up to 3 tries in 4 s; `prs` none. `retries: 0` turns off both kinds of retry. On GitLab the single-MR `GET` triggers the recheck; `with_merge_status_recheck` is not used, since lists do not refresh. If unresolved, `blocked_by` includes `mergeability_unknown`.
 
@@ -305,12 +307,14 @@ Every call to a forge goes through one gateway:
 | Answer to a write | Code | Landed | Audit result |
 |---|---|---|---|
 | the endpoint's success, below | continue | yes | per action |
-| 429; 403 with `retry-after` or secondary-limit wording | `rate_limited`, `retry_after` | no | `failed` |
+| 429; 403 under the [rate-limit rule](#invoking-the-backends) | `rate_limited`, `retry_after` | no | `failed` |
 | 401; other 403 | `auth_required`; `permission_denied` | no | `failed` |
 | 404 | exit 10, `not_found` | no | `failed` |
 | 409 on a merge or a GitLab approve | exit 20, `stale_head`; `details.head_sha` from one read, omitted if that read fails | no | `failed` |
-| any 3xx; a list where the endpoint documents one object (a redirected GET); other 4xx | `host_rejected` | no | `failed` |
+| a 3xx shown (a 307 or 308); a list where the endpoint documents one object (a redirected GET); other 4xx | `host_rejected` | no | `failed` |
 | any other 2xx without its documented status and proof; 5xx, timeout, no status | `outcome_unknown` | maybe | `outcome_unknown` |
+
+**Redirected writes.** `gh` and `glab` follow a 301, 302 or 303 by sending a GET without the body, and show only that GET's answer. A redirected write is therefore detected only by the endpoint's status and proof in the table below. They do not follow a 307 or 308 on a body sent by stdin: the 3xx itself comes back, `host_rejected`.
 
 After text landed, any failure of the state step is exit 12 `outcome_partial`, `failed` naming it. Merge's 405, 5xx and verification rows and GitLab's draft rules refine this table; GitLab's 401 on `POST /approve` keeps its re-read. After `outcome_unknown` or `outcome_partial`, a retry without a key may duplicate; after every other code in this table nothing landed.
 
@@ -755,9 +759,9 @@ Per host, in this order:
 
 If `token_env` or `token_command` is configured and neither yields a token, exit 12 (`auth_required`), naming the variable; the stored login is not used. It applies to reads and writes. `details.variable` is the configured name, absent otherwise; the message says to set `hosts.<host>.token_env` or log in.
 
-GitLab with no credential is anonymous: a command succeeds if every read it needs allows it, else `auth_required`. `whoami` then shows `none`.
+GitLab with no credential is anonymous: a command succeeds if every read it needs allows it, else `auth_required`. `whoami` then shows `none`. `glab` 1.89 cannot read anonymously: it prints `Unauthenticated.` and sends nothing, and forgectl then reports `auth_required`.
 
-If the caller set `GH_CONFIG_DIR` (GitHub) or `GLAB_CONFIG_DIR` (GitLab), stored-login mode passes neither `DBUS_SESSION_BUS_ADDRESS` nor `XDG_RUNTIME_DIR` for that backend, so a custom config dir only ever uses files. forgectl does not inspect the directory. A login kept only in a keyring then reads as no credential, on GitHub `auth_required` and on GitLab anonymous, and a `token_command`, which runs in this environment, cannot reach a keyring over the bus either. `token_env` still applies. The macOS Keychain is a [residual risk](#residual-risks).
+If the caller set `GH_CONFIG_DIR` (GitHub) or `GLAB_CONFIG_DIR` (GitLab), stored-login mode passes no `XDG_RUNTIME_DIR` for that backend and sets `DBUS_SESSION_BUS_ADDRESS` to the fixed unusable address of [Invoking the backends](#invoking-the-backends), so a custom config dir only ever uses files. forgectl does not inspect the directory. A login kept only in a keyring then reads as no credential, on GitHub `auth_required` and on GitLab anonymous, and a `token_command`, which runs in this environment, cannot reach a keyring over the bus either. `token_env` still applies. The macOS Keychain is a [residual risk](#residual-risks).
 
 **Which variable the child gets.** Exactly one:
 
@@ -783,7 +787,7 @@ forgectl stores no long-lived objects, so it has no labels of its own. Conventio
 
 `browse [--focus <pr>] [--result-file PATH]` needs the extra `forgectl[tui]`; without it, exit 2 with the install command.
 
-A list and a detail pane with facts, CI, reviews, comments and diff. The default list is the union of requested-from-you and authored-by-you, as two `prs` calls. Two actions: `m` merge, `o` open in a browser. Posting stays with the tools that own drafts.
+A list and a detail pane with facts, CI, reviews, comments and diff. The default list is the union of requested-from-you and authored-by-you, as two `prs` calls. Two actions: `m` merge, `o` open in a browser. The browser runs with forgectl's environment minus every configured `token_env` variable and the [ambient token list](#credentials), as a hook does. Posting stays with the tools that own drafts.
 
 `m` runs the merge in process, with `--actor human:<me.name>`, and `--expected-head`, `--expected-base` from that read. `m`'s dialog is [Merge order](#merge-order) step 5's, plus a choice of `merge_methods_allowed`, preselecting the configured method, when the method is unresolved. A blocked PR gets no merge: the status line shows `not_ready` and the CLI command. Audit: `actor_source: tty`. A veto, an escalation or any refusal shows in the status line. `o` opens only the built `url`; a check's `url` is shown, opened only when `http` or `https`. Forge text renders with Textual markup disabled.
 
@@ -832,7 +836,7 @@ There is no database to migrate. `audit.jsonl` and `log.jsonl` change additively
 - **Draft race.** A draft created in the web UI between forgectl's last list and the publish goes out with it, unneutralized.
 - **Dedupe.** A writer may edit another's comment and keep the author. A partial GitLab publish whose marker landed reports `already_posted`. Two simultaneous runs may both post. A key can be guessed: a process able to post under this account can plant one with other text, and a writer can edit one in. `already_posted` means the key was seen, not that this text is there; `ids` lets a caller read it.
 - **Approving your own push.** Approving a PR you pushed to, under another author, is not detected. A host setting such as GitLab's prevent-approval-by-committers covers it. `self_approval` also misses a token of one configured `me` approving a PR by another account you own.
-- **Keyring under a custom config dir.** Withholding the bus variables closes only a Linux keyring. On macOS `gh` and `glab` are expected to reach the login Keychain without them, so a custom config dir may still yield the stored login there. A directory named only through `XDG_CONFIG_HOME` keeps the bus variables on every platform.
+- **Keyring under a custom config dir.** The unusable bus address closes only a Linux keyring. On macOS `gh` and `glab` are expected to reach the login Keychain without them, so a custom config dir may still yield the stored login there. A directory named only through `XDG_CONFIG_HOME` keeps the bus variables on every platform.
 - **`glab` repeats `Private-Token` on a cross-host redirect of a read.** A declared host redirecting a GET to another host hands that host the token. Only hosts you declare are reachable; gitlab.com's rename redirects stay on the host. `gh` does not do this. The target can then forge reads, including `ci.state` and approvals. A write through a renamed path uses the numeric id, so it reaches the renamed project with no signal.
 - **A `git` earlier on an absolute `PATH` entry** sees the token, because `glab` runs git.
 - **`access` on GitLab.** Members of an invited private group can be invisible, which reads as `false`; this errs in the safe direction. Level 30 or more is an approximation of push rights on protected branches.

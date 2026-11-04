@@ -22,10 +22,11 @@ __all__ = ["build_parser", "main"]
 
 
 class SignalExit(BaseException):
-    """A SIGINT or SIGTERM arrived: exit 128+N with no envelope.
+    """A SIGINT, SIGTERM or SIGHUP arrived: exit 128+N with no envelope.
 
-    TODO(#7): once a write is in flight the gateway turns a signal into `outcome_unknown`
-    instead (the audit record and exit 12), and this applies only before any write.
+    The gateway ends the child's group, removes its private directories and lets this propagate.
+    TODO(#21): once a write was attempted, map this to audit `outcome_unknown` and exit 12
+    instead, so 128+N applies only before any write.
     """
 
     def __init__(self, signum: int) -> None:
@@ -41,7 +42,7 @@ def _raise_signal_exit(signum: int, frame: FrameType | None) -> None:
 def _signals() -> Iterator[None]:
     previous: dict[int, object] = {}
     try:
-        for sig in (signal.SIGINT, signal.SIGTERM):
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):  # SIGHUP as SIGTERM
             previous[sig] = signal.signal(sig, _raise_signal_exit)
     except ValueError:  # not the main thread: leave the host's handlers alone
         pass
