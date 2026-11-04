@@ -636,7 +636,7 @@ def test_environment_is_logged_as_received_not_as_python_rewrote_it(
 
 
 def test_fixed_settings_constants_match_the_interface() -> None:
-    assert FIXED_SETTINGS["GLAB_SEND_TELEMETRY"] == "false" and FIXED_SETTINGS["NO_PROMPT"] == "1"
+    assert FIXED_SETTINGS["GLAB_SEND_TELEMETRY"] == "false" and FIXED_SETTINGS["GLAB_NO_PROMPT"] == "1"
 
 
 # Signals and hangs.
