@@ -49,6 +49,7 @@ HANDLERS: dict[str, Handler] = {}
 HANDLER_MODULES: tuple[str, ...] = (
     "forgectl.exportcmd",
     "forgectl.reads",
+    "forgectl.listing",
     "forgectl.snapshot_reads",  # snapshot, comments, reviews, ci (#12)
 )
 

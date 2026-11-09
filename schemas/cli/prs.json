@@ -13,7 +13,7 @@
     },
     "complete": {
       "type": "boolean",
-      "description": "false if older items were cut, including by GitHub's 1000-result search limit."
+      "description": "false if older items were cut, including by GitHub's 1000-result search limit, if an item was dropped (hidden, a duplicate, or no longer matching the state or draft filter), or if any host asked failed."
     },
     "errors": {
       "type": "array",
