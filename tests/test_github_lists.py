@@ -36,6 +36,7 @@ from .test_github_show import Script, Slept, http
 RECORDINGS = Path(__file__).parent / "recordings" / "github" / "lists"
 TOKEN = "tok-lists-0001-zzzz"
 REPO = RepoRef(host="github.com", backend="github", path="example-org/example-repo")
+ACCESS_REPO = RepoRef(host="github.com", backend="github", path="user-5/example-repo")
 
 
 def recording(name: str = "search-open") -> dict[str, Any]:
@@ -86,7 +87,7 @@ class Harness:
         kwargs.setdefault("host", "github.com")
         return self.backend.list_prs(PrQuery(**kwargs))
 
-    def access(self, user: str = "user-1", repo: RepoRef = REPO) -> AccessResult:
+    def access(self, user: str = "user-1", repo: RepoRef = ACCESS_REPO) -> AccessResult:
         return self.backend.access(repo, user)
 
 
@@ -655,8 +656,8 @@ def test_access_reads_the_repo_first_then_the_permission(make: Callable[..., Har
     harness = make(repo_doc(), permission())
     harness.access()
     first, second = harness.script.argvs
-    assert first[-1] == "repos/example-org/example-repo"
-    assert second[-1] == "repos/example-org/example-repo/collaborators/user-1/permission"
+    assert first[-1] == "repos/user-5/example-repo"
+    assert second[-1] == "repos/user-5/example-repo/collaborators/user-1/permission"
     assert "GET" in first and "GET" in second
 
 
@@ -687,7 +688,7 @@ def test_the_permission_decides_write_access_and_the_role_the_level(
     result = make(repo_doc(), doc).access()
     assert (result.write_access, result.level) == (write, level)
     assert result.reason is None and result.source == "collaborator_permission"
-    assert result.repo == "github.com/example-org/example-repo"
+    assert result.repo == "github.com/user-5/example-repo"
 
 
 def test_a_role_that_claims_more_than_the_permission_does_not_grant_write(
@@ -737,20 +738,18 @@ def test_a_bot_login_is_percent_encoded_in_the_path(make: Callable[..., Harness]
 
 def test_the_repo_answer_must_be_this_hosts_own(make: Callable[..., Harness]) -> None:
     doc = repo_doc()
-    doc["html_url"] = "https://evil.example.test/example-org/example-repo"
+    doc["html_url"] = "https://evil.example.test/user-5/example-repo"
     assert failure(make(doc), lambda h: h.access()).code == "wrong_host_response"
 
 
 def test_a_renamed_repo_uses_the_canonical_path(make: Callable[..., Harness]) -> None:
     doc = repo_doc()
-    doc["full_name"] = "example-org/renamed"
-    doc["html_url"] = "https://github.com/example-org/renamed"
+    doc["full_name"] = "user-5/renamed"
+    doc["html_url"] = "https://github.com/user-5/renamed"
     harness = make(doc, permission())
     result = harness.access()
-    assert (
-        harness.script.argvs[1][-1] == "repos/example-org/renamed/collaborators/user-1/permission"
-    )
-    assert result.repo == "github.com/example-org/renamed"
+    assert harness.script.argvs[1][-1] == "repos/user-5/renamed/collaborators/user-1/permission"
+    assert result.repo == "github.com/user-5/renamed"
 
 
 @pytest.mark.parametrize(

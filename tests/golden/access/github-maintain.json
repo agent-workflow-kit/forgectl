@@ -1,7 +1,7 @@
 {
   "level": "maintain",
   "reason": null,
-  "repo": "github.com/example-org/example-repo",
+  "repo": "github.com/user-5/example-repo",
   "source": "collaborator_permission",
   "user": "user-1",
   "write_access": true

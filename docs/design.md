@@ -158,6 +158,8 @@ Each has a conservative default in place.
 | Group-inherited and invited GitLab membership; a blocked member (from docs, not observed) | `members/all`; `null` on 401 or 403; anything but `state: active` is false |
 | Tokens without `read:org`, and the type of the GraphQL error they get | `teams_visible: false`; a differently typed error fails the read |
 | Self-approval with required approvals on a paid GitLab tier | `self_approval` applies regardless |
+| GitHub `prs` search (#14): `is:closed is:unmerged`, `user-review-requested:` and `draft:` qualifiers; `author:app/name` finding a bot's PRs; `updated:>=` with a UTC time; `issueCount` above 1000 with the cap; `rateLimit` in the search query; a search that returns a GraphQL error under SAML enforcement | a returned item that does not match the state, draft or time asked for is `upstream_error`; GraphQL errors fail the read; `issueCount` above what was listed is `complete: false` |
+| GitHub `access` (#14): `role_name` values and the legacy `permission` value of a custom role; a bot's `collaborators/x[bot]/permission` | the legacy `permission` decides; a role is used for `level` only when it fits that permission; a 404 for a bot login is null with `no_permission_to_read` |
 | A second `APPROVE` by one account at one head on GitHub | the `POST` is sent; a refusal is `host_rejected` with nothing lost |
 | `PUT /discussions/:id` status, `DELETE /draft_notes/:id` status | a 2xx with no proof is `outcome_unknown` |
 | A non-writer's approval on GitHub with a second account; which accounts `approved_by` holds on a paid GitLab tier; one account with both `approved_by` and `requested_changes` | not counted without `can_push: true` |
