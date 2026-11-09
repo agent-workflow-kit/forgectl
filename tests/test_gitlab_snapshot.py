@@ -141,20 +141,20 @@ def test_the_output_carries_no_token_and_no_unknown_keys(rig: Rig) -> None:
 @pytest.mark.parametrize(
     ("body", "logins"),
     [
-        ("requested review from @a", ("a",)),
-        ("requested review from @a and @b", ("a", "b")),
-        ("requested review from @a, @b and @c", ("a", "b", "c")),
-        ("requested review from @a, @b, and @c", ("a", "b", "c")),
-        ("requested review from @a, @b and removed approval", ("a", "b")),
-        ("requested review from @a and removed review request for @b", ("a",)),
-        ("requested review from @a.b-c_d", ("a.b-c_d",)),
-        ("requested review from @a!x", ()),
+        ("requested review from @user-4", ("user-4",)),
+        ("requested review from @user-4 and @user-5", ("user-4", "user-5")),
+        ("requested review from @user-4, @user-5 and @user-6", ("user-4", "user-5", "user-6")),
+        ("requested review from @user-4, @user-5, and @user-6", ("user-4", "user-5", "user-6")),
+        ("requested review from @user-4, @user-5 and removed approval", ("user-4", "user-5")),
+        ("requested review from @user-4 and removed review request for @user-5", ("user-4",)),
+        ("requested review from @user-8.x_y", ("user-8.x_y",)),
+        ("requested review from @user-4!x", ()),
         ("requested review from @", ()),
         ("requested review from a", ()),
-        ("Requested review from @a", ()),
-        (" requested review from @a", ()),
-        ("removed review request for @a", ()),
-        ("asked @a to review; requested review from @b", ()),
+        ("Requested review from @user-4", ()),
+        (" requested review from @user-4", ()),
+        ("removed review request for @user-4", ()),
+        ("asked @user-4 to review; requested review from @user-5", ()),
         ("", ()),
     ],
 )
@@ -163,7 +163,7 @@ def test_requested_note_parsing(body: str, logins: tuple[str, ...]) -> None:
 
 
 def test_a_huge_note_is_cut_and_parsed_without_blowing_up() -> None:
-    body = "requested review from " + ", ".join(f"@u{i}" for i in range(5000))
+    body = "requested review from " + ", ".join(f"@user-{i}" for i in range(5000))
     assert len(gs.parse_requested(body)) <= 200
 
 
@@ -254,7 +254,7 @@ def test_the_names_in_a_note_match_whole_and_ignoring_ascii_case(
         [
             [
                 request_note(
-                    7, "requested review from @USER-2 and @user-30", "2026-10-02T10:00:00.000Z"
+                    7, "requested review from @" + "USER-2 and @user-30", "2026-10-02T10:00:00.000Z"
                 )
             ]
         ],
