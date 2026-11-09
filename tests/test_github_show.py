@@ -1667,10 +1667,22 @@ def test_a_checks_read_for_another_repository_fails_the_read(
     assert error.code in ("upstream_error", "wrong_host_response")
 
 
-def test_a_cut_detail_never_ends_in_a_broken_marker(make: Callable[..., Harness]) -> None:
-    status = "x" * 97 + "‮" + "y" * 50  # the marker starts at code point 97
+@pytest.mark.parametrize(
+    ("start", "expected"),
+    [
+        (97, "x" * 97),  # the cut lands after the marker's "+"
+        (98, "x" * 98),  # the cut lands after "<U"
+        (99, "x" * 99),  # the cut lands after "<"
+        (92, "x" * 92 + "<U+202E>"),  # the marker ends exactly at the limit: kept whole
+    ],
+    ids=["after-plus", "after-U", "after-angle", "ends-at-limit"],
+)
+def test_a_cut_detail_never_ends_in_a_broken_marker(
+    make: Callable[..., Harness], start: int, expected: str
+) -> None:
+    status = "x" * start + "‮" + "y" * 50
     ((_, detail),) = codes(run(make, with_status(status)))
-    assert detail == "x" * 97
+    assert detail == expected
 
 
 def test_a_closed_pr_with_a_stale_auto_merge_request_is_not_armed(
