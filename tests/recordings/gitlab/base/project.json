@@ -1,0 +1,12 @@
+{
+  "default_branch": "main",
+  "id": 101,
+  "merge_method": "merge",
+  "merge_trains_enabled": false,
+  "name": "proj",
+  "only_allow_merge_if_pipeline_succeeds": false,
+  "path": "proj",
+  "path_with_namespace": "user-9/proj",
+  "squash_option": "default_off",
+  "web_url": "https://gitlab.com/user-9/proj"
+}
