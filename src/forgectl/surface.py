@@ -12,7 +12,6 @@ import argparse
 import math
 import re
 import sys
-import unicodedata
 from argparse import Namespace
 from contextvars import ContextVar
 from datetime import datetime
@@ -21,6 +20,15 @@ from typing import Any, NoReturn
 from . import __version__
 from .errors import usage
 from .humanactions import ACTOR_RE, DECISION_ID_RE
+from .identifiers import (
+    parse_branch,
+    parse_host,
+    parse_login,
+    parse_pr,
+    parse_repo,
+    parse_sha,
+    parse_typed_id,
+)
 
 PROG = "forgectl"
 DESCRIPTION = "Normalized access to pull/merge requests across GitHub and GitLab."
@@ -48,11 +56,8 @@ _RFC3339_RE = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})",
     re.ASCII,
 )
-_SHA_RE = re.compile(r"[0-9a-fA-F]{40}", re.ASCII)
 _DEDUPE_KEY_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}", re.ASCII)
 _LIMIT_RE = re.compile(r"[0-9]{1,4}", re.ASCII)
-_BRANCH_FORBIDDEN_CHARS = frozenset(" ~^:?*[\\\x7f")
-_BRANCH_FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 # The longest duration accepted, so that `now - duration` can never overflow: 100 years.
 _MAX_DURATION_SECONDS = 100 * 365 * 86400.0
 
@@ -94,35 +99,12 @@ def time_or_duration(value: str) -> str:
 
 def sha(value: str) -> str:
     """A full 40-hex commit sha; uppercase is lowered."""
-    if not _SHA_RE.fullmatch(value):
-        _bad(f"not a full 40-hex sha: {value!r}")
-    return value.lower()
-
-
-def _valid_branch(name: str) -> bool:
-    """`git check-ref-format --branch` rules, self-contained (no subprocess)."""
-    if not name or name in ("@", "HEAD") or name[0] in "-/" or name[-1] in "/.":
-        return False
-    if ".." in name or "@{" in name or "//" in name:
-        return False
-    for ch in name:
-        if (
-            ch in _BRANCH_FORBIDDEN_CHARS
-            or unicodedata.category(ch) in _BRANCH_FORBIDDEN_CATEGORIES
-        ):
-            return False
-    return not any(part.startswith(".") or part.endswith(".lock") for part in name.split("/"))
+    return parse_sha(value)
 
 
 def branch(value: str) -> str:
-    """A branch name: the `check-ref-format` rules, plus no control, format, surrogate or
-    line-separator characters (so U+0085 and bidi marks are out too).
-
-    TODO(#5): replace with the full parser in `identifiers.py` (refspecs, `refs/heads/` forms).
-    """
-    if not _valid_branch(value):
-        _bad(f"not a valid branch name: {value!r}")
-    return value
+    """A branch name under the `check-ref-format` rules (see ``identifiers.parse_branch``)."""
+    return parse_branch(value)
 
 
 def actor(value: str) -> str:
@@ -249,6 +231,13 @@ class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
         raise usage(message)
 
+    def _get_option_tuples(self, option_string: str) -> list[Any]:
+        """No prefix matching of options. ``allow_abbrev=False`` stops it only for ``--long``
+        options; a single-dash argument such as ``-https://...`` would still match ``-h`` as a
+        short-option cluster and print help. Only an exact option string (or ``--opt=value``,
+        which argparse resolves before it gets here) is an option."""
+        return []
+
     def _print_message(self, message: str, file: Any = None) -> None:
         """Print help and version text through the stream-safe writer, so a full or closed
         stdout cannot change the exit code or fail at shutdown."""
@@ -328,8 +317,8 @@ def _expected(parser: argparse.ArgumentParser) -> None:
 
 
 def _pr(parser: argparse.ArgumentParser) -> None:
-    # TODO(#5): parse and normalize the reference (`invalid_pr`, `unknown_host`).
-    parser.add_argument("pr", type=nonempty, help="URL, or host/<project path>#N")
+    # Grammar only; the closed host list is checked once the config is loaded (`bind_args`).
+    parser.add_argument("pr", type=parse_pr, help="URL, or host/<project path>#N")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -346,12 +335,15 @@ def build_parser() -> argparse.ArgumentParser:
         return sub
 
     p = add("prs", "list pull requests")
-    # TODO(#5): `--repo`, `--host`, `--author` and `--review-requested-from` grammars.
-    _once(p, "--repo", type=nonempty, metavar="ID")
-    _once(p, "--host", type=nonempty, metavar="HOST")
-    _once(p, "--author", type=nonempty, metavar="me|USER")
+    _once(p, "--repo", type=parse_repo, metavar="ID")
+    _once(p, "--host", type=parse_host, metavar="HOST")
+    _once(p, "--author", type=parse_login, metavar="me|USER")
     _once(
-        p, "--review-requested-from", dest="review_requested_from", type=nonempty, metavar="me|USER"
+        p,
+        "--review-requested-from",
+        dest="review_requested_from",
+        type=parse_login,
+        metavar="me|USER",
     )
     _once(p, "--state", choices=["open", "closed", "merged", "all"], default="open")
     draft = p.add_mutually_exclusive_group()
@@ -377,11 +369,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--to", dest="to_sha", type=sha, required=True, action=_Once, metavar="SHA")
 
     p = add("access", "whether a user has write access to a repo")
-    p.add_argument("repo", type=nonempty)  # TODO(#5): repo id grammar
-    p.add_argument("user", type=nonempty)  # TODO(#5): login grammar
+    p.add_argument("repo", type=parse_repo)
+    p.add_argument("user", type=parse_login)
 
     p = add("whoami", "who forgectl acts as on each host")
-    _once(p, "--host", type=nonempty, metavar="HOST")
+    _once(p, "--host", type=parse_host, metavar="HOST")
 
     p = add("merge", "merge a PR")
     _pr(p)
@@ -417,8 +409,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("reply", "reply to a comment, thread or review")
     _pr(p)
-    # TODO(#5): typed comment and thread id grammar.
-    _once(p, "--to", type=nonempty, required=True, metavar="ID", default=argparse.SUPPRESS)
+    _once(p, "--to", type=parse_typed_id, required=True, metavar="ID", default=argparse.SUPPRESS)
     _once(
         p,
         "--body-file",
@@ -434,8 +425,14 @@ def build_parser() -> argparse.ArgumentParser:
     for name, summary in (("resolve", "resolve a review thread"), ("unresolve", "reopen a thread")):
         p = add(name, summary)
         _pr(p)
-        # TODO(#5): typed thread id grammar.
-        _once(p, "--thread", type=nonempty, required=True, metavar="ID", default=argparse.SUPPRESS)
+        _once(
+            p,
+            "--thread",
+            type=parse_typed_id,
+            required=True,
+            metavar="ID",
+            default=argparse.SUPPRESS,
+        )
         _writes(p)
 
     p = add("approve", "approve a PR")

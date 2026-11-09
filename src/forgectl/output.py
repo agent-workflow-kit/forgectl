@@ -47,9 +47,9 @@ def would_refuse_result(command: str, args: Namespace, err: ForgectlError) -> di
     Fields the refusal came too early to know are null. A handler fills in what it did read
     through ``err.plan`` (the plan) and ``err.fields`` (the other output fields).
     """
-    # TODO(#5): `pr` is the normalized `host/path#N` form once identifiers.py parses it. Until
-    # then it is raw argv text, so it is sanitized like every other echoed input.
-    pr = sanitize_line(args.pr)
+    # `pr` and the thread id are parsed values; their text is the normalized form. It is
+    # sanitized anyway, like every other echoed input.
+    pr = sanitize_line(str(args.pr))
     refusal = {
         "reason": err.reason,
         "message": sanitize_text(err.message),
@@ -60,7 +60,7 @@ def would_refuse_result(command: str, args: Namespace, err: ForgectlError) -> di
         result = {
             "pr": pr,
             "action": command,
-            "thread_id": sanitize_line(args.thread),
+            "thread_id": sanitize_line(str(args.thread)),
             "resolved": None,
             "dry_run": True,
             "would_refuse": refusal,

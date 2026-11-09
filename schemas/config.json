@@ -22,7 +22,7 @@
             "string",
             "null"
           ],
-          "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254})$",
+          "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_]|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,253}[A-Za-z0-9_-])$",
           "default": null,
           "description": "Your login; null: the authenticated user."
         },
@@ -31,7 +31,7 @@
             "string",
             "null"
           ],
-          "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254})$",
+          "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_]|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,253}[A-Za-z0-9_-])$",
           "default": null,
           "description": "Your login; null: the authenticated user."
         }
@@ -106,7 +106,7 @@
                 "string",
                 "null"
               ],
-              "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254})$",
+              "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_]|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,253}[A-Za-z0-9_-])$",
               "default": null,
               "description": "Your login on this host."
             }
@@ -151,7 +151,7 @@
                 "string",
                 "null"
               ],
-              "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254})$",
+              "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_]|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,253}[A-Za-z0-9_-])$",
               "default": null,
               "description": "Your login on this host."
             }
@@ -161,7 +161,7 @@
         }
       },
       "patternProperties": {
-        "^(?!(?:github\\.com|gitlab\\.com)$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?$": {
+        "^(?!(?:github\\.com|gitlab\\.com)$)(?=[a-z0-9.-]{1,253}(?![a-z0-9.-]))[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*(?::[0-9]{1,5})?$": {
           "type": "object",
           "properties": {
             "backend": {
@@ -197,7 +197,7 @@
                 "string",
                 "null"
               ],
-              "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254})$",
+              "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_]|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,253}[A-Za-z0-9_-])$",
               "default": null,
               "description": "Your login on this host."
             },
@@ -206,7 +206,7 @@
                 "string",
                 "null"
               ],
-              "pattern": "^(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+$",
+              "pattern": "^(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]{1,64}){1,8}$",
               "default": null,
               "description": "GitLab under a path, such as /gitlab."
             }
@@ -245,7 +245,7 @@
       "default": {},
       "description": "Per-repo overrides hold only merge_method in v1: no setting lowers a safety rule.",
       "patternProperties": {
-        "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+$": {
+        "^(?=[a-z0-9.-]{1,253}(?![a-z0-9.-]))[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+$": {
           "type": "object",
           "properties": {
             "merge_method": {

@@ -26,8 +26,6 @@ from typing import Any, Literal
 from . import jsonlog
 from .errors import ForgectlError
 from .jsonlog import PATTERNS, JsonlError, matches, parse_ts
-
-# The one import point for sanitization.
 from .sanitize import sanitize_line, sanitize_text
 
 __all__ = [

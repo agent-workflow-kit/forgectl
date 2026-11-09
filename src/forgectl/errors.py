@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .sanitize import sanitize_text
+from .sanitize import sanitize_line, sanitize_text
 
 EXIT_BY_CODE: dict[str, int] = {
     "internal": 1,
@@ -95,15 +95,19 @@ def truncate_utf8(text: str, limit: int) -> str:
     return data[:limit].decode("utf-8", errors="ignore")
 
 
-# TODO(#10): apply sanitize_line to fields marked x-one-line in schemas/ (sanitize_tree applies
-# sanitize_text to every string value and does not touch dict keys)
 def sanitize_tree(value: Any) -> Any:
+    """Sanitize every string value as text and every string key as one line (a key must not
+    start a line of its own either). The `x-one-line` fields of a forge's own data are sanitized
+    where that data is normalized (`backends/`), by field, not here."""
     if isinstance(value, str):
         return sanitize_text(value)
     if isinstance(value, list):
         return [sanitize_tree(v) for v in value]
     if isinstance(value, dict):
-        return {k: sanitize_tree(v) for k, v in value.items()}
+        return {
+            (sanitize_line(k) if isinstance(k, str) else k): sanitize_tree(v)
+            for k, v in value.items()
+        }
     return value
 
 

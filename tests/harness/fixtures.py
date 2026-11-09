@@ -246,13 +246,7 @@ def isolation(
     for name in ("posix_spawn", "posix_spawnp", "execve"):
         if hasattr(os, name):
             monkeypatch.setattr(os, name, wrap_spawn(getattr(os, name)))
-    # Files tests create by hand must not depend on the caller's umask: the audit and log files
-    # are refused when group- or world-writable.
-    previous_umask = os.umask(0o077)
-    try:
-        yield iso
-    finally:
-        os.umask(previous_umask)
+    yield iso
 
 
 @pytest.fixture

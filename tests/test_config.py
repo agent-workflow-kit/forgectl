@@ -618,6 +618,9 @@ INVALID: dict[str, tuple[str, str]] = {
     "me.name unicode": ("me: {name: 'jos\u00e9'}\n", "me.name"),
     "me.github slash": ("me: {github: 'a/b'}\n", "me.github"),
     "me.gitlab empty": ("me: {gitlab: ''}\n", "me.gitlab"),
+    "me.gitlab dotdot": ("me: {gitlab: '..'}\n", "me.gitlab"),
+    "me.gitlab dot": ("me: {gitlab: '.'}\n", "me.gitlab"),
+    "me.gitlab trailing dot": ("me: {gitlab: 'a.'}\n", "me.gitlab"),
     "gh_bin relative path": ("gh_bin: bin/gh\n", "gh_bin"),
     "gh_bin empty": ("gh_bin: ''\n", "gh_bin"),
     "gh_bin newline": ('gh_bin: "gh\\n"\n', "gh_bin"),
@@ -674,10 +677,34 @@ INVALID: dict[str, tuple[str, str]] = {
         HOST + "    backend: gitlab\n    api_prefix: '/a?b=1'\n",
         "hosts.h.example.com.api_prefix",
     ),
+    "api_prefix tilde": (
+        HOST + "    backend: gitlab\n    api_prefix: '/~a'\n",
+        "hosts.h.example.com.api_prefix",
+    ),
+    "api_prefix segment of 65": (
+        HOST + "    backend: gitlab\n    api_prefix: '/" + "a" * 65 + "'\n",
+        "hosts.h.example.com.api_prefix",
+    ),
+    "api_prefix nine segments": (
+        HOST + "    backend: gitlab\n    api_prefix: '/a/b/c/d/e/f/g/h/i'\n",
+        "hosts.h.example.com.api_prefix",
+    ),
+    "host label of 64": (
+        "hosts:\n  " + "a" * 64 + ".example.com: {backend: gitlab}\n",
+        "hosts." + "a" * 64 + ".example.com",
+    ),
+    "host name of 254": (
+        "hosts:\n  " + ".".join(["a" * 50] * 5) + ": {backend: gitlab}\n",
+        "hosts." + ".".join(["a" * 50] * 5),
+    ),
+    "github host with a port": (
+        "hosts:\n  h.example.com:8443: {backend: github}\n",
+        "hosts.h.example.com:8443",
+    ),
     "host name uppercase": ("hosts:\n  H.Example.com: {backend: gitlab}\n", "hosts.H.Example.com"),
     "host name with userinfo": (
-        "hosts:\n  'user@example.test': {backend: gitlab}\n",
-        "hosts.user@example.test",
+        "hosts:\n  'u@h.example.test': {backend: gitlab}\n",
+        "hosts.u@h.example.test",
     ),
     "host name with a path": ("hosts:\n  b.com/x: {backend: gitlab}\n", "hosts.b.com/x"),
     "host name uppercase builtin": (
@@ -721,6 +748,18 @@ INVALID: dict[str, tuple[str, str]] = {
         HOST + "    backend: gitlab\n    me: 'a b'\n",
         "hosts.h.example.com.me",
     ),
+    "host me dotdot": (
+        HOST + "    backend: gitlab\n    me: '..'\n",
+        "hosts.h.example.com.me",
+    ),
+    "host me dot": (
+        HOST + "    backend: gitlab\n    me: '.'\n",
+        "hosts.h.example.com.me",
+    ),
+    "host me trailing dot": (
+        HOST + "    backend: gitlab\n    me: 'a.'\n",
+        "hosts.h.example.com.me",
+    ),
     "repo bad method": (
         "repos:\n  h.example.com/a/b: {merge_method: fast-forward}\n",
         "repos.h.example.com/a/b.merge_method",
@@ -730,6 +769,45 @@ INVALID: dict[str, tuple[str, str]] = {
         "repos.h.example.com/a/b.merge_method",
     ),
     "repo key without a path": ("repos:\n  h.example.com: {}\n", "repos.h.example.com"),
+    # a host key is in the normalized form input produces, or it could never be matched
+    "host key with :443": (
+        "hosts:\n  h.example.com:443: {backend: gitlab}\n",
+        "hosts.h.example.com:443",
+    ),
+    "host key leading-zero port": (
+        "hosts:\n  h.example.com:08443: {backend: gitlab}\n",
+        "hosts.h.example.com:08443",
+    ),
+    "host key port zero": (
+        "hosts:\n  h.example.com:0: {backend: gitlab}\n",
+        "hosts.h.example.com:0",
+    ),
+    "host key port too big": (
+        "hosts:\n  h.example.com:65536: {backend: gitlab}\n",
+        "hosts.h.example.com:65536",
+    ),
+    "host key www built-in": (
+        "hosts:\n  www.github.com: {backend: github}\n",
+        "hosts.www.github.com",
+    ),
+    "host key www built-in with port": (
+        "hosts:\n  www.gitlab.com:8443: {backend: gitlab}\n",
+        "hosts.www.gitlab.com:8443",
+    ),
+    "repo key host with :443": (
+        "repos:\n  h.example.com:443/a/b: {}\n",
+        "repos.h.example.com:443/a/b",
+    ),
+    "repo key host leading-zero port": (
+        "repos:\n  h.example.com:065/a/b: {}\n",
+        "repos.h.example.com:065/a/b",
+    ),
+    "repo key host port zero": ("repos:\n  h.example.com:0/a/b: {}\n", "repos.h.example.com:0/a/b"),
+    "repo key host port too big": (
+        "repos:\n  h.example.com:99999/a/b: {}\n",
+        "repos.h.example.com:99999/a/b",
+    ),
+    "repo key www built-in": ("repos:\n  www.github.com/o/r: {}\n", "repos.www.github.com/o/r"),
     "repo key dotdot": ("repos:\n  h.example.com/a/..: {}\n", "repos.h.example.com/a/.."),
     "repo key uppercase host": ("repos:\n  H.com/a/b: {}\n", "repos.H.com/a/b"),
     "repo key scheme": ("repos:\n  https://h.com/a/b: {}\n", "repos.https://h.com/a/b"),
@@ -775,6 +853,56 @@ INVALID: dict[str, tuple[str, str]] = {
     "hook entry a string": ("hooks:\n  pre-merge:\n    - just-a-string\n", "hooks.pre-merge.0"),
     "hook list a map": ("hooks:\n  pre-merge: {cmd: x}\n", "hooks.pre-merge"),
     "hooks a list": ("hooks: [a]\n", "hooks"),
+    # each login under its own backend's grammar, before any process (the schema has the union)
+    "me.github with a GitLab-only dot": ("me: {github: 'dot.name'}\n", "me.github"),
+    "me.gitlab with a bot suffix": ("me: {gitlab: 'octo[bot]'}\n", "me.gitlab"),
+    "built-in host me under its backend": (
+        "hosts:\n  github.com: {me: 'dot.name'}\n",
+        "hosts.github.com.me",
+    ),
+    "declared host me under its backend": (
+        HOST + "    backend: gitlab\n    me: 'octo[bot]'\n",
+        "hosts.h.example.com.me",
+    ),
+    # token_command's program: a bare name or an absolute path, as for gh_bin
+    "token_command relative program": (
+        HOST + "    backend: gitlab\n    token_command: [bin/tool, x]\n",
+        "hosts.h.example.com.token_command",
+    ),
+    "token_command dot-slash program": (
+        HOST + "    backend: gitlab\n    token_command: [./tool]\n",
+        "hosts.h.example.com.token_command",
+    ),
+    "token_command dotdot program": (
+        "hosts:\n  github.com: {token_command: ['..']}\n",
+        "hosts.github.com.token_command",
+    ),
+    # token_env never names a variable the gateway sets or passes to a child
+    "token_env PATH": (
+        "hosts:\n  github.com: {token_env: PATH}\n",
+        "hosts.github.com.token_env",
+    ),
+    "token_env HTTPS_PROXY": (
+        HOST + "    backend: gitlab\n    token_env: HTTPS_PROXY\n",
+        "hosts.h.example.com.token_env",
+    ),
+    "token_env GH_CONFIG_DIR": (
+        "hosts:\n  github.com: {token_env: GH_CONFIG_DIR}\n",
+        "hosts.github.com.token_env",
+    ),
+    # GitHub hosts gh rewrites to another host
+    "github host under github.com": (
+        "hosts:\n  api.github.com: {backend: github}\n",
+        "hosts.api.github.com",
+    ),
+    "github host github.localhost": (
+        "hosts:\n  github.localhost: {backend: github}\n",
+        "hosts.github.localhost",
+    ),
+    "github host under github.localhost": (
+        "hosts:\n  x.github.localhost: {backend: github}\n",
+        "hosts.x.github.localhost",
+    ),
 }
 
 
@@ -802,6 +930,9 @@ VALID: dict[str, str] = {
         "hosts:\n  gitlab.com: {token_command: [tool, '{host}']}\n"
     ),
     "declared with port": "hosts:\n  git.example.com:8443: {backend: gitlab, api_prefix: /gl}\n",
+    "declared with the highest port": "hosts:\n  git.example.com:65535: {backend: gitlab}\n",
+    "repo key with a port": "repos:\n  git.example.com:8443/a/b: {}\n",
+    "repo key on a www host that is not built in": "repos:\n  www.example.com/a/b: {}\n",
     "declared nested prefix": (
         "hosts:\n  git.example.com: {backend: gitlab, api_prefix: /a/b.c_d-e}\n"
     ),
@@ -814,7 +945,35 @@ VALID: dict[str, str] = {
     "hook defaults": "hooks:\n  pre-merge:\n    - cmd: x\n",
     "post hook async": "hooks:\n  post-post:\n    - cmd: x\n      async: true\n      timeout: 5s\n",
     "empty hook lists": "hooks:\n  pre-merge: []\n  post-merge: []\n",
+    "token_env naming an ambient token variable": "hosts:\n  github.com: {token_env: GH_TOKEN}\n",
+    "token_command absolute program": "hosts:\n  gitlab.com: {token_command: [/usr/bin/tool]}\n",
+    "gitlab host under github.com": "hosts:\n  git.github.com: {backend: gitlab}\n",
+    "github host on another domain": "hosts:\n  github.example.com: {backend: github}\n",
 }
+
+
+def test_token_env_refuses_every_variable_the_gateway_gives_a_child(tmp_path: Path) -> None:
+    """The refused names come from the gateway's own lists; this keeps the literals in step."""
+    from forgectl import gateway as gw
+    from forgectl.config import child_variables
+
+    names = ["PATH", "HOME", "TMPDIR", "GH_CONFIG_DIR", "GLAB_CONFIG_DIR", "XDG_CONFIG_HOME"]
+    names += [*gw._PASSTHROUGH, *gw._BUS_VARIABLES]  # pyright: ignore[reportPrivateUsage]
+    source = {name: str(tmp_path) for name in names} | {"PATH": "/usr/bin"}
+    dirs = gw.PrivateDirs(root=str(tmp_path), cwd=str(tmp_path), config=str(tmp_path))
+    seen: set[str] = set()
+    for backend in ("github", "gitlab", None):
+        targets: list[gw.Target | None] = [None]
+        if backend is not None:
+            host = "ghe.example.test" if backend == "github" else "git.example.test"
+            targets += [gw.Target(backend, host), gw.Target(backend, host, token="t-1")]
+        for target in targets:
+            for drop in [None, "GH_CONFIG_DIR", "GLAB_CONFIG_DIR"]:
+                env = {k: v for k, v in source.items() if k != drop}
+                seen |= set(gw.build_environment(env, dirs=dirs, backend=backend, target=target))
+    given = seen - set(gw.TOKEN_VARIABLES)
+    assert given <= child_variables(), sorted(given - child_variables())
+    assert not child_variables() & set(gw.TOKEN_VARIABLES)  # naming an ambient token is allowed
 
 
 @pytest.mark.parametrize("text", VALID.values(), ids=VALID.keys())
@@ -903,6 +1062,31 @@ STRICTER_THAN_SCHEMA = {
     "timeout huge float",
     "timeout huge numeric string",
     "repo keys differing only by case",
+    "github host with a port",  # the key decides, which a schema cannot see
+    "host key with :443",  # a host key that input normalization could never produce
+    "host key leading-zero port",
+    "host key port zero",
+    "host key port too big",
+    "host key www built-in",
+    "host key www built-in with port",
+    "repo key host with :443",
+    "repo key host leading-zero port",
+    "repo key host port zero",
+    "repo key host port too big",
+    "repo key www built-in",
+    "me.github with a GitLab-only dot",  # each login under its own backend's grammar
+    "me.gitlab with a bot suffix",
+    "built-in host me under its backend",
+    "declared host me under its backend",
+    "token_command relative program",  # a bare name or an absolute path
+    "token_command dot-slash program",
+    "token_command dotdot program",
+    "token_env PATH",  # a variable the gateway sets or passes to a child
+    "token_env HTTPS_PROXY",
+    "token_env GH_CONFIG_DIR",
+    "github host under github.com",  # gh rewrites these hosts
+    "github host github.localhost",
+    "github host under github.localhost",
 }
 
 # Refused by both under ECMA-262, whose `$` does not match before a final newline; the Python
