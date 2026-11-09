@@ -19,7 +19,7 @@ Everything the host says is untrusted and is checked or sanitized here, as in ``
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Any, Literal
 
@@ -42,6 +42,7 @@ from .github import (
     _obj,
     _opt_bool,
     _opt_obj,
+    _Pages,
     _project,
     _req_sha,
     _req_ts,
@@ -183,10 +184,6 @@ def _host_of(query: m.PrQuery) -> str:
     return host
 
 
-def _graphql(env: ReadEnv, target: Target, query: str, variables: Mapping[str, Any]) -> Any:
-    return dict(env.call(lambda: env.gateway.graphql(target, query, variables)).data)
-
-
 def _page_info(search: dict[str, Any]) -> tuple[bool, str | None]:
     info = _obj(search.get("pageInfo"), "the search page")
     more = info.get("hasNextPage")
@@ -221,7 +218,8 @@ def _keep(item: m.PrListItem, query: m.PrQuery, floor: datetime | None) -> None:
         raise Malformed("an item older than the time asked for")
 
 
-def _item(env: ReadEnv, target: Target, node: dict[str, Any]) -> m.PrListItem:
+def _item(env: ReadEnv, target: Target, node: dict[str, Any], *, more: bool) -> m.PrListItem:
+    """One search result; ``more: False`` checks it without reading further label pages."""
     from .github import GitHubBackend  # the label paging of `show`, not written twice
 
     number = node.get("number")
@@ -243,7 +241,8 @@ def _item(env: ReadEnv, target: Target, node: dict[str, Any]) -> m.PrListItem:
         raise Malformed("the draft flag")
     head_repo = _opt_obj(node.get("headRepository"), "the head repository")
     head_path = None if head_repo is None else _project(head_repo.get("nameWithOwner"), "head")
-    labels = GitHubBackend(env)._labels(target, node_id, {"labels": node.get("labels")})
+    pages = _Pages(target, node_id, number, project, more)
+    labels = GitHubBackend(env)._labels(pages, {"labels": node.get("labels")})
     author = (parse_actor(node.get("author")) or Actor(None, None, None)).author()
     return m.PrListItem(
         pr=f"{target.host}/{project}#{number}",
@@ -290,6 +289,56 @@ def list_prs(env: ReadEnv, query: m.PrQuery) -> m.PrPage:
     )
 
 
+def _count(block: dict[str, Any]) -> int:
+    count = block.get("issueCount")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise Malformed("the match count")
+    return count
+
+
+def _results(block: dict[str, Any], first: int) -> list[dict[str, Any] | None]:
+    """The page's pull requests in order; None for a result that is not one (or is hidden)."""
+    nodes = _list(block.get("nodes"), "the search results")
+    if len(nodes) > first:
+        raise Malformed("more results than asked for")
+    results: list[dict[str, Any] | None] = []
+    for raw in nodes:
+        if raw is None or raw == {}:
+            results.append(None)
+            continue
+        node = _obj(raw, "a result")
+        results.append(None if node.get("__typename") not in (None, "PullRequest") else node)
+    return results
+
+
+def _search_page(
+    env: ReadEnv,
+    target: Target,
+    query: m.PrQuery,
+    floor: datetime | None,
+    search: str,
+    first: int,
+    after: str | None,
+) -> dict[str, Any]:
+    """One search page, its shape checked inside the retried call (as ``show`` does), so an
+    answer that is not the documented shape is retried like a 5xx. Label pages past the first
+    are read afterwards, each with its own retries."""
+    from .github import GitHubBackend  # the retried, checked GraphQL call of `show`
+
+    def check(data: dict[str, Any]) -> dict[str, Any]:
+        _rate(data)
+        block = _obj(data.get("search"), "the search")
+        _count(block)
+        for node in _results(block, first):
+            if node is not None:
+                _keep(_item(env, target, node, more=False), query, floor)
+        _page_info(block)
+        return data
+
+    variables = {"q": search, "first": first, "after": after}
+    return GitHubBackend(env)._graphql(target, PRS_QUERY, variables, check)
+
+
 def _read_pages(
     env: ReadEnv,
     target: Target,
@@ -307,27 +356,17 @@ def _read_pages(
     rate: tuple[int | None, str | None] = (None, None)
     for _page in range(MAX_SEARCH_PAGES):
         first = min(PAGE_SIZE, need - len(items))
-        data = _graphql(env, target, PRS_QUERY, {"q": search, "first": first, "after": after})
+        data = _search_page(env, target, query, floor, search, first, after)
         found = _rate(data)
         if found[0] is not None and (rate[0] is None or found[0] < rate[0]):
             rate = found
         block = _obj(data.get("search"), "the search")
-        count = block.get("issueCount")
-        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
-            raise Malformed("the match count")
-        total = count
-        nodes = _list(block.get("nodes"), "the search results")
-        if len(nodes) > first:
-            raise Malformed("more results than asked for")
-        for raw in nodes:
-            if raw is None or raw == {}:
+        total = _count(block)
+        for node in _results(block, first):
+            if node is None:
                 dropped = True  # not a pull request, or hidden from this account
                 continue
-            node = _obj(raw, "a result")
-            if node.get("__typename") not in (None, "PullRequest"):
-                dropped = True
-                continue
-            item = _item(env, target, node)
+            item = _item(env, target, node, more=True)
             if item.pr_id in seen:
                 dropped = True  # the list moved between pages: something may be missing
                 continue
@@ -352,8 +391,17 @@ _LEVELS: Mapping[str, frozenset[str]] = {
 Level = Literal["admin", "maintain", "write", "triage", "read", "none"]
 
 
-def _api(env: ReadEnv, target: Target, segments: list[str]) -> Any:
-    return env.call(lambda: env.gateway.api(target, "GET", segments, shape="object"))
+def _api[T](env: ReadEnv, target: Target, segments: list[str], check: Callable[[Any], T]) -> T:
+    """One REST read; ``check`` validates the answer inside the retried call, so an answer that
+    is not the documented shape is retried like a 5xx (interface: Reliability)."""
+
+    def once() -> T:
+        try:
+            return check(env.gateway.api(target, "GET", segments, shape="object").data)
+        except Malformed as bad:
+            raise malformed(f"{bad}") from None
+
+    return env.call(once)
 
 
 def access(env: ReadEnv, repo: RepoRef, user: str) -> m.AccessResult:
@@ -364,22 +412,24 @@ def access(env: ReadEnv, repo: RepoRef, user: str) -> m.AccessResult:
     except ForgectlError:
         raise ForgectlError("usage", "the repository is not an owner/name path") from None
     target = env.hosts.target(repo.host)
-    try:
-        read = _api(env, target, ["repos", owner, name]).data
+
+    def check_repo(read: Any) -> str:
         full_name = _project(_obj(read, "the repository").get("full_name"), "the repository path")
         verify_identity(
             read.get("html_url"), host=target.host, project=full_name, secret=target.token
         )
-        canonical_owner, canonical_name = full_name.split("/")
-    except Malformed as bad:
-        raise malformed(f"{bad}") from None
+        return full_name
+
+    full_name = _api(env, target, ["repos", owner, name], check_repo)
+    canonical_owner, canonical_name = full_name.split("/")
     where = f"{target.host}/{full_name}"
     try:
-        answer = _api(
+        return _api(
             env,
             target,
             ["repos", canonical_owner, canonical_name, "collaborators", user, "permission"],
-        ).data
+            lambda answer: _permission(where, user, _obj(answer, "the permission")),
+        )
     except ForgectlError as error:
         # the account may not read this answer (403), or the host cannot resolve a bot's
         # login in this path (404): unknown, which consumers read as no write access
@@ -395,10 +445,6 @@ def access(env: ReadEnv, repo: RepoRef, user: str) -> m.AccessResult:
                 reason="no_permission_to_read",
             )
         raise
-    try:
-        return _permission(where, user, _obj(answer, "the permission"))
-    except Malformed as bad:
-        raise malformed(f"{bad}") from None
 
 
 def _permission(where: str, user: str, answer: dict[str, Any]) -> m.AccessResult:

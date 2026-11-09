@@ -440,10 +440,12 @@ def test_more_than_100_labels_are_read_to_the_end(make: Callable[..., Harness]) 
     more = {
         "data": {
             "node": {
+                "number": node["number"],
+                "url": node["url"],
                 "labels": {
                     "pageInfo": {"hasNextPage": False, "endCursor": None},
                     "nodes": [{"name": "extra"}],
-                }
+                },
             }
         }
     }
@@ -612,7 +614,18 @@ def test_a_5xx_is_retried_then_read(make: Callable[..., Harness]) -> None:
     harness = make(http(502, {"message": "bad"}), recording())
     page = harness.prs(repo=REPO)
     assert len(page.items) == 3
-    assert harness.slept.waits == [0.5]
+    assert harness.slept.waits == [1.0]
+
+
+def test_a_search_page_that_is_not_the_documented_shape_is_retried(
+    make: Callable[..., Harness],
+) -> None:
+    bad = recording()
+    nodes_of(bad)[0]["state"] = "WEIRD"
+    harness = make(bad, recording())
+    page = harness.prs(repo=REPO)
+    assert len(page.items) == 3
+    assert len(harness.script.requests) == 2 and harness.slept.waits == [1.0]
 
 
 def test_the_token_is_in_no_error(make: Callable[..., Harness]) -> None:
@@ -772,6 +785,23 @@ def test_a_permission_answer_that_is_not_the_documented_shape_is_an_error_never_
 ) -> None:
     error = failure(make(repo_doc(), http(200, answer)), lambda h: h.access())
     assert error.code in ("upstream_error", "wrong_host_response")
+
+
+def test_a_permission_answer_that_is_not_the_documented_shape_is_retried(
+    make: Callable[..., Harness],
+) -> None:
+    harness = make(repo_doc(), {"permission": "owner"}, permission("write", "write"))
+    result = harness.access()
+    assert result.write_access is True
+    assert len(harness.script.requests) == 3 and harness.slept.waits == [1.0]
+
+
+def test_a_repo_answer_that_is_not_the_documented_shape_is_retried(
+    make: Callable[..., Harness],
+) -> None:
+    harness = make({"full_name": None}, repo_doc(), permission())
+    assert harness.access().write_access is True
+    assert len(harness.script.requests) == 3 and harness.slept.waits == [1.0]
 
 
 def test_the_host_form_of_the_login_is_reported_when_it_differs_only_in_case(
