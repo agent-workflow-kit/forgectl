@@ -10,6 +10,23 @@ from __future__ import annotations
 import subprocess
 
 
+def start(argv: list[str], *, env: dict[str, str]) -> subprocess.Popen[bytes]:
+    """Start ``argv`` detached from the terminal and return at once, without a shell.
+
+    The caller owns the returned process: it records ``pid`` and signals only that exact
+    process, never by name or pattern.
+    """
+    return subprocess.Popen(
+        argv,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+
+
 def run(
     argv: list[str],
     *,
