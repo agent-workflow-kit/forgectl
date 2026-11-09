@@ -21,6 +21,9 @@ COMMENT_LIMIT = 4_000
 # One budget for the reviews and comments of the pane, counted after sanitizing, so no
 # combination of per-field caps can build a pane that freezes the UI.
 REST_BUDGET = 200_000
+# The same kind of budget for the check labels, and a shorter display for URLs never opened.
+CHECK_BUDGET = 200_000
+UNOPENED_URL_LIMIT = 500
 
 
 def _d(value: Any) -> dict[str, Any]:
@@ -63,7 +66,7 @@ def check_label(check: dict[str, Any]) -> str:
     elif is_openable(url):
         suffix = f"  {safe.line(url, URL_MAX_LENGTH)}"  # shown whole: what o opens
     else:  # shown, never opened
-        suffix = f"  {safe.line(url, URL_MAX_LENGTH)}  (not opened: not http or https)"
+        suffix = f"  {safe.line(url, UNOPENED_URL_LIMIT)}  (not opened: not http or https)"
     return f"{safe.line(check.get('state'))}  {safe.line(check.get('name'))}{suffix}"
 
 
@@ -208,14 +211,33 @@ class Detail:
     rest: str
 
 
+def check_labels_of(checks: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    """The checks whose labels fit in ``CHECK_BUDGET``, their labels, and a marker if cut.
+
+    The returned checks line up with the first labels; a trailing marker has no check.
+    """
+    labels: list[str] = []
+    used = 0
+    for check in checks:
+        label = check_label(check)
+        if used + len(label) > CHECK_BUDGET:
+            break
+        used += len(label)
+        labels.append(label)
+    shown = checks[: len(labels)]
+    if len(shown) < len(checks):
+        labels.append(f"  ... {len(checks) - len(shown)} more not shown")
+    return shown, labels
+
+
 def detail_of(snap: dict[str, Any], diff: dict[str, Any] | None) -> Detail:
     url = snap.get("url")
-    checks = checks_of(snap)
+    checks, labels = check_labels_of(checks_of(snap))
     return Detail(
         url=url if isinstance(url, str) else None,
         checks=checks,
         facts=facts_text(snap),
-        check_labels=[check_label(c) for c in checks],
+        check_labels=labels,
         rest=rest_text(snap, diff),
     )
 

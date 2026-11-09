@@ -406,5 +406,5 @@ class BrowseApp(App[None]):
             return
         try:
             self.call_from_thread(self._status, f"opener exited {status}")
-        except RuntimeError:  # the app stopped meanwhile
+        except Exception:  # noqa: BLE001 - the app may be shutting down; the note is dropped
             pass

@@ -859,3 +859,53 @@ def test_filtering_keeps_the_highlighted_pr() -> None:
         assert olist.highlighted == 1
 
     drive(basic_source(), script)
+
+
+def test_check_labels_stay_within_one_budget_and_unopened_urls_are_cut_at_500() -> None:
+    hostile = "x:" + "\x1b" * 2046
+    checks = [make_check(f"c{i}", "failing", hostile) for i in range(500)]
+    snap = make_snapshot(1, checks=checks)
+    started = time.monotonic()
+    detail = render.detail_of(snap, None)
+    assert time.monotonic() - started < 2.0
+    shown, footer = detail.check_labels[:-1], detail.check_labels[-1]
+    assert footer.strip().startswith("...") and footer.endswith("more not shown")
+    assert str(500 - len(shown)) in footer
+    assert len(detail.checks) == len(shown) < 500  # indexes still line up with the labels
+    assert sum(len(label) for label in shown) <= render.CHECK_BUDGET
+
+    plain = render.check_label(make_check("lint", "failing", "x:" + "a" * 3000))
+    assert "a" * 498 + "<truncated>" in plain and "a" * 499 not in plain
+    openable = "https://ci.example/" + "a" * 2000
+    assert openable in render.check_label(make_check("ok", "passing", openable))
+
+
+def test_few_checks_get_no_not_shown_entry() -> None:
+    detail = render.detail_of(make_snapshot(1, checks=[make_check()]), None)
+    assert len(detail.check_labels) == len(detail.checks) == 1
+
+
+def test_the_opener_exit_note_is_dropped_when_the_status_line_is_gone() -> None:
+    import threading
+
+    errors: list[BaseException] = []
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await app.query_one("#status", Static).remove()
+        await pilot.pause()
+
+        def reaper() -> None:
+            try:
+                app._opener_exited(4)
+            except BaseException as exc:  # noqa: BLE001 - the test records anything raised
+                errors.append(exc)
+
+        thread = threading.Thread(target=reaper)
+        thread.start()
+        while thread.is_alive():
+            await pilot.pause(0.01)
+        thread.join()
+
+    app = drive(basic_source(), script)
+    assert errors == []
+    app._opener_exited(4)  # after the app exited: nothing raised either
