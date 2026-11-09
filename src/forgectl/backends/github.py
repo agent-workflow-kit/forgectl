@@ -978,7 +978,9 @@ class GitHubBackend:
     # -- the reads other issues add ------------------------------------------------------------
 
     def list_prs(self, query: m.PrQuery) -> m.PrPage:
-        raise not_implemented("prs")  # TODO(#14): GraphQL search, partial results across hosts
+        from . import github_lists  # lazy: github_lists imports this module
+
+        return github_lists.list_prs(self._env, query)
 
     def snapshot(self, ref: PrRef) -> m.Snapshot:
         raise not_implemented("snapshot")  # TODO(#12): reuse SHOW_QUERY, parse_actor, read_checks
@@ -1008,10 +1010,14 @@ class GitHubBackend:
         raise not_implemented("ci")  # TODO(#12): reuse read_checks and the CHECKS_QUERY paging
 
     def access(self, repo: RepoRef, user: str) -> m.AccessResult:
-        raise not_implemented("access")  # TODO(#14)
+        from . import github_lists
+
+        return github_lists.access(self._env, repo, user)
 
     def whoami(self, host: str) -> m.Identity:
-        raise not_implemented("whoami")  # TODO(#14): hosts.identity is the source
+        from . import github_lists
+
+        return github_lists.whoami(self._env, host)
 
 
 # -- small mappings ----------------------------------------------------------------------------

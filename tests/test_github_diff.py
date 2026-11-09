@@ -30,7 +30,7 @@ HEAD = "3f8a1c0d5e7b9a2c4d6e8f0a1b3c5d7e9f0a1b2c"
 BASE = "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
 FROM = "1" * 40
 TO = "2" * 40
-PR_ENDPOINT = "repos/example-org/example-repo/pulls/7"
+PR_ENDPOINT = "repos/user-7/example-repo/pulls/7"
 DIFF_TYPE = "application/vnd.github.diff"
 
 
@@ -313,7 +313,7 @@ def test_files_moved_head_twice_is_upstream_error(make: Callable[..., RouterHarn
 def test_a_pull_from_another_host_is_wrong_host_response(
     make: Callable[..., RouterHarness],
 ) -> None:
-    h = make(pull=pull(html_url="https://evil.example/example-org/example-repo/pull/7"))
+    h = make(pull=pull(html_url="https://evil.example/user-7/example-repo/pull/7"))
     assert raises(lambda: h.backend.files(REF)).code == "wrong_host_response"
 
 
@@ -394,7 +394,7 @@ def test_the_endpoints_hold_only_validated_parts_and_the_token_is_not_in_argv(
     h.backend.files(REF)
     for argv in h.script.argvs:
         assert "tok-show" not in " ".join(argv)
-        assert argv[-1].startswith("repos/example-org/example-repo/pulls/7")
+        assert argv[-1].startswith("repos/user-7/example-repo/pulls/7")
         assert "--hostname" in argv and argv[argv.index("--hostname") + 1] == "github.com"
 
 
@@ -428,7 +428,7 @@ def test_the_diff_is_asked_by_media_type_and_the_merge_base_by_shas(
     assert h.script.kinds == ["pull", "diff", "mergebase", "pull"]
     assert h.script.accepts[1] == DIFF_TYPE
     assert h.script.argvs[2][-1] == (
-        f"repos/example-org/example-repo/compare/{BASE}...{HEAD}?per_page=1"
+        f"repos/user-7/example-repo/compare/{BASE}...{HEAD}?per_page=1"
     )
 
 
@@ -658,9 +658,7 @@ def test_golden_compare_ahead(cmake: Callable[..., RouterHarness]) -> None:
     )
     assert h.script.kinds == ["pull", "compare", "comparediff"]
     assert h.script.accepts == [None, None, DIFF_TYPE]
-    assert (
-        h.script.argvs[1][-1] == f"repos/example-org/example-repo/compare/{FROM}...{TO}?per_page=1"
-    )
+    assert h.script.argvs[1][-1] == f"repos/user-7/example-repo/compare/{FROM}...{TO}?per_page=1"
 
 
 def test_compare_names_the_pr_by_its_canonical_path(cmake: Callable[..., RouterHarness]) -> None:
@@ -679,7 +677,7 @@ def test_compare_of_a_missing_pr_is_not_found(cmake: Callable[..., RouterHarness
     [
         "https://evil.example/user-1/example-repo/compare/x...y",
         "https://github.com/other/example-repo/compare/x...y",
-        "https://github.com/example-org/example-repo/compare/x...y",  # the typed, not canonical
+        "https://github.com/user-7/example-repo/compare/x...y",  # the typed, not canonical
         "https://github.com/user-1/example-repo/%2e%2e/example-repo/compare/x...y",
         "https://github.com/user-1/example-repo/compare/x/../../y",
         "https://github.com/user-1/example-repo/pull/7",
@@ -848,7 +846,7 @@ def test_the_head_of_the_request_is_not_a_ref(cmake: Callable[..., RouterHarness
     h = cmake(compare=compare_doc("behind", 0, 1))
     cmp(h)
     assert re.fullmatch(
-        r"repos/example-org/example-repo/compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}\?per_page=1",
+        r"repos/user-7/example-repo/compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}\?per_page=1",
         h.script.argvs[1][-1],
     )
 
