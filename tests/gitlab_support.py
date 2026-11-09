@@ -141,6 +141,7 @@ def make_backend(
     warn: Callable[[str], None] | None = None,
     retry: Any = None,
     today: Any = None,
+    until_known: Any = None,
     timeout: float = 30.0,
 ) -> GitLabBackend:
     bindir = tmp_path / "bin"
@@ -166,7 +167,7 @@ def make_backend(
     }
     gateway = Gateway(config, timeout=timeout, environ=environ, runner=fake.runner)
     hosts = Hosts(gateway)
-    return GitLabBackend(hosts, warn=warn, retry=retry, today=today)
+    return GitLabBackend(hosts, warn=warn, retry=retry, today=today, until_known=until_known)
 
 
 def ref(
@@ -196,6 +197,7 @@ def standard(fake: FakeGitLab, **overrides: Any) -> dict[str, Any]:
             "user",
             "version",
             "source_project",
+            "bridges",
         )
     }
     data.update(overrides)
@@ -206,6 +208,7 @@ def standard(fake: FakeGitLab, **overrides: Any) -> dict[str, Any]:
     fake.on(f"{MR_ID}/reviewers", data["reviewers"])
     for project in (101, 202):
         fake.pages(f"projects/{project}/repository/commits/{HEAD}/statuses", [data["statuses"]])
+        fake.pages(f"projects/{project}/pipelines/5001/bridges", [data["bridges"]])
     fake.pages(f"{MR_ID}/notes", [data["notes"]])
     fake.on("projects/101/members/all/12", data["member"])
     fake.on("users/11", data["user"])

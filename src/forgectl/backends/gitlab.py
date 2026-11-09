@@ -7,14 +7,15 @@ GitLab grammar, ids must be integers, and any answer that is not the documented 
 `upstream_error`, never a traceback or a guess. Missing or unknown data never reads as ready.
 
 Retries and the readiness retry loop belong to `reads.py`: a caller may pass `retry`, a wrapper run
-around every gateway read, and asks `readiness_unknown(pr)` whether `mergeability_unknown` is still
-there after a read. UNVERIFIED host behavior (field names, enum values, null versus missing,
-pagination headers) is marked `UNVERIFIED` where it is relied on.
+around every gateway read, and `until_known`, the readiness loop run around the single-MR GET only
+(every other read is made once, after it). UNVERIFIED host behavior (field names, enum values, null
+versus missing, pagination headers) is marked `UNVERIFIED` where it is relied on.
 """
 
 from __future__ import annotations
 
 import re
+import urllib.parse
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -22,7 +23,7 @@ from typing import Any, TypeVar
 
 from .. import model as m
 from ..errors import ForgectlError
-from ..gateway import Gateway, Response, Target, path_int, verify_identity
+from ..gateway import Gateway, Response, Target, path_int, shown_text, verify_identity
 from ..hosts import Hosts, redact_secrets
 from ..identifiers import PrRef, RepoRef, bind_login
 from ..sanitize import sanitize_line, sanitize_text
@@ -37,8 +38,13 @@ READINESS_UNKNOWN = frozenset({"checking", "unchecked", "preparing"})
 MAX_PAGES = 20
 PER_PAGE = "100"
 
-_STATUS_TABLE_QUIET = frozenset({"mergeable", "not_open"})
-_PIPELINE_RUNNING = frozenset(
+_STATUS_TABLE_QUIET = frozenset({"mergeable"})
+#: The head pipeline's own `status` (interface: CI object). Quiet statuses add nothing (the jobs
+#: are listed); failed ones add a failing `(pipeline)` check; unfinished ones a pending one. Any
+#: other value, or none, is a pending `(pipeline)` check with a warning.
+_PIPELINE_QUIET = frozenset({"success", "skipped", "manual"})
+_PIPELINE_FAILED = frozenset({"failed", "canceled"})
+_PIPELINE_UNFINISHED = frozenset(
     {
         "created",
         "waiting_for_resource",
@@ -46,27 +52,60 @@ _PIPELINE_RUNNING = frozenset(
         "pending",
         "running",
         "scheduled",
+        "canceling",
         "waiting_for_callback",
     }
 )
+#: `pipeline_id` on `/repository/commits/:sha/statuses` (docs.gitlab.com/api/commits, 17.9).
+_STATUSES_PIPELINE_FILTER = (17, 9)
+#: Errors no degraded read swallows: they say the call itself is unsafe or impossible.
+_NEVER_DEGRADED = frozenset({"auth_required", "wrong_host_response", "tool_missing"})
+#: Not project segments in an MR's `web_url` (the same set as identifiers.py:77, whose constant is
+#: private to that module).
+_BAD_PROJECT_SEGMENTS_IN_URL = frozenset({"-", "merge_requests"})
+_SEVERITY: dict[str, int] = {"skipped": 0, "passing": 1, "pending": 2, "failing": 3}
+_MAX_NUMBER = 9_999_999_999
 _SHA = re.compile(r"^[0-9a-f]{40}\Z")
 _RFC3339 = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2})\Z"
 )
 _SEGMENT = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._-]{0,254}\Z")
-_VERSION = re.compile(r"^([0-9]+)\.([0-9]+)")
+_VERSION = re.compile(r"^([0-9]{1,6})\.([0-9]{1,6})")
 _BOT_NAME = re.compile(r"^(?:project|group)_[0-9]+_bot(?:_[0-9a-f]+)?\Z")
 _RETARGET = "changed target branch from"
+_AUTO_RETARGET = "now targets the"
 _MAX_DETAIL = 64
 _MAX_ID = 2**63
 
 Retry = Callable[[Callable[[], Response]], Response]
+#: `until_known(fetch, is_unknown)` gives the answer and whether it is still unknown.
+UntilKnown = Callable[[Callable[[], Response], Callable[[Response], bool]], tuple[Response, bool]]
 _SUB_FAILURES = frozenset({"not_found", "permission_denied"})
 
 
 def _bad(what: str) -> ForgectlError:
     """A host answer that is not the documented shape (the value is never echoed)."""
     return ForgectlError("upstream_error", f"gitlab: the answer has an unusable {what}")
+
+
+class _PartMissing(ForgectlError):
+    """A 404 or 403 on a part of the answer, as `upstream_error`. The marker is the class, so
+    nothing private reaches the error envelope's `details`."""
+
+    def __init__(self, cause: str) -> None:
+        super().__init__(
+            "upstream_error", f"gitlab: a part of the answer could not be read ({cause})"
+        )
+
+
+def _line(value: str) -> str:
+    """One-line host text: every token in use redacted, then sanitized."""
+    return sanitize_line(redact_secrets(value))
+
+
+def _capped(value: str) -> str:
+    """Host text for a detail or a warning: redacted, one line, then cut."""
+    return _line(value)[:_MAX_DETAIL]
 
 
 # -- validators for untrusted answers ----------------------------------------------------------
@@ -100,7 +139,7 @@ def _text(value: Any, what: str, *, line: bool = True, allow_none: bool = False)
         return None
     if not isinstance(value, str):
         raise _bad(what)
-    return sanitize_line(value) if line else sanitize_text(value)
+    return _line(value) if line else sanitize_text(redact_secrets(value))
 
 
 def _req_line(value: Any, what: str) -> str:
@@ -181,9 +220,18 @@ def _user(value: Any, what: str) -> _User:
     )
 
 
-def readiness_unknown(pr: m.PR) -> bool:
-    """Whether the read still has `mergeability_unknown`: `reads.py` retries `get_pr` while true."""
-    return any(b.code is m.BlockerCode.MERGEABILITY_UNKNOWN for b in pr.blocked_by)
+def _status_unknown(response: Response) -> bool:
+    """Whether the MR answer's `detailed_merge_status` is still being computed."""
+    data = response.data
+    status = data.get("detailed_merge_status") if isinstance(data, dict) else None
+    return isinstance(status, str) and status in READINESS_UNKNOWN
+
+
+def _single_read(
+    fetch: Callable[[], Response], is_unknown: Callable[[Response], bool]
+) -> tuple[Response, bool]:
+    answer = fetch()
+    return answer, is_unknown(answer)
 
 
 def _noop(_message: str) -> None:
@@ -196,7 +244,7 @@ def _direct(call: Callable[[], Response]) -> Response:
 
 def _part_missing(error: ForgectlError) -> bool:
     """Whether `_get` turned a 404 or 403 of an optional part into an `upstream_error`."""
-    return error.code == "upstream_error" and "part" in (error.details or {})
+    return isinstance(error, _PartMissing)
 
 
 def _not_yet(command: str, issue: int) -> ForgectlError:
@@ -216,11 +264,13 @@ class GitLabBackend:
         warn: m.Warn | None = None,
         retry: Retry | None = None,
         today: Callable[[], date] | None = None,
+        until_known: UntilKnown | None = None,
     ) -> None:
         self._hosts = hosts
         self._gateway: Gateway = hosts.gateway
         self._warn_to = warn or _noop
         self._retry: Retry = retry or _direct
+        self._until_known: UntilKnown = until_known or _single_read
         self._today = today or (lambda: datetime.now(UTC).date())
         self._versions: dict[str, tuple[int, int] | None] = {}
         self._bots: dict[tuple[str, int], bool | None] = {}
@@ -248,11 +298,7 @@ class GitLabBackend:
             )
         except ForgectlError as error:
             if sub and error.code in _SUB_FAILURES:
-                raise ForgectlError(
-                    "upstream_error",
-                    f"gitlab: a part of the answer could not be read ({error.code})",
-                    details={"part": error.code},
-                ) from None
+                raise _PartMissing(error.code) from None
             raise
 
     def _pages(
@@ -276,9 +322,9 @@ class GitLabBackend:
             if header is not None:
                 if header == "":
                     return items, True
-                if not header.isascii() or not header.isdigit() or int(header) != page + 1:
+                if header != str(page + 1):
                     raise _bad("pagination header")
-                page = int(header)
+                page += 1
             elif len(batch) < int(PER_PAGE):
                 return items, True
             else:
@@ -309,26 +355,41 @@ class GitLabBackend:
         self._versions[host] = found
         return found
 
+    def _version_or_unreadable(self, host: str) -> tuple[int, int] | None:
+        """`host_version`, with a failed read (other than the never-degraded codes) read as an
+        unreadable version, cached like any other answer."""
+        try:
+            return self.host_version(host)
+        except ForgectlError as error:
+            if error.code in _NEVER_DEGRADED:
+                raise
+            self._versions[host] = None
+            return None
+
     # -- show ----------------------------------------------------------------------------------
 
     def get_pr(self, ref: PrRef) -> m.PrRead:
+        raw_number: Any = ref.number
+        if (
+            isinstance(raw_number, bool)
+            or not isinstance(raw_number, int)
+            or not 1 <= raw_number <= _MAX_NUMBER
+        ):
+            raise ForgectlError("invalid_pr", "the MR number is not usable")
         target = self._hosts.target(ref.host)
         if target.backend != "gitlab":
             raise ForgectlError("internal", "the gitlab backend was given another backend's host")
-        try:
-            number = int(path_int(ref.number))
-        except ValueError:
-            raise ForgectlError("invalid_pr", "the MR number is not usable") from None
-        response = self._get(
-            target,
-            ["projects", ref.project, "merge_requests", str(number)],
-            sub=False,
+        number = int(path_int(raw_number))
+        segments = ["projects", ref.project, "merge_requests", str(number)]
+        # Only this GET is rechecked while the readiness is unknown; every other read follows once.
+        response, _ = self._until_known(
+            lambda: self._get(target, segments, sub=False), _status_unknown
         )
         mr = _obj(response.data, "merge request")
         canonical = self._canonical_path(mr.get("web_url"), target, number)
         iid = _int_id(mr.get("iid"), "iid")
         if iid != number:
-            raise self._wrong_host(target, "another merge request number")
+            raise self._wrong_host(target, "another merge request number", mr.get("web_url"))
         project_id = _int_id(mr.get("project_id"), "project_id")
         if mr.get("target_project_id") is not None and mr["target_project_id"] != project_id:
             raise _bad("target_project_id")
@@ -349,8 +410,8 @@ class GitLabBackend:
             is_bot=self._is_bot(target, author_user),
         )
         draft = _flag(mr.get("draft", mr.get("work_in_progress", False)), "draft")
-        ci = self._ci(target, mr, head_sha)
-        entries, approvals_left = self._reviewers(target, project_id, iid, author, state)
+        ci = self._ci(target, mr, head_sha, project_id)
+        entries, approvals_left = self._reviewers(target, project_id, iid)
         reset = self._reset_on_push(target, project_id)
         entries = self._with_can_push(target, project_id, entries, author, reset)
         retarget_at, retarget_known = (None, True)
@@ -366,7 +427,7 @@ class GitLabBackend:
             retarget_at=retarget_at,
             retarget_known=retarget_known,
         )
-        has_conflicts = mr.get("has_conflicts") is True
+        has_conflicts = _flag(mr.get("has_conflicts", False), "has_conflicts")
         facts = m.BlockFacts(
             state=state,
             ci=ci,
@@ -418,8 +479,8 @@ class GitLabBackend:
             draft=draft or status == "draft_status",
             created_at=_required_time(mr.get("created_at"), "created_at"),
             updated_at=_required_time(mr.get("updated_at"), "updated_at"),
-            closed_at=_rfc3339(mr.get("closed_at")),
-            merged_at=_rfc3339(mr.get("merged_at")) if merged else None,
+            closed_at=_rfc3339(mr.get("closed_at")) if state == "closed" else None,
+            merged_at=_required_time(mr.get("merged_at"), "merged_at") if merged else None,
             merged_by=merged_by,
             labels=self._labels(mr.get("labels")),
             author_association=None,
@@ -440,7 +501,7 @@ class GitLabBackend:
             mergeable=mergeable,
             blocked_by=m.compute_blocked_by(facts),
             auto_merge=m.AutoMerge(enabled=enabled, by=by),
-            merge_queue=project.get("merge_trains_enabled", False) is True,
+            merge_queue=self._merge_queue(project),
             merge_methods_allowed=self._methods(project),
             additions=None,
             deletions=None,
@@ -459,12 +520,13 @@ class GitLabBackend:
         return f"{prefix}/{canonical}" if prefix else canonical
 
     @staticmethod
-    def _wrong_host(target: Target, what: str) -> ForgectlError:
+    def _wrong_host(target: Target, what: str, observed: Any) -> ForgectlError:
+        shown = observed if isinstance(observed, str) else repr(observed)
         return ForgectlError(
             "wrong_host_response",
             f"the answer is for {what}, not the requested one: the token may have reached"
             " another host and should be rotated",
-            details={"observed": ""},
+            details={"observed": shown_text(redact_secrets(shown), target.token)},
         )
 
     def _canonical_path(self, web_url: Any, target: Target, number: int) -> str:
@@ -473,21 +535,43 @@ class GitLabBackend:
         host is accepted: the path comes from this first answer)."""
         verify_identity(web_url, host=target.host, secret=target.token)
         assert isinstance(web_url, str)
-        scheme, _, rest = web_url.partition("://")
-        path = rest.partition("/")[2]
-        if scheme != "https" or "?" in path or "#" in path or "%" in path:
+        # urlsplit drops tab, CR and LF silently, so the raw text is checked first.
+        if not web_url.isascii() or any(c.isspace() or not c.isprintable() for c in web_url):
             raise _bad("web_url")
+        parts = urllib.parse.urlsplit(web_url)
+        path = parts.path
+        if (
+            parts.scheme != "https"
+            or parts.query
+            or parts.fragment
+            or "?" in web_url
+            or "#" in web_url
+            or ";" in path
+            or "%" in path
+            or not path.startswith("/")
+        ):
+            raise _bad("web_url")
+        path = path[1:]
         prefix = target.api_prefix.strip("/")
         if prefix:
             if not path.startswith(prefix + "/"):
-                raise self._wrong_host(target, "a path outside the host's prefix")
+                raise self._wrong_host(target, "a path outside the host's prefix", web_url)
             path = path[len(prefix) + 1 :]
         match = re.fullmatch(r"(.+?)(?:/-)?/merge_requests/([1-9][0-9]{0,9})", path)
         if match is None:
             raise _bad("web_url")
         if int(match.group(2)) != number:
-            raise self._wrong_host(target, "another merge request number")
-        return _project_path(match.group(1), "web_url")
+            raise self._wrong_host(target, "another merge request number", web_url)
+        project = match.group(1)
+        if _BAD_PROJECT_SEGMENTS_IN_URL.intersection(project.split("/")):
+            raise _bad("web_url")
+        return _project_path(project, "web_url")
+
+    @staticmethod
+    def _https(web_url: Any, what: str) -> None:
+        """A project's own `web_url` must be `https`, as the MR's is."""
+        if not isinstance(web_url, str) or not web_url.startswith("https://"):
+            raise _bad(what)
 
     def _project(
         self, target: Target, project_id: int, canonical: str, prefixed: str
@@ -496,9 +580,18 @@ class GitLabBackend:
         verify_identity(
             data.get("web_url"), host=target.host, project=prefixed, secret=target.token
         )
+        self._https(data.get("web_url"), "project web_url")
         if data.get("id") != project_id or data.get("path_with_namespace") != canonical:
-            raise self._wrong_host(target, "another project")
+            raise self._wrong_host(target, "another project", data.get("web_url"))
         return data
+
+    @staticmethod
+    def _merge_queue(project: Mapping[str, Any]) -> bool | None:
+        """`merge_trains_enabled`: absent is false, a boolean is itself, anything else null."""
+        if "merge_trains_enabled" not in project:
+            return False
+        value = project["merge_trains_enabled"]
+        return value if isinstance(value, bool) else None
 
     @staticmethod
     def _is_default(mr: Mapping[str, Any], project: Mapping[str, Any]) -> bool | None:
@@ -511,8 +604,9 @@ class GitLabBackend:
     def _head_repo(
         self, target: Target, mr: Mapping[str, Any], project_id: int, canonical: str
     ) -> tuple[str | None, bool | None]:
-        """The head's project path and `is_fork`; null for both when the project is gone or
-        hidden (the interface: null when the head project was deleted)."""
+        """The head's project path and `is_fork`. A null `source_project_id` (the project was
+        deleted) is null for both; a differing id whose project cannot be read (deleted or
+        hidden) is `repo: null` with `is_fork: true`, since the differing id proves a fork."""
         source = _opt_int_id(mr.get("source_project_id"), "source_project_id")
         if source is None:
             return None, None
@@ -524,11 +618,18 @@ class GitLabBackend:
             if not _part_missing(error):
                 raise
             self._warn("the head project could not be read; its repo is reported null")
-            return None, None
-        verify_identity(data.get("web_url"), host=target.host, secret=target.token)
+            return None, True
+        path = _project_path(data.get("path_with_namespace"), "source project")
+        verify_identity(
+            data.get("web_url"),
+            host=target.host,
+            project=self._prefixed(target, path),
+            secret=target.token,
+        )
+        self._https(data.get("web_url"), "source project web_url")
         if data.get("id") != source:
-            raise self._wrong_host(target, "another project")
-        return _project_path(data.get("path_with_namespace"), "source project"), True
+            raise self._wrong_host(target, "another project", data.get("web_url"))
+        return path, True
 
     # -- scalars -------------------------------------------------------------------------------
 
@@ -547,7 +648,7 @@ class GitLabBackend:
     def _detailed_status(self, mr: Mapping[str, Any], target: Target) -> str:
         raw = mr.get("detailed_merge_status")
         if raw is None or "detailed_merge_status" not in mr:
-            version = self.host_version(target.host)
+            version = self._version_or_unreadable(target.host)
             shown = f"{version[0]}.{version[1]}" if version else "unreadable"
             raise ForgectlError(
                 "unsupported_host_version",
@@ -576,7 +677,8 @@ class GitLabBackend:
         )
         if status in known:
             return ()
-        detail = sanitize_line(status)[:_MAX_DETAIL]
+        # `not_open` on an open (or locked) MR says something the state does not: it blocks.
+        detail = _capped(status)
         return (detail or "unknown",)
 
     @staticmethod
@@ -653,7 +755,7 @@ class GitLabBackend:
     # -- reviews and approvals -----------------------------------------------------------------
 
     def _reviewers(
-        self, target: Target, project_id: int, iid: int, author: m.Author, state: m.PrState
+        self, target: Target, project_id: int, iid: int
     ) -> tuple[tuple[m.LatestByReviewer, ...], int | None]:
         base = ["projects", path_int(project_id), "merge_requests", path_int(iid)]
         approvals = _obj(self._get(target, [*base, "approvals"]).data, "approvals")
@@ -667,13 +769,8 @@ class GitLabBackend:
             user = _user(entry.get("user"), "approver")
             approved[user.id] = (user, _rfc3339(entry.get("approved_at")))
         reviewer_states: dict[int, tuple[_User, str]] = {}
-        try:
-            listed = self._get(target, [*base, "reviewers"], shape="list").data
-        except ForgectlError as error:
-            if not _part_missing(error):
-                raise
-            self._warn("the reviewers could not be read; reviewer states are unknown")
-            listed = []
+        # Required: without the reviewer states a `requested_changes` could read as approved.
+        listed = self._get(target, [*base, "reviewers"], shape="list").data
         for item in _list(listed, "reviewers"):
             entry = _obj(item, "reviewer")
             user = _user(entry.get("user"), "reviewer")
@@ -682,7 +779,7 @@ class GitLabBackend:
         entries: list[m.LatestByReviewer] = []
         for account in sorted(set(approved) | set(reviewer_states)):
             reviewer = reviewer_states.get(account)
-            user = approved[account][0] if account in approved else reviewer[0]  # type: ignore[index]
+            user = approved[account][0] if account in approved else reviewer_states[account][0]
             rstate = reviewer[1] if reviewer else ""
             if rstate == "requested_changes":
                 entries.append(self._entry(user, "changes_requested", None))
@@ -758,7 +855,15 @@ class GitLabBackend:
             else:
                 raise
         else:
-            result = self._member_can_push(data)
+            member = _obj(data, "member")
+            member_id = member.get("id")
+            if (
+                isinstance(member_id, bool)
+                or not isinstance(member_id, int)
+                or member_id != user_id
+            ):
+                raise _bad("member id")
+            result = self._member_can_push(member)
         self._push[key] = result
         return result
 
@@ -768,6 +873,8 @@ class GitLabBackend:
             return False
         if data.get("state") != "active":
             return False
+        if "membership_state" in data and data["membership_state"] != "active":
+            return False  # e.g. `awaiting` a seat: not yet a member who can push
         expires = data.get("expires_at")
         if expires is None:
             return True
@@ -779,19 +886,17 @@ class GitLabBackend:
             return False
 
     def _retarget(self, target: Target, project_id: int, iid: int) -> tuple[str | None, bool]:
-        """The newest system note beginning `changed target branch from`, over every page (the
-        order is not trusted). A walk that cannot complete is `(None, False)`: no approval
-        counts."""
+        """The newest system note beginning `changed target branch from`, or holding `now targets
+        the` (GitLab's automatic retarget after the target branch is merged and deleted), over
+        every page (the order is not trusted). A walk that cannot complete is `(None, False)`:
+        no approval counts."""
         segments = ["projects", path_int(project_id), "merge_requests", path_int(iid), "notes"]
         try:
             notes, complete = self._pages(
                 target, segments, (("order_by", "created_at"), ("sort", "desc"))
             )
         except ForgectlError as error:
-            if error.code == "wrong_host_response" or error.code in (
-                "auth_required",
-                "tool_missing",
-            ):
+            if error.code in _NEVER_DEGRADED:
                 raise
             self._warn("the retarget walk failed; no approval counts at the head")
             return None, False
@@ -804,7 +909,7 @@ class GitLabBackend:
             body = note.get("body")
             if note.get("system") is not True or not isinstance(body, str):
                 continue
-            if not body.startswith(_RETARGET):
+            if not body.startswith(_RETARGET) and _AUTO_RETARGET not in body:
                 continue
             at = _rfc3339(note.get("created_at"))
             if at is None:
@@ -817,8 +922,9 @@ class GitLabBackend:
 
     # -- CI ------------------------------------------------------------------------------------
 
-    def _ci(self, target: Target, mr: Mapping[str, Any], head_sha: str) -> m.CI:
-        """Checks from `head_pipeline`'s statuses (a fork's pipeline from its own project)."""
+    def _ci(self, target: Target, mr: Mapping[str, Any], head_sha: str, project_id: int) -> m.CI:
+        """Checks from `head_pipeline`'s statuses (a fork's pipeline from its own project), its
+        own status, and its child pipelines (one check per bridge)."""
         pipeline = mr.get("head_pipeline")
         if pipeline is None:
             return m.aggregate_ci((), pr_head_sha=head_sha, checks_sha=None)
@@ -826,77 +932,165 @@ class GitLabBackend:
         pipeline_id = _int_id(data.get("id"), "pipeline id")
         pipeline_sha = _sha(data.get("sha"), "pipeline sha")
         pipeline_project = _int_id(data.get("project_id"), "pipeline project")
-        status_rows, complete = self._pages(
-            target,
-            [
-                "projects",
-                path_int(pipeline_project),
-                "repository",
-                "commits",
-                pipeline_sha,
-                "statuses",
-            ],
-            (("pipeline_id", path_int(pipeline_id)),),
-        )
-        checks = self._checks(status_rows)
-        pipeline_status = data.get("status")
-        if isinstance(pipeline_status, str) and pipeline_status in _PIPELINE_RUNNING:
-            # Child pipelines may still add jobs: an unfinished pipeline is pending (default of
-            # design.md "Still to verify").
-            url = self._check_url(data.get("web_url"))
-            checks.append(
-                m.Check(
-                    name="(pipeline)",
-                    state="pending",
-                    required=None,
-                    counted=True,
-                    url=url,
-                    finished_at=None,
-                )
+        source = mr.get("source_project_id")
+        allowed = {project_id}
+        if isinstance(source, int) and not isinstance(source, bool):
+            allowed.add(source)
+        if pipeline_project not in allowed:
+            raise _bad("pipeline project")
+        fork = pipeline_project != project_id
+        try:
+            status_rows, complete = self._pages(
+                target,
+                [
+                    "projects",
+                    path_int(pipeline_project),
+                    "repository",
+                    "commits",
+                    pipeline_sha,
+                    "statuses",
+                ],
+                (("pipeline_id", path_int(pipeline_id)),),
             )
+        except ForgectlError as error:
+            # A fork's pipeline the token cannot see is unknown, never a failed `show`.
+            if not (fork and _part_missing(error)):
+                raise
+            self._warn("the fork's pipeline could not be read; CI is incomplete")
+            status_rows, complete = [], False
+        checks = self._checks(status_rows)
+        version = self._version_or_unreadable(target.host)
+        if version is None or version < _STATUSES_PIPELINE_FILTER:
+            # Older hosts ignore `pipeline_id` and list every pipeline's statuses on the sha.
+            self._warn(
+                "the host is older than GitLab 17.9 or its version is unreadable, so its"
+                " statuses may mix pipelines; CI is incomplete"
+            )
+            complete = False
+        own = self._pipeline_check(data)
+        if own is not None:
+            checks.append(own)
+        children, children_complete = self._children(target, pipeline_project, pipeline_id)
+        checks.extend(children)
+        # TODO(#31): a merged-results or merge-train pipeline runs on the merge ref, so its sha
+        # differs from the head and `for_current_head` is false (pending) until a spec decision.
         return m.aggregate_ci(
-            checks, pr_head_sha=head_sha, checks_sha=pipeline_sha, complete=complete
+            checks,
+            pr_head_sha=head_sha,
+            checks_sha=pipeline_sha,
+            complete=complete and children_complete,
         )
 
+    def _pipeline_check(self, data: Mapping[str, Any]) -> m.Check | None:
+        """The head pipeline's own status as a `(pipeline)` check, per its table."""
+        raw = data.get("status")
+        if isinstance(raw, str) and raw in _PIPELINE_QUIET:
+            return None
+        state: m.CheckState
+        if isinstance(raw, str) and raw in _PIPELINE_FAILED:
+            state = "failing"
+        else:
+            state = "pending"
+            if not (isinstance(raw, str) and raw in _PIPELINE_UNFINISHED):
+                shown = _capped(raw) if isinstance(raw, str) else type(raw).__name__
+                self._warn(f"unmapped gitlab pipeline status {shown!r}; reading it as pending")
+        return m.Check(
+            name="(pipeline)",
+            state=state,
+            required=None,
+            counted=True,
+            url=self._check_url(data.get("web_url")),
+            finished_at=None,
+        )
+
+    def _children(
+        self, target: Target, project: int, pipeline_id: int
+    ) -> tuple[list[m.Check], bool]:
+        """One `(child) <bridge name>` check per bridge of the head pipeline, from its downstream
+        pipeline's status. A list that cannot be read or is cut is incomplete."""
+        segments = ["projects", path_int(project), "pipelines", path_int(pipeline_id), "bridges"]
+        try:
+            rows, done = self._pages(target, segments)
+            checks = [self._bridge_check(row) for row in rows]
+        except ForgectlError as error:
+            if error.code in _NEVER_DEGRADED:
+                raise
+            self._warn("the child pipelines could not be read; CI is incomplete")
+            return [], False
+        if not done:
+            self._warn("the child pipelines hit the page cap; CI is incomplete")
+        return checks, done
+
+    def _bridge_check(self, row: Mapping[str, Any]) -> m.Check:
+        name = row.get("name")
+        if not isinstance(name, str):
+            raise _bad("bridge name")
+        allow = _opt_flag(row.get("allow_failure"))
+        downstream = row.get("downstream_pipeline")
+        state: m.CheckState = "pending"
+        url = None
+        if downstream is not None:
+            child = _obj(downstream, "downstream pipeline")
+            state = self._child_state(child.get("status"))
+            url = self._check_url(child.get("web_url"))
+        return m.Check(
+            name=f"(child) {_line(name)}",
+            state=state,
+            required=m.gitlab_required(allow),
+            counted=m.is_counted(state, allow_failure=allow),
+            url=url,
+            finished_at=_rfc3339(row.get("finished_at")),
+        )
+
+    def _child_state(self, raw: Any) -> m.CheckState:
+        """A child pipeline's status through the pipeline table: `success` passes, `skipped` is
+        skipped, failed ones fail; `manual` is pending (its jobs are not listed here), as is
+        every unfinished or unknown value (unknown with a warning)."""
+        if raw == "success":
+            return "passing"
+        if raw == "skipped":
+            return "skipped"
+        if isinstance(raw, str) and raw in _PIPELINE_FAILED:
+            return "failing"
+        if not (isinstance(raw, str) and (raw in _PIPELINE_UNFINISHED or raw == "manual")):
+            shown = _capped(raw) if isinstance(raw, str) else type(raw).__name__
+            self._warn(f"unmapped gitlab child pipeline status {shown!r}; reading it as pending")
+        return "pending"
+
     def _checks(self, rows: list[dict[str, Any]]) -> list[m.Check]:
-        latest: dict[str, tuple[int, dict[str, Any]]] = {}
+        """The latest status per name: the highest id, and on equal ids the worse state."""
+        latest: dict[str, tuple[int, int, m.Check]] = {}
         for row in rows:
             name = row.get("name")
             if not isinstance(name, str):
                 raise _bad("status name")
-            identifier = row.get("id")
-            rank = (
-                identifier
-                if isinstance(identifier, int) and not isinstance(identifier, bool)
-                else 0
-            )
-            if name not in latest or rank > latest[name][0]:
-                latest[name] = (rank, row)
-        checks: list[m.Check] = []
-        for name, (_, row) in latest.items():
+            identifier = _int_id(row.get("id"), "status id")
             raw = row.get("status")
             if not isinstance(raw, str):
                 raise _bad("status")
+            # A long value is never a known state; cut it so a warning stays bounded.
+            shown = raw if len(raw) <= _MAX_DETAIL else _capped(raw)
             allow = _opt_flag(row.get("allow_failure"))
-            state = m.normalize_check_state("gitlab", raw, allow_failure=allow, warn=self._warn)
-            checks.append(
-                m.Check(
-                    name=sanitize_line(name) or "(unnamed)",
-                    state=state,
-                    required=m.gitlab_required(allow),
-                    counted=m.is_counted(state, allow_failure=allow),
-                    url=self._check_url(row.get("target_url")),
-                    finished_at=_rfc3339(row.get("finished_at")),
-                )
+            state = m.normalize_check_state("gitlab", shown, allow_failure=allow, warn=self._warn)
+            check = m.Check(
+                name=_line(name) or "(unnamed)",
+                state=state,
+                required=m.gitlab_required(allow),
+                counted=m.is_counted(state, allow_failure=allow),
+                url=self._check_url(row.get("target_url")),
+                finished_at=_rfc3339(row.get("finished_at")),
             )
-        return checks
+            rank = (identifier, _SEVERITY[state])
+            if name not in latest or rank > latest[name][:2]:
+                latest[name] = (*rank, check)
+        return [check for _, _, check in latest.values()]
 
     @staticmethod
     def _check_url(raw: Any) -> str | None:
         url = m.clean_check_url(raw if isinstance(raw, str) else None)
         if url is None:
             return None
-        return m.clean_check_url(sanitize_line(url))
+        return m.clean_check_url(_line(url))
 
     # -- the rest of the protocol (other issues) ---------------------------------------------------
 
@@ -932,8 +1126,11 @@ class GitLabBackend:
 
 
 #: The one-line registration seam for the backend factory table.
-# TODO(#11): reads.py's factory table gets `"gitlab": GitLabBackend` (or `gitlab.BACKEND`); the
-# first branch merging both #11 and #15 wires it.
+# TODO(#11): reads.py's factory table gets
+# `"gitlab": lambda env: GitLabBackend(env.hosts, warn=env.warn, retry=env.call,
+# until_known=lambda f, u: env.until_known(f, u, reads.SHOW_READINESS))`, so the readiness loop
+# wraps the single-MR GET only. The first branch merging both #11 and #15 wires it; the add/add
+# conflict on `backends/__init__.py` keeps #11's version.
 BACKEND = GitLabBackend
 
-__all__ = ["BACKEND", "MAX_PAGES", "READINESS_UNKNOWN", "GitLabBackend", "readiness_unknown"]
+__all__ = ["BACKEND", "MAX_PAGES", "READINESS_UNKNOWN", "GitLabBackend", "UntilKnown"]

@@ -195,6 +195,7 @@ _CHECK_TABLE: dict[str, dict[str, CheckState]] = {
                 "scheduled",
                 "waiting_for_resource",
                 "waiting_for_callback",
+                "canceling",
             ),
             "pending",
         ),

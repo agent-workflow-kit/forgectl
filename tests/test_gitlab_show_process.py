@@ -47,6 +47,13 @@ def script(forges: FakeForges, host: str, prefix: str, mr_host: str | None = Non
         headers={"X-Next-Page": ""},
     )
     route(forges, "users/11", recording("user"))
+    route(forges, "version", recording("version"))
+    route(
+        forges,
+        "projects/101/pipelines/5001/bridges",
+        recording("bridges"),
+        headers={"X-Next-Page": ""},
+    )
 
 
 def backend(forges: FakeForges, host: str, prefix: str) -> GitLabBackend:
@@ -72,7 +79,7 @@ def test_show_runs_only_safe_glab_calls(fake_forges: FakeForges, host: str, pref
     assert read.pr.pr == f"{host}/user-9/proj#7"
     assert read.pr.blocked_by == () and read.ci.state == "passing"
     calls = fake_forges.calls("glab")
-    assert len(calls) == 7
+    assert len(calls) == 9
     gitlab_host = None if host == "gitlab.com" else host + prefix
     for call in calls:
         assert_call_safe(call, host=host, mode="token", gitlab_host=gitlab_host)

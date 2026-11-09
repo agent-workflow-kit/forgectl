@@ -32,7 +32,7 @@ from .gitlab_support import (
     ref,
     standard,
 )
-from .harness import golden
+from .harness import golden, schemas
 
 STATUSES = f"projects/101/repository/commits/{HEAD}/statuses"
 
@@ -230,6 +230,12 @@ def test_a_project_answer_for_another_id_is_wrong_host_response(
         "https://gitlab.com/user-9/../proj/-/merge_requests/7",
         "https://gitlab.com/user-9/%2e%2e/proj/-/merge_requests/7",
         "https://gitlab.com/user-9/proj/-/merge_requests/7?x=1",
+        "https://gitlab.com?/user-9/proj/-/merge_requests/7",
+        "https://gitlab.com#/user-9/proj/-/merge_requests/7",
+        "https://gitlab.com/user-9/proj/-/merge_requests/7#",
+        "https://gitlab.com/user-9;x/proj/-/merge_requests/7",
+        "https://gitlab.com/user-9/merge_requests/proj/-/merge_requests/7",
+        "https://gitlab.com/merge_requests/proj/-/merge_requests/7",
         "https://gitlab.com/-/proj/-/merge_requests/7",
         "https://gitlab.com/user-9/pr oj/-/merge_requests/7",
         "https://gitlab.com/user-9/proj/-/issues/7",
@@ -327,7 +333,7 @@ def test_an_unknown_state_fails_closed(fake: FakeGitLab, tmp_path: Path) -> None
 
 STATUS_TABLE = [
     ("mergeable", True, []),
-    ("not_open", False, []),
+    ("not_open", False, ["other:not_open"]),
     ("draft_status", False, ["draft"]),
     ("conflict", False, ["conflicts"]),
     ("need_rebase", False, ["branch_behind"]),
@@ -351,18 +357,10 @@ def test_detailed_merge_status_maps_to_blockers(
     fake: FakeGitLab, tmp_path: Path, status: str, mergeable: Any, expected: list[str]
 ) -> None:
     def mutate(mr: dict) -> None:
-        mr["detailed_merge_status"] = status
-        if status == "draft_status":
-            mr["draft"] = True
-        if status == "conflict":
-            mr["has_conflicts"] = True
-        if status == "not_open":
-            return
+        # the flags stay false, so each row tests the status mapping alone
+        mr.update(detailed_merge_status=status, draft=False, has_conflicts=False)
 
     read = show(fake, tmp_path, mutate)
-    if status == "not_open":  # an open MR the host calls not_open adds nothing, as the table says
-        assert read.pr.blocked_by == ()
-        return
     assert read.pr.mergeable is mergeable
     assert codes(read) == expected
 
@@ -410,13 +408,54 @@ def test_a_missing_status_with_an_unreadable_version_is_still_unsupported(
     assert raised.value.code == "unsupported_host_version"
 
 
-def test_readiness_unknown_is_what_a_retry_loop_asks(fake: FakeGitLab, tmp_path: Path) -> None:
+def test_without_a_readiness_hook_the_mr_is_read_once(fake: FakeGitLab, tmp_path: Path) -> None:
     def checking(mr: dict) -> None:
         mr["detailed_merge_status"] = "checking"
 
     assert gl.READINESS_UNKNOWN == frozenset({"checking", "unchecked", "preparing"})
-    assert gl.readiness_unknown(show(fake, tmp_path, checking).pr) is True
-    assert gl.readiness_unknown(show(FakeGitLab(), tmp_path / "b").pr) is False
+    read = show(fake, tmp_path, checking)
+    assert codes(read) == ["mergeability_unknown"] and read.pr.mergeable is None
+    assert fake.count(mr_path()) == 1
+
+
+def _recheck_once(fetch: Any, unknown: Any) -> tuple[Any, bool]:
+    answer = fetch()
+    if unknown(answer):
+        answer = fetch()
+    return answer, unknown(answer)
+
+
+def test_the_readiness_hook_rereads_only_the_mr_get(fake: FakeGitLab, tmp_path: Path) -> None:
+    from .gitlab_support import Answer
+
+    first = recording("mr")
+    first["detailed_merge_status"] = "checking"
+    answers = [first, recording("mr")]
+    standard(fake)
+    seen: list[int] = []
+
+    def handler(_query: dict[str, str]) -> Answer:
+        seen.append(1)
+        return Answer(200, answers[min(len(seen), len(answers)) - 1])
+
+    fake.on_handler(mr_path(), handler)
+    read = make_backend(fake, tmp_path, until_known=_recheck_once).get_pr(ref())
+    assert fake.count(mr_path()) == 2
+    assert fake.count("projects/101") == 1
+    assert fake.count(f"{MR_ID}/approvals") == 1 and fake.count(f"{MR_ID}/reviewers") == 1
+    assert fake.count(STATUSES) == 1
+    assert read.pr.mergeable is True and read.pr.blocked_by == ()
+
+
+def test_a_status_still_unknown_after_the_hook_is_mergeability_unknown(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    mr = recording("mr")
+    mr["detailed_merge_status"] = "unchecked"
+    standard(fake, mr=mr)
+    read = make_backend(fake, tmp_path, until_known=_recheck_once).get_pr(ref())
+    assert fake.count(mr_path()) == 2
+    assert codes(read) == ["mergeability_unknown"]
 
 
 def test_every_other_protocol_method_is_a_typed_not_yet_error(
@@ -504,16 +543,16 @@ def test_the_authors_own_approval_never_counts(fake: FakeGitLab, tmp_path: Path)
     assert show(fake, tmp_path, approvals=approvals).pr.approvals == 0
 
 
-def test_a_missing_reviewers_endpoint_is_empty_with_a_warning(
-    fake: FakeGitLab, tmp_path: Path
+@pytest.mark.parametrize("status", [404, 403])
+def test_an_unreadable_reviewers_endpoint_fails_the_read(
+    fake: FakeGitLab, tmp_path: Path, status: int
 ) -> None:
-    mr = recording("mr")
-    backend, _ = setup(fake, tmp_path, mr=mr)
-    warnings: list[str] = []
-    backend = make_backend(fake, tmp_path / "w", warn=warnings.append)
-    del fake.routes[f"{MR_ID}/reviewers"]
-    assert backend.get_pr(ref()).pr.approvals == 1
-    assert any("reviewers" in w for w in warnings)
+    backend, _ = setup(fake, tmp_path)
+    fake.on(f"{MR_ID}/reviewers", {"message": "x"}, status=status)
+    with pytest.raises(ForgectlError) as raised:
+        backend.get_pr(ref())
+    assert raised.value.code == "upstream_error"
+    schemas.validate_error_envelope(raised.value.envelope())
 
 
 # -- reset_approvals_on_push -----------------------------------------------------------------
@@ -547,13 +586,24 @@ def test_with_reset_on_push_a_pusher_approval_counts_at_head(
 @pytest.mark.parametrize(
     ("member", "status", "counted"),
     [
-        ({"access_level": 20, "state": "active", "expires_at": None}, 200, False),
-        ({"access_level": 30, "state": "blocked", "expires_at": None}, 200, False),
-        ({"access_level": 30, "state": "active", "expires_at": "2020-01-01"}, 200, False),
-        ({"access_level": 30, "state": "active", "expires_at": "2999-01-01"}, 200, True),
-        ({"access_level": 50, "state": "active", "expires_at": None}, 200, True),
-        ({"access_level": 30}, 200, False),
-        ({"access_level": "30", "state": "active"}, 200, False),
+        ({"id": 12, "access_level": 20, "state": "active", "expires_at": None}, 200, False),
+        ({"id": 12, "access_level": 30, "state": "blocked", "expires_at": None}, 200, False),
+        ({"id": 12, "access_level": 30, "state": "active", "expires_at": "2020-01-01"}, 200, False),
+        ({"id": 12, "access_level": 30, "state": "active", "expires_at": "2999-01-01"}, 200, True),
+        ({"id": 12, "access_level": 50, "state": "active", "expires_at": None}, 200, True),
+        ({"id": 12, "access_level": 30}, 200, False),
+        ({"id": 12, "access_level": "30", "state": "active"}, 200, False),
+        (
+            {"id": 12, "access_level": 30, "state": "active", "membership_state": "active"},
+            200,
+            True,
+        ),
+        (
+            {"id": 12, "access_level": 30, "state": "active", "membership_state": "awaiting"},
+            200,
+            False,
+        ),
+        ({"id": 12, "access_level": 30, "state": "active", "membership_state": None}, 200, False),
         ({"message": "404 Not found"}, 404, False),
     ],
 )
@@ -793,6 +843,7 @@ def test_a_skipped_only_pipeline_is_none(fake: FakeGitLab, tmp_path: Path) -> No
         ("created", False, "pending", True),
         ("running", False, "pending", True),
         ("canceled", False, "failing", True),
+        ("canceling", False, "pending", True),
         ("waiting_for_callback", False, "pending", True),
         ("Failed", False, "pending", True),
         ("brand_new", False, "pending", True),
@@ -810,6 +861,8 @@ def test_check_states_follow_the_table_and_unmapped_is_pending(
     assert (check.state, check.counted) == (state, counted)
     if status in ("Failed", "brand_new"):
         assert warnings
+    else:
+        assert warnings == []
 
 
 def test_the_latest_status_per_name_wins(fake: FakeGitLab, tmp_path: Path) -> None:
@@ -921,7 +974,7 @@ def test_a_deleted_or_hidden_head_project_is_null_repo(
     fake.on(mr_path(), mr)
     fake.on("projects/202", {"message": "x"}, status=status)
     head = make_backend(fake, tmp_path).get_pr(ref()).pr.head
-    assert head.repo is None and head.is_fork is None
+    assert head.repo is None and head.is_fork is True  # a differing project id proves a fork
 
 
 def test_a_null_source_project_is_a_deleted_head_project(fake: FakeGitLab, tmp_path: Path) -> None:
@@ -1238,6 +1291,7 @@ def test_a_missing_mr_is_not_found_and_a_missing_part_is_upstream_error(
     with pytest.raises(ForgectlError) as raised:
         make_backend(fake2, tmp_path / "b").get_pr(ref())
     assert raised.value.code == "upstream_error"  # not "the PR was not found"
+    schemas.validate_error_envelope(raised.value.envelope())
 
 
 @pytest.mark.parametrize("pid", ["101/../x", "1e3", -4, 0, True, 2**70, "x", None, [101]])
@@ -1301,6 +1355,9 @@ def test_the_version_is_read_once_and_parsed(fake: FakeGitLab, tmp_path: Path) -
         ({}, None),
         ([], None),
         ({"version": "0017.0001"}, (17, 1)),
+        ({"version": "9" * 5000 + ".1"}, None),
+        ({"version": "17." + "9" * 5000}, (17, 999999)),
+        ({"version": "١٧.٩"}, None),
     ],
 )
 def test_the_version_parse_and_an_unreadable_version_is_none(
@@ -1343,7 +1400,9 @@ def test_anchored_patterns_refuse_a_trailing_newline_and_non_ascii_digits(
         show(fake, tmp_path, hostile)
 
 
-@pytest.mark.parametrize("header", ["abc", "1", "0", "-2", "2.5", "٢", "99999999999999999999 "])
+@pytest.mark.parametrize(
+    "header", ["abc", "1", "0", "-2", "2.5", "٢", "99999999999999999999 ", "02", "+2", "9" * 5000]
+)
 def test_a_hostile_next_page_header_is_a_typed_error_never_a_loop(
     fake: FakeGitLab, tmp_path: Path, header: str
 ) -> None:
@@ -1374,3 +1433,467 @@ def test_a_missing_next_page_header_ends_a_short_page_and_continues_a_full_one(
     fake.on_handler(STATUSES, handler)
     read = make_backend(fake, tmp_path).get_pr(ref())
     assert fake.count(STATUSES) == 2 and len(read.ci.checks) == 101
+
+
+# -- review round 1 ---------------------------------------------------------------------------
+
+
+BRIDGES = "projects/101/pipelines/5001/bridges"
+
+
+def pipeline_status(value: Any) -> Any:
+    def mutate(mr: dict) -> None:
+        if value is _ABSENT:
+            del mr["head_pipeline"]["status"]
+        else:
+            mr["head_pipeline"]["status"] = value
+
+    return mutate
+
+
+_ABSENT = object()
+
+
+@pytest.mark.parametrize(
+    ("status", "ci_state", "pipeline_check", "warned"),
+    [
+        ("success", "passing", None, False),
+        ("skipped", "passing", None, False),
+        ("manual", "passing", None, False),
+        ("failed", "failing", "failing", False),
+        ("canceled", "failing", "failing", False),
+        ("created", "pending", "pending", False),
+        ("waiting_for_resource", "pending", "pending", False),
+        ("preparing", "pending", "pending", False),
+        ("pending", "pending", "pending", False),
+        ("running", "pending", "pending", False),
+        ("scheduled", "pending", "pending", False),
+        ("canceling", "pending", "pending", False),
+        ("waiting_for_callback", "pending", "pending", False),
+        (None, "pending", "pending", True),
+        (_ABSENT, "pending", "pending", True),
+        (7, "pending", "pending", True),
+        ("Failed", "pending", "pending", True),
+        ("garbage", "pending", "pending", True),
+    ],
+)
+def test_the_head_pipeline_status_follows_its_table(
+    fake: FakeGitLab,
+    tmp_path: Path,
+    status: Any,
+    ci_state: str,
+    pipeline_check: str | None,
+    warned: bool,
+) -> None:
+    mr = recording("mr")
+    pipeline_status(status)(mr)
+    warnings: list[str] = []
+    standard(fake, mr=mr)
+    read = make_backend(fake, tmp_path, warn=warnings.append).get_pr(ref())
+    assert read.ci.state == ci_state
+    found = [c for c in read.ci.checks if c.name == "(pipeline)"]
+    if pipeline_check is None:
+        assert found == []
+    else:
+        assert [(c.state, c.counted) for c in found] == [(pipeline_check, True)]
+    assert bool(warnings) is warned
+
+
+def test_an_unknown_pipeline_status_warning_is_capped(fake: FakeGitLab, tmp_path: Path) -> None:
+    mr = recording("mr")
+    mr["head_pipeline"]["status"] = "x" * 1_000_000
+    warnings: list[str] = []
+    standard(fake, mr=mr)
+    make_backend(fake, tmp_path, warn=warnings.append).get_pr(ref())
+    assert warnings and all(len(w) < 400 for w in warnings)
+
+
+def bridge(name: str, status: Any, *, allow_failure: bool = False, downstream: Any = "") -> dict:
+    row: dict[str, Any] = {"id": 8001, "name": name, "allow_failure": allow_failure}
+    if downstream == "":
+        downstream = {
+            "id": 6001,
+            "project_id": 303,
+            "sha": HEAD,
+            "status": status,
+            "web_url": "https://gitlab.com/user-9/child/-/pipelines/6001",
+        }
+    row["downstream_pipeline"] = downstream
+    return row
+
+
+@pytest.mark.parametrize(
+    ("row", "ci_state", "check"),
+    [
+        (bridge("deploy", "running"), "pending", ("pending", True)),
+        (bridge("deploy", "failed"), "failing", ("failing", True)),
+        (bridge("deploy", "canceled"), "failing", ("failing", True)),
+        (bridge("deploy", "success"), "passing", ("passing", True)),
+        (bridge("deploy", "manual"), "pending", ("pending", True)),
+        (bridge("deploy", "skipped"), "passing", ("skipped", False)),
+        (bridge("deploy", "failed", allow_failure=True), "passing", ("failing", False)),
+        (bridge("deploy", "running", downstream=None), "pending", ("pending", True)),
+        (bridge("deploy", "brand_new"), "pending", ("pending", True)),
+    ],
+)
+def test_child_pipelines_are_checks_named_after_their_bridge(
+    fake: FakeGitLab, tmp_path: Path, row: dict, ci_state: str, check: tuple[str, bool]
+) -> None:
+    read = show(fake, tmp_path, bridges=[row])
+    assert read.ci.state == ci_state
+    child = {c.name: c for c in read.ci.checks}["(child) deploy"]
+    assert (child.state, child.counted) == check
+    call = next(c for c in fake.calls if c.path == BRIDGES)
+    assert call.query == {"per_page": "100", "page": "1"}
+
+
+@pytest.mark.parametrize("status", [404, 403, 500, 429])
+def test_an_unreadable_bridges_list_makes_ci_incomplete(
+    fake: FakeGitLab, tmp_path: Path, status: int
+) -> None:
+    warnings: list[str] = []
+    standard(fake)
+    fake.on(BRIDGES, {"message": "x"}, status=status)
+    read = make_backend(fake, tmp_path, warn=warnings.append).get_pr(ref())
+    assert read.ci.complete is False and read.ci.state == "pending"
+    assert any("child" in w for w in warnings)
+
+
+def test_a_bridges_auth_failure_fails_the_read(fake: FakeGitLab, tmp_path: Path) -> None:
+    standard(fake)
+    fake.on(BRIDGES, {"message": "x"}, status=401)
+    with pytest.raises(ForgectlError) as raised:
+        make_backend(fake, tmp_path).get_pr(ref())
+    assert raised.value.code == "auth_required"
+
+
+def test_a_bridges_list_cut_at_the_page_cap_is_incomplete(fake: FakeGitLab, tmp_path: Path) -> None:
+    standard(fake)
+    fake.pages(BRIDGES, [[bridge("deploy", "success")]] * (gl.MAX_PAGES + 2))
+    read = make_backend(fake, tmp_path).get_pr(ref())
+    assert read.ci.complete is False and read.ci.state == "pending"
+    assert fake.count(BRIDGES) == gl.MAX_PAGES
+
+
+@pytest.mark.parametrize("identifier", [None, "7003", True, 0, 1.5])
+def test_a_status_without_an_integer_id_is_upstream_error(
+    fake: FakeGitLab, tmp_path: Path, identifier: Any
+) -> None:
+    statuses = recording("statuses")
+    if identifier is None:
+        del statuses[0]["id"]
+    else:
+        statuses[0]["id"] = identifier
+    with pytest.raises(ForgectlError) as raised:
+        show(fake, tmp_path, statuses=statuses)
+    assert raised.value.code == "upstream_error"
+
+
+def test_equal_status_ids_keep_the_worse_state(fake: FakeGitLab, tmp_path: Path) -> None:
+    statuses = recording("statuses")
+    twin_failed = dict(statuses[0], status="failed")
+    twin_running = dict(statuses[0], status="running")
+    for order in ([statuses[0], twin_failed], [twin_failed, statuses[0]]):
+        read = show(FakeGitLab(), tmp_path / str(id(order)), statuses=[*order, *statuses[1:]])
+        assert {c.name: c.state for c in read.ci.checks}["build"] == "failing"
+    read = show(fake, tmp_path, statuses=[statuses[0], twin_running, *statuses[1:]])
+    assert {c.name: c.state for c in read.ci.checks}["build"] == "pending"
+
+
+@pytest.mark.parametrize("project", [999, True, "101", None])
+def test_a_pipeline_of_an_unrelated_project_is_upstream_error(
+    fake: FakeGitLab, tmp_path: Path, project: Any
+) -> None:
+    def mutate(mr: dict) -> None:
+        mr["head_pipeline"]["project_id"] = project
+
+    with pytest.raises(ForgectlError) as raised:
+        show(fake, tmp_path, mutate)
+    assert raised.value.code == "upstream_error"
+    assert not any(c.path.endswith(("/statuses", "/bridges")) for c in fake.calls)
+
+
+def test_a_fork_pipeline_reads_its_bridges_from_the_fork(fake: FakeGitLab, tmp_path: Path) -> None:
+    def fork(mr: dict) -> None:
+        mr["source_project_id"] = 202
+        mr["head_pipeline"]["project_id"] = 202
+
+    show(fake, tmp_path, fork)
+    assert fake.count("projects/202/pipelines/5001/bridges") == 1
+    assert fake.count(BRIDGES) == 0
+
+
+@pytest.mark.parametrize("status", [404, 403])
+def test_an_unreadable_fork_pipeline_is_incomplete_not_a_failure(
+    fake: FakeGitLab, tmp_path: Path, status: int
+) -> None:
+    def fork(mr: dict) -> None:
+        mr["source_project_id"] = 202
+        mr["head_pipeline"]["project_id"] = 202
+
+    mr = recording("mr")
+    fork(mr)
+    warnings: list[str] = []
+    standard(fake, mr=mr)
+    fake.on(f"projects/202/repository/commits/{HEAD}/statuses", {"message": "x"}, status=status)
+    read = make_backend(fake, tmp_path, warn=warnings.append).get_pr(ref())
+    assert read.ci.complete is False and read.ci.state != "passing"
+    assert warnings
+
+
+@pytest.mark.parametrize("status", [404, 403])
+def test_an_unreadable_target_pipeline_is_upstream_error(
+    fake: FakeGitLab, tmp_path: Path, status: int
+) -> None:
+    standard(fake)
+    fake.on(STATUSES, {"message": "x"}, status=status)
+    with pytest.raises(ForgectlError) as raised:
+        make_backend(fake, tmp_path).get_pr(ref())
+    assert raised.value.code == "upstream_error"
+    schemas.validate_error_envelope(raised.value.envelope())
+
+
+@pytest.mark.parametrize(
+    ("version", "status", "complete"),
+    [
+        ({"version": "17.8.4"}, 200, False),
+        ({"version": "16.11.0"}, 200, False),
+        ({"version": "17.9.0"}, 200, True),
+        ({"version": "18.0.0"}, 200, True),
+        ({"version": "unknown"}, 200, False),
+        ({"message": "x"}, 403, False),
+        ({"message": "x"}, 500, False),
+        ({"message": "x"}, 404, False),
+    ],
+)
+def test_the_pipeline_filter_needs_gitlab_17_9(
+    fake: FakeGitLab, tmp_path: Path, version: dict, status: int, complete: bool
+) -> None:
+    warnings: list[str] = []
+    standard(fake)
+    fake.on("version", version, status=status)
+    read = make_backend(fake, tmp_path, warn=warnings.append).get_pr(ref())
+    assert read.ci.complete is complete
+    assert read.ci.state == ("passing" if complete else "pending")
+    assert bool(warnings) is not complete
+    assert fake.count("version") == 1
+
+
+def test_a_1mb_job_status_is_capped_in_the_warning(fake: FakeGitLab, tmp_path: Path) -> None:
+    statuses = recording("statuses")
+    statuses[0]["status"] = "q" * 1_000_000
+    warnings: list[str] = []
+    standard(fake, statuses=statuses)
+    read = make_backend(fake, tmp_path, warn=warnings.append).get_pr(ref())
+    assert {c.name: c.state for c in read.ci.checks}["build"] == "pending"
+    assert warnings and all(len(w) < 400 for w in warnings)
+
+
+def test_the_automatic_retarget_note_counts_as_a_retarget(fake: FakeGitLab, tmp_path: Path) -> None:
+    approvals = recording("approvals")
+    approvals["approved_by"][0]["approved_at"] = "2026-10-03T00:00:00.000Z"
+    backend, _ = setup(fake, tmp_path, approvals=approvals)
+    reset_on(fake)
+    note = {
+        "id": 900,
+        "system": True,
+        "body": "deleted the `a` branch. This merge request now targets the `main` branch",
+        "created_at": "2026-10-04T00:00:00.000Z",
+    }
+    fake.pages(f"{MR_ID}/notes", [[note]])
+    assert backend.get_pr(ref()).pr.approvals_at_head == 0
+    note["system"] = False  # a human's comment with the same words is no retarget
+    assert backend.get_pr(ref()).pr.approvals_at_head == 1
+
+
+@pytest.mark.parametrize("member_id", [13, True, None, "12"])
+def test_a_member_answer_for_another_user_is_upstream_error(
+    fake: FakeGitLab, tmp_path: Path, member_id: Any
+) -> None:
+    backend, _ = setup(fake, tmp_path)
+    reset_on(fake)
+    member = recording("member")
+    if member_id is None:
+        del member["id"]
+    else:
+        member["id"] = member_id
+    fake.on("projects/101/members/all/12", member)
+    with pytest.raises(ForgectlError) as raised:
+        backend.get_pr(ref())
+    assert raised.value.code == "upstream_error"
+
+
+@pytest.mark.parametrize("status", [403, 500])
+def test_a_missing_detailed_status_with_a_failed_version_read_is_unsupported(
+    fake: FakeGitLab, tmp_path: Path, status: int
+) -> None:
+    def old(mr: dict) -> None:
+        del mr["detailed_merge_status"]
+
+    mr = recording("mr")
+    old(mr)
+    standard(fake, mr=mr)
+    fake.on("version", {"message": "x"}, status=status)
+    with pytest.raises(ForgectlError) as raised:
+        make_backend(fake, tmp_path).get_pr(ref())
+    assert raised.value.code == "unsupported_host_version"
+    assert "unreadable" in raised.value.message
+
+
+@pytest.mark.parametrize("value", [None, "true", 1, [], {}])
+def test_a_has_conflicts_that_is_not_a_boolean_is_upstream_error(
+    fake: FakeGitLab, tmp_path: Path, value: Any
+) -> None:
+    def mutate(mr: dict) -> None:
+        mr["has_conflicts"] = value
+
+    with pytest.raises(ForgectlError) as raised:
+        show(fake, tmp_path, mutate)
+    assert raised.value.code == "upstream_error"
+
+
+def test_an_absent_has_conflicts_is_false(fake: FakeGitLab, tmp_path: Path) -> None:
+    def mutate(mr: dict) -> None:
+        del mr["has_conflicts"]
+
+    read = show(fake, tmp_path, mutate)
+    assert read.pr.mergeable is True and read.pr.blocked_by == ()
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(_ABSENT, False), (True, True), (False, False), (None, None), ("yes", None), (1, None)],
+)
+def test_merge_trains_enabled_absent_is_false_and_unclear_is_null(
+    fake: FakeGitLab, tmp_path: Path, value: Any, expected: Any
+) -> None:
+    project = recording("project")
+    if value is _ABSENT:
+        del project["merge_trains_enabled"]
+    else:
+        project["merge_trains_enabled"] = value
+    pr = show(fake, tmp_path, project=project).pr
+    assert pr.merge_queue is expected
+    schemas.validate(pr.to_dict(), "forgectl/cli/show.json")
+
+
+@pytest.mark.parametrize("value", [None, "yesterday", 7])
+def test_a_merged_mr_without_a_usable_merged_at_is_upstream_error(
+    fake: FakeGitLab, tmp_path: Path, value: Any
+) -> None:
+    def mutate(mr: dict) -> None:
+        merged(mr)
+        mr["merged_at"] = value
+
+    with pytest.raises(ForgectlError) as raised:
+        show(fake, tmp_path, mutate)
+    assert raised.value.code == "upstream_error"
+    assert str(value) not in raised.value.message or value is None
+
+
+def test_closed_at_is_null_unless_the_mr_is_closed(fake: FakeGitLab, tmp_path: Path) -> None:
+    def mutate(mr: dict) -> None:
+        mr["closed_at"] = "2026-10-06T08:00:00.000Z"
+
+    pr = show(fake, tmp_path, mutate).pr.to_dict()
+    assert pr["closed_at"] is None
+    schemas.validate(pr, "forgectl/cli/show.json")
+
+    def merged_with_closed(mr: dict) -> None:
+        merged(mr)
+        mr["closed_at"] = "2026-10-06T08:00:00.000Z"
+
+    pr = show(FakeGitLab(), tmp_path / "b", merged_with_closed).pr.to_dict()
+    assert pr["closed_at"] is None
+    schemas.validate(pr, "forgectl/cli/show.json")
+
+
+@pytest.mark.parametrize("number", [0, -1, 10**10, True, 2**70])
+def test_a_number_outside_the_range_is_invalid_pr_before_any_read(
+    fake: FakeGitLab, tmp_path: Path, number: Any
+) -> None:
+    standard(fake)
+    with pytest.raises(ForgectlError) as raised:
+        make_backend(fake, tmp_path).get_pr(ref(number=number))
+    assert raised.value.code == "invalid_pr"
+    assert fake.calls == []
+
+
+def test_a_source_project_answer_for_another_path_is_wrong_host_response(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    def fork(mr: dict) -> None:
+        mr["source_project_id"] = 202
+
+    source = recording("source_project")
+    source["web_url"] = "https://gitlab.com/elsewhere/proj"
+    with pytest.raises(ForgectlError) as raised:
+        show(fake, tmp_path, fork, source_project=source)
+    assert raised.value.code == "wrong_host_response"
+
+
+@pytest.mark.parametrize("which", ["project", "source_project"])
+def test_a_project_read_over_http_is_refused(fake: FakeGitLab, tmp_path: Path, which: str) -> None:
+    def fork(mr: dict) -> None:
+        mr["source_project_id"] = 202
+
+    answer = recording(which)
+    answer["web_url"] = answer["web_url"].replace("https://", "http://")
+    with pytest.raises(ForgectlError) as raised:
+        show(fake, tmp_path, fork, **{which: answer})
+    assert raised.value.code == "upstream_error"
+
+
+def test_a_token_echoed_by_the_host_is_redacted_in_every_field(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    from .gitlab_support import TOKEN
+
+    def hostile(mr: dict) -> None:
+        mr["title"] = f"title {TOKEN}"
+        mr["description"] = f"body {TOKEN}\nmore"
+        mr["source_branch"] = f"b-{TOKEN}"
+        mr["target_branch"] = f"t-{TOKEN}"
+        mr["labels"] = [f"l-{TOKEN}"]
+        mr["detailed_merge_status"] = f"s-{TOKEN}"
+
+    statuses = recording("statuses")
+    statuses[0]["name"] = f"job {TOKEN}"
+    statuses[1]["target_url"] = f"https://gitlab.com/x?t={TOKEN}"
+    statuses[2]["status"] = f"z-{TOKEN}"
+    bridges = [bridge(f"child {TOKEN}", "success")]
+    bridges[0]["downstream_pipeline"]["web_url"] = f"https://gitlab.com/c?t={TOKEN}"
+    warnings: list[str] = []
+    mr = recording("mr")
+    hostile(mr)
+    standard(fake, mr=mr, statuses=statuses, bridges=bridges)
+    read = make_backend(fake, tmp_path, warn=warnings.append).get_pr(ref())
+    text = json.dumps(read.pr.to_dict()) + json.dumps(read.ci.to_dict()) + " ".join(warnings)
+    assert TOKEN not in text
+    assert "[redacted]" in read.pr.title and "[redacted]" in (read.pr.body or "")
+    assert any("[redacted]" in b.detail for b in read.pr.blocked_by if b.detail)
+
+
+def test_wrong_host_response_shows_the_observed_url_without_the_token(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    from .gitlab_support import TOKEN
+
+    project = recording("project")
+    project["id"] = 999
+    project["web_url"] = f"https://gitlab.com/user-9/proj?t={TOKEN}"
+    with pytest.raises(ForgectlError) as raised:
+        show(fake, tmp_path, project=project)
+    error = raised.value
+    assert error.code == "wrong_host_response"
+    observed = (error.details or {})["observed"]
+    assert observed and TOKEN not in observed
+    schemas.validate_error_envelope(error.envelope())
+
+    def prefixless(mr: dict) -> None:
+        mr["iid"] = 8
+
+    with pytest.raises(ForgectlError) as raised:
+        show(FakeGitLab(), tmp_path / "b", prefixless)
+    assert raised.value.code == "wrong_host_response"
+    assert (raised.value.details or {})["observed"]
