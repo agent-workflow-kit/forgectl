@@ -112,7 +112,7 @@ Field rules:
 | `draft` | `DRAFT`, `isDraft` | `draft_status` |
 | `conflicts` | `DIRTY` | `conflict`; `has_conflicts: true`, whatever the status (`need_rebase` can hide conflicts) |
 | `checks_pending` | any counted check pending ([CI object](#ci-object)); `ci.state` is `pending`; `BLOCKED` with `ci.state: none`, a required check that has not reported | any counted check pending; `ci.state` is `pending`; `ci_still_running`; `ci_must_pass` when no counted check is failing; `for_current_head: false` |
-| `checks_failing` | any counted check failing | any counted check failing |
+| `checks_failing` | any counted check of the current head failing | any counted check of the current head failing; an old commit's failing checks give `checks_pending` instead (`for_current_head: false`) |
 | `reviews_required` | `BLOCKED` with `reviewDecision: REVIEW_REQUIRED` | `not_approved` |
 | `changes_requested` | any `latest_by_reviewer` entry with that state and `can_push` not false, whether or not the host would block | `requested_changes`; any `latest_by_reviewer` entry with that state and `can_push` not false |
 | `discussions_unresolved` | `BLOCKED` with unresolved resolvable threads, when no other code explains it | `discussions_not_resolved` |
@@ -237,7 +237,7 @@ A check's `state`:
 
 An unmapped value is `pending` with a `warn` log line, so a new host state never reads as passing.
 
-- `counted` is false for a GitLab `allow_failure` job and for `skipped`; true otherwise. `required` is `true`, `false` or `null`; GitLab gives `false` for `allow_failure: true`, else `null`. A check's `url` is null for a scheme other than `http` or `https`.
+- `counted` is false for a GitLab `allow_failure` job and for `skipped`; true otherwise. `required` is `true`, `false` or `null`; GitLab gives `false` for `allow_failure: true`, else `null`. A check's `url` is null for a scheme other than lowercase `http://` or `https://`, matching the schema's pattern, and for a url holding whitespace or a control character.
 - **Aggregation over counted checks:** any `failing` gives `failing`; else any `pending` gives `pending`; else any `passing` gives `passing`; else `none`. **`none` is not passing:** it means no evidence, including a head whose only pipeline was skipped.
 - `for_current_head` false (GitLab `head_pipeline.sha` differs from the head) forces `state: pending`, whatever the old pipeline reported; `head_sha` names the old commit. With `state: none`, `for_current_head` is true and `head_sha` is the PR's head. `passing` means no counted check registered for this head is failing or pending, and at least one passed. It does not say which checks, that every expected check registered, or who ran them.
 - `complete` false (a host cap on the check list) turns `passing` into `pending`.
@@ -266,7 +266,7 @@ Applied to every forge text field, diffs, and anything printed from input or a c
 
 - Characters of Unicode categories `Cc` (except tab and newline), `Cf`, `Cs`, `Co`, `Cn`, `Zl` and `Zp` are replaced by a visible marker `<U+XXXX>`, for example `<U+202E>`. Bidi overrides stay visible rather than disappearing, because in a diff they can be the attack.
 - So are these code points: all variation selectors, U+034F, U+17B4, U+17B5, U+180B to U+180F, U+115F, U+1160, U+3164, U+FFA0 and U+2800.
-- **One-line fields** (`title`, `head.ref`, `base.ref`, `path`, `login`, a check's `name`, labels; `x-one-line` in the schemas): tab and LF also become markers.
+- **One-line fields** (`title`, `head.ref`, `base.ref`, `path`, `login`, a check's `name` and `url`, labels; `x-one-line` in the schemas): tab and LF also become markers.
 - In text fields CRLF becomes LF. A lone CR becomes `<U+000D>`. In a diff, a CR before LF stays as it is.
 - Bytes that are not valid UTF-8 become U+FFFD.
 
