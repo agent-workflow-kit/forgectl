@@ -221,13 +221,7 @@ class Target:
     None is stored-login mode. The host is lowercased first: every routing and token decision
     uses the lowercase form.
 
-    TODO(#8): hosts.py builds this from config and credentials, and must supply: the token
-    variable per host (``token_variable`` decides it from the host here); the configured name for
-    ``auth_required.details.variable``; the backend for a ``token_command`` (``run_external`` in
-    mode ``token_command`` requires it); which host kinds need an ``api_prefix``; refusing a port
-    on a GitHub host at config load (refused here as ``config_invalid``); lowercase, canonical
-    config host keys; and config's host and ``api_prefix`` patterns aligned with ``_valid_host``
-    and ``_API_PREFIX`` here (port range 1-65535, label length, ``~``, segment count and length).
+    ``hosts.py`` builds this from the config and the host's own credential.
     """
 
     backend: Backend
@@ -1011,6 +1005,7 @@ def _retry_after(headers: Mapping[str, str]) -> float | None:
 
 def _redact(text: str, secret: str | None) -> str:
     """``text`` with the token and its percent-encoded forms replaced by ``[redacted]``."""
+    # TODO(#7): match lowercase percent-encoded hex too (as hosts.redact_secrets does)
     if not secret or not text:
         return text
     forms = {
@@ -1050,6 +1045,7 @@ def verify_identity(
     Raises ``wrong_host_response``; ``details.observed`` is the URL redacted of ``secret`` (the
     call's token), sanitized and cut. This detects an accidental redirect, not a hostile host.
     """
+    # TODO(#7): require https in html_url for github.com and *.ghe.com
     ok = False
     shown = ""
     if isinstance(observed, str):

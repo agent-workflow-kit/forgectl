@@ -87,11 +87,15 @@ _LOGIN_RE = re.compile(
 )
 _BIN_RE = re.compile(r"/.*|[^/]+", re.ASCII)
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*", re.ASCII)
-_HOST_LABEL = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
-_HOST_PATTERN = rf"{_HOST_LABEL}(?:\.{_HOST_LABEL})*(?::[0-9]{{1,5}})?"
+# Aligned with gateway._valid_host: labels of at most 63 characters, a name of at most 253.
+_HOST_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+_HOST_PATTERN = (
+    rf"(?=[a-z0-9.-]{{1,253}}(?![a-z0-9.-])){_HOST_LABEL}(?:\.{_HOST_LABEL})*(?::[0-9]{{1,5}})?"
+)
 _HOST_RE = re.compile(_HOST_PATTERN, re.ASCII)
 _REPO_RE = re.compile(rf"{_HOST_PATTERN}(?:/(?!\.\.?(?:/|$))[A-Za-z0-9._-]+)+", re.ASCII)
-_API_PREFIX_RE = re.compile(r"(?:/(?!\.\.?(?:/|$))[A-Za-z0-9._-]+)+", re.ASCII)
+# Aligned with gateway._API_PREFIX: 1 to 8 segments of 1 to 64 characters.
+_API_PREFIX_RE = re.compile(r"(?:/(?!\.\.?(?:/|$))[A-Za-z0-9._-]{1,64}){1,8}", re.ASCII)
 _ENV_RETRIES_RE = re.compile(r"0|[1-9][0-9]?", re.ASCII)
 
 
@@ -549,8 +553,71 @@ def _validate(raw: dict[str, Any]) -> Config:
     return config
 
 
+def child_variables() -> frozenset[str]:
+    """The variables the gateway sets in, or passes to, a child, other than the token variables:
+    a ``token_env`` naming one would send that value to a host as a token. Built from the
+    gateway's own lists (imported here: the gateway imports this module)."""
+    from . import gateway
+
+    return frozenset(
+        {
+            "PATH",
+            "HOME",
+            "TMPDIR",
+            "GIT_CEILING_DIRECTORIES",
+            "GH_CONFIG_DIR",
+            "GLAB_CONFIG_DIR",
+            "XDG_CONFIG_HOME",
+            "GITLAB_HOST",
+            *gateway._PASSTHROUGH,  # pyright: ignore[reportPrivateUsage]
+            *gateway._BUS_VARIABLES,  # pyright: ignore[reportPrivateUsage]
+            *gateway.FIXED_SETTINGS,
+        }
+    )
+
+
+def _rewritten_github_host(host: str) -> bool:
+    """A host ``gh`` rewrites to another: ``*.github.com`` to github.com, and its localhost
+    forms, so a token configured for it would be used for a different host."""
+    name = host.partition(":")[0]
+    return (
+        name.endswith(".github.com")
+        or name == "github.localhost"
+        or name.endswith(".github.localhost")
+    )
+
+
+def _check_login(key: str, value: str | None, backend: str) -> None:
+    from .identifiers import bind_login  # here: identifiers imports this module
+
+    if value is None:
+        return
+    try:
+        bind_login(value, backend)  # type: ignore[arg-type]
+    except ForgectlError:
+        raise _invalid(key, f"not a valid {backend} login") from None
+
+
+def _check_credentials(key: str, entry: Host) -> None:
+    if entry.token_env is not None and entry.token_env in child_variables():
+        raise _invalid(
+            f"{key}.token_env",
+            "names a variable forgectl sets or passes to its children, not a token variable",
+        )
+    if entry.token_command is not None:
+        try:
+            _bin_name(entry.token_command[0])
+        except ValueError:
+            raise _invalid(
+                f"{key}.token_command",
+                "the first word must be a bare executable name or an absolute path",
+            ) from None
+
+
 def _check_keys(config: Config) -> None:
     """The rules that depend on a map's keys or on several fields at once."""
+    _check_login("me.github", config.me.github, "github")
+    _check_login("me.gitlab", config.me.gitlab, "gitlab")
     for host, entry in config.hosts.items():
         key = f"hosts.{host}"
         built_in = BUILT_IN_HOSTS.get(host)
@@ -559,6 +626,8 @@ def _check_keys(config: Config) -> None:
                 raise _invalid(f"{key}.backend", f"a built-in host's backend is {built_in}")
             if "api_prefix" in entry.model_fields_set:
                 raise _invalid(f"{key}.api_prefix", "not allowed for a built-in host")
+            _check_credentials(key, entry)
+            _check_login(f"{key}.me", entry.me, built_in)
             continue
         if not _HOST_RE.fullmatch(host):
             raise _invalid(key, "not a valid host name (lowercase, with an optional port)")
@@ -567,6 +636,12 @@ def _check_keys(config: Config) -> None:
             raise _invalid(f"{key}.backend", "required for a host that is not built in")
         if entry.backend == "github" and entry.api_prefix is not None:
             raise _invalid(f"{key}.api_prefix", "must be null for a GitHub host")
+        if entry.backend == "github" and ":" in host:
+            raise _invalid(key, "a GitHub host takes no port (gh refuses one)")
+        if entry.backend == "github" and _rewritten_github_host(host):
+            raise _invalid(key, "gh rewrites this host name to another host")
+        _check_credentials(key, entry)
+        _check_login(f"{key}.me", entry.me, entry.backend)
     seen: set[str] = set()
     for repo in config.repos:
         key = f"repos.{repo}"
