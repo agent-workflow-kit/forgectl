@@ -1127,7 +1127,7 @@ class Gateway:
         headers: Mapping[str, str] | None = None,
         write: bool = False,
         shape: Shape = "any",
-        parse: Literal["json", "text"] = "json",
+        parse: Literal["json", "text", "bytes"] = "json",
         expect_status: frozenset[int] | None = None,
         passthrough: frozenset[int] = frozenset(),
         _graphql: bool = False,
@@ -1142,7 +1142,8 @@ class Gateway:
         arrives here as that GET's answer. ``shape`` is the
         documented body: a list where one object is documented on a write is ``host_rejected``.
         ``passthrough`` lists non-2xx statuses the caller maps itself (409, 405...): they return
-        as a ``Response`` instead of raising.
+        as a ``Response`` instead of raising. ``parse="bytes"`` returns the body undecoded (a
+        diff may hold any bytes; the caller decodes with ``sanitize_bytes``).
         """
         method = method.upper()
         if method not in _METHODS:
@@ -1323,7 +1324,7 @@ class Gateway:
         *,
         write: bool,
         shape: Shape,
-        parse: Literal["json", "text"],
+        parse: Literal["json", "text", "bytes"],
         expect_status: frozenset[int] | None,
         passthrough: frozenset[int],
         graphql: bool,
@@ -1547,7 +1548,9 @@ def _encode_body(body: Any) -> bytes:
         raise ValueError("body holds a lone surrogate") from exc
 
 
-def _decode(raw: bytes, parse: Literal["json", "text"], *, tolerant: bool) -> Any:
+def _decode(raw: bytes, parse: Literal["json", "text", "bytes"], *, tolerant: bool) -> Any:
+    if parse == "bytes":  # the caller decodes and sanitizes (a diff may hold any bytes)
+        return raw
     try:
         return raw.decode("utf-8") if parse == "text" else parse_json(raw)
     except ValueError:  # UnicodeDecodeError included

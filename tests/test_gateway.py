@@ -992,6 +992,12 @@ def test_text_mode_is_strict_utf8(tmp_path: Path) -> None:
     assert err.code == "upstream_error"
 
 
+def test_bytes_mode_returns_the_raw_body_whatever_its_encoding(tmp_path: Path) -> None:
+    body = b"diff --git a b\n+caf\xe9 \xff\n"
+    response = call_of(stub_gateway(tmp_path, stub(head(200) + body)), parse="bytes")
+    assert response.data == body
+
+
 def test_a_passthrough_status_in_text_mode_tolerates_invalid_utf8(tmp_path: Path) -> None:
     gateway = stub_gateway(tmp_path, stub(head(409) + b"\xff", code=1))
     response = call_of(gateway, passthrough=frozenset({409}), parse="text")
