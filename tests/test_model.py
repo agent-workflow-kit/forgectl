@@ -1190,3 +1190,102 @@ def test_pr_list_item_validates_and_sorts_labels() -> None:
     assert d["base"] == {"ref": "main"}
     page = m.PrPage(items=(item,), complete=True, rate_limit=m.RateLimit(None, None, None))
     assert page.items == (item,)
+
+
+# --- head.pushed_at and pushed_at_source (issue #56) -------------------------------------------
+
+
+@pytest.mark.parametrize("source", ["push_event", "commit_date"])
+def test_push_time_serializes_in_the_snapshot_head_only(source: str) -> None:
+    snap = make_snapshot(head_push=m.PushTime(at=T1, source=source))  # type: ignore[arg-type]
+    d = snap.to_dict()
+    assert d["head"]["pushed_at"] == T1
+    assert d["head"]["pushed_at_source"] == source
+    validate(d, "forgectl/cli/snapshot.json")
+    # the PR object, `show` and `prs` items keep the head fields they had
+    assert set(snap.pr.to_dict()["head"]) == {"sha", "ref", "repo", "is_fork"}
+    validate(snap.pr.to_dict(), "forgectl/cli/show.json")
+
+
+def test_push_time_defaults_to_null_with_null_source() -> None:
+    d = make_snapshot().to_dict()
+    assert d["head"]["pushed_at"] is None
+    assert d["head"]["pushed_at_source"] is None
+    validate(d, "forgectl/cli/snapshot.json")
+    assert make_snapshot(head_push=None).to_dict() == d
+
+
+def test_push_time_is_emitted_in_utc() -> None:
+    pt = m.PushTime(at="2026-01-02T05:30:00+05:30", source="push_event")
+    assert pt.to_dict() == {"pushed_at": T1, "pushed_at_source": "push_event"}
+    frac = m.PushTime(at="2026-01-02T00:00:00.250-02:00", source="commit_date")
+    assert frac.to_dict()["pushed_at"] == "2026-01-02T02:00:00.250000Z"
+    validate(make_snapshot(head_push=frac).to_dict(), "forgectl/cli/snapshot.json")
+
+
+@pytest.mark.parametrize(
+    "at",
+    [
+        "",
+        "2026-01-02",
+        "2026-01-02T00:00:00",  # naive: no offset
+        "2026-01-02 00:00:00Z",  # not RFC 3339
+        "20260102T000000Z",
+        "2026-13-02T00:00:00Z",
+        "2026-01-02T00:00:00Z\n",
+        "not a time",
+        "2026-01-02T00:00:00Z; drop",
+    ],
+)
+def test_push_time_rejects_malformed_times(at: str) -> None:
+    with pytest.raises(ValueError):
+        m.PushTime(at=at, source="push_event")
+
+
+@pytest.mark.parametrize("source", ["", "unknown", "PUSH_EVENT", "push event", None, 1])
+def test_push_time_rejects_other_sources(source: Any) -> None:
+    with pytest.raises(ValueError):
+        m.PushTime(at=T1, source=source)
+
+
+@pytest.mark.parametrize("at", [None, 5, b"2026-01-02T00:00:00Z"])
+def test_push_time_requires_a_string_time(at: Any) -> None:
+    with pytest.raises(ValueError):
+        m.PushTime(at=at, source="push_event")
+
+
+def test_new_push_gives_a_later_time_and_a_different_comparable() -> None:
+    a = make_snapshot(head_push=m.PushTime(at=T0, source="push_event")).to_dict()
+    b = make_snapshot(head_push=m.PushTime(at=T1, source="push_event")).to_dict()
+    assert m.comparable(a) != m.comparable(b)
+    assert a["head"]["pushed_at"] < b["head"]["pushed_at"]
+    same = make_snapshot(
+        head_push=m.PushTime(at=T0, source="push_event"), fetched_at="2027-01-01T00:00:00Z"
+    ).to_dict()
+    assert m.comparable(a) == m.comparable(same)
+
+
+def test_snapshot_schema_requires_both_push_fields_or_neither_filled() -> None:
+    good = make_snapshot(head_push=m.PushTime(at=T1, source="push_event")).to_dict()
+    bad_cases: list[dict[str, Any]] = [
+        {"pushed_at": T1, "pushed_at_source": None},
+        {"pushed_at": None, "pushed_at_source": "push_event"},
+        {"pushed_at": T1, "pushed_at_source": "unknown"},
+        {"pushed_at": "2026-01-02T00:00:00+02:00", "pushed_at_source": "push_event"},
+        {"pushed_at": "yesterday", "pushed_at_source": "push_event"},
+    ]
+    for over in bad_cases:
+        d = {**good, "head": {**good["head"], **over}}
+        with pytest.raises(Exception):  # noqa: B017 - jsonschema.ValidationError
+            validate(d, "forgectl/cli/snapshot.json")
+    for missing in ("pushed_at", "pushed_at_source"):
+        d = {**good, "head": {k: v for k, v in good["head"].items() if k != missing}}
+        with pytest.raises(Exception):  # noqa: B017
+            validate(d, "forgectl/cli/snapshot.json")
+
+
+def test_show_schema_rejects_push_fields() -> None:
+    d = make_pr().to_dict()
+    d["head"] = {**d["head"], "pushed_at": T1, "pushed_at_source": "push_event"}
+    with pytest.raises(Exception):  # noqa: B017
+        validate(d, "forgectl/cli/show.json")

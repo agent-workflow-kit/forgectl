@@ -9,6 +9,48 @@
       "$ref": "../defs.json#/$defs/pr_fields"
     },
     {
+      "properties": {
+        "head": {
+          "required": [
+            "pushed_at",
+            "pushed_at_source"
+          ],
+          "oneOf": [
+            {
+              "properties": {
+                "pushed_at": {
+                  "allOf": [
+                    {
+                      "$ref": "../defs.json#/$defs/ts"
+                    },
+                    {
+                      "pattern": "[Zz]$"
+                    }
+                  ]
+                },
+                "pushed_at_source": {
+                  "enum": [
+                    "push_event",
+                    "commit_date"
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "pushed_at": {
+                  "type": "null"
+                },
+                "pushed_at_source": {
+                  "type": "null"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
       "if": {
         "properties": {
           "complete": {
