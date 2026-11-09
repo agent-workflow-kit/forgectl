@@ -73,7 +73,7 @@ def test_a_github_ref_never_reaches_the_gitlab_backend(
     run_forgectl: Run, fake_forges: FakeForges, tmp_path: Path
 ) -> None:
     fake_forges.answer("gh", "graphql", method="POST", body=gh_recording())
-    done = run_show(run_forgectl, tmp_path, "github.com/example-org/example-repo#7")
+    done = run_show(run_forgectl, tmp_path, "github.com/user-7/example-repo#7")
     assert done.returncode == 0, done.stderr
     assert fake_forges.calls("glab") == []
     calls = fake_forges.calls("gh")

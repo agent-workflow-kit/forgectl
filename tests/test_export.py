@@ -443,12 +443,12 @@ PR = "github.com/o/r#7"
 def test_an_internal_failure_is_logged_at_error_level(
     state: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    code, _, _ = run(capsys, "snapshot", PR)  # no handler yet: exit 1
+    code, _, _ = run(capsys, "browse")  # no handler yet: exit 1
     assert code == 1
     [item] = logged(state)
     validate(item, "forgectl/log.json")
     assert (item["level"], item["event"]) == ("error", "internal")
-    assert item["details"]["command"] == "snapshot" and item["details"]["exit_code"] == 1
+    assert item["details"]["command"] == "browse" and item["details"]["exit_code"] == 1
 
 
 def test_a_usage_error_is_logged_at_info_level(
@@ -491,7 +491,7 @@ def test_an_unwritable_log_warns_and_keeps_the_result_code(
 ) -> None:
     state.mkdir(parents=True, mode=0o700)
     (state / "log.jsonl").symlink_to(tmp_path / "x")
-    code, _, err = run(capsys, "snapshot", PR)
+    code, _, err = run(capsys, "browse")
     assert code == 1
     assert "warning: log not written" in err
     assert not (tmp_path / "x").exists()

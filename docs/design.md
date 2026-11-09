@@ -167,6 +167,7 @@ Each has a conservative default in place.
 | Whether an approval survives a retarget on each host | forgectl discounts it regardless |
 | Self-managed wording of the retarget note | a note with other wording reads as no retarget |
 | `pipeline_id` on `/statuses`; a status on a commit with a real pipeline | an unclear answer has no counted check, so `none` |
+| GitLab `prs` reads built from the documented API only: `scope=all` on `/merge_requests` and on the project route, `author_username`, `reviewer_username`, `updated_after` with a `Z` time (inclusive), `draft=yes\|no` from 19.0 and `wip=yes\|no` below, `reviewers` and `draft` on each listed MR, `updated_at` descending, `x-next-page` on lists, a `locked` MR missing from `state=opened`, `members/all` `state` and `membership_state`, `/users?username=` as an exact match | an item that does not match its filter is dropped with `complete: false`; a list out of order, older than the floor, with a next page that is not the next number, or without `reviewers` under a reviewer filter is `upstream_error`; an unreadable `access` answer is `null`, never true |
 | Merged-results and merge-train pipelines on a paid tier | `for_current_head: false`, so `pending` |
 | `/diffs`' first version, and a binary file's empty fragment | `unsupported_host_version`; `too_large`, which is safe |
 | A posted body with a trailing newline and a neutralized first line, compared with its stored form | the comparison in [Post order](interface.md#post-order) step 11 |

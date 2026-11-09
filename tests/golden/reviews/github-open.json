@@ -13,7 +13,7 @@
       "state": "approved"
     }
   ],
-  "pr": "github.com/example-org/example-repo#7",
+  "pr": "github.com/user-7/example-repo#7",
   "review_decision": "approved",
   "reviews": [
     {
