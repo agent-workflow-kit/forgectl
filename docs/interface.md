@@ -138,15 +138,15 @@ Field rules:
 | `instance` | opaque string identifying this request, or null |
 | `requested_at` | RFC 3339 or null |
 
-Compare reviewers by id, else by login, case-insensitively.
+Compare reviewers by id, else by login, case-insensitively. A team's `login` is its slug: every team on a PR belongs to the repository's organization, and `kind` tells it from a user of the same name.
 
-A sibling `teams_visible` says whether the absence of a team means anything. It is always true on GitLab. On GitHub it is false if `requested_reviewers` shows fewer than the event list; otherwise true. A GraphQL error of type `INSUFFICIENT_SCOPES` or `FORBIDDEN` naming a team field re-sends a constant query without team fields, and gives `teams_visible: false`. A token that reports no scopes also gives `false`.
+A sibling `teams_visible` says whether the absence of a team means anything. It is always true on GitLab. On GitHub it is false when `requested_reviewers` names a different number of reviewers than the GraphQL request list (fewer or more); otherwise true. A GraphQL error of type `INSUFFICIENT_SCOPES` or `FORBIDDEN` naming a team field re-sends a constant query without team fields, and gives `teams_visible: false`. A token that reports no scopes also gives `false`. So does a `requested_reviewers` read the token may not make, and a null or unreadable requested reviewer in the GraphQL list. A reviewer that only `requested_reviewers` names is added to `review_requests`, with a null `instance` unless an event names it.
 
 **State.** GitHub: every listed request is `outstanding`; a submitted review clears the request without any event. GitLab: from `GET /reviewers`, where `unreviewed` and `review_started` give `outstanding` (`review_started` is set as soon as a draft exists), `approved`, `unapproved`, `reviewed` and `requested_changes` give `reviewed`, and an unknown value gives `outstanding`. A request never clears by itself on GitLab, so `state` is the way to read it. Every GitLab reviewer is a direct request; GitLab has no team reviewers.
 
 **Instance rule.** A re-request yields a new `instance`. A push does not: under one instance a new head is the same request. `(pr, instance)` identifies a request; a consumer adds the head to identify a piece of work on it.
 
-- GitHub: the `id` of the latest `ReviewRequestedEvent` for that reviewer. With no matching event, `instance` is null.
+- GitHub: the node `id` of the latest `ReviewRequestedEvent` for that reviewer, as GitHub returns it (no particular id format is promised; older objects can carry legacy-format ids). With no matching event, `instance` is null. A list of events that is cut off before every reviewer is found puts `review_requests` in `incomplete`.
 - GitLab: the id of the newest **system** note (`system: true`) beginning `requested review from`. All `@login` tokens up to the first word that is not a login, `,` or `and` are parsed, each matched whole, so `requested review from @a, @b and removed approval` names both. Paging is newest first and stops when every reviewer is found. Creating an MR with reviewers writes such a note. Re-sending the same set of reviewers adds none, so it makes no new instance.
 - If no note matches (for example different wording on a self-managed instance), `instance` is `null` and a `warn` log line is written.
 - **First sight.** A consumer with no earlier record of `(pr, reviewer)` treats a null `instance` as one new request. After that, null is the same request as before.
@@ -524,7 +524,7 @@ With `--repo` or `--host` there is one target, so a failure uses the ordinary ex
 
 `incomplete` names any of `review_requests`, `reviews`, `threads`, `ci`. The `ci` name follows `ci.complete`.
 
-Lists have a fixed order, so two snapshots compare directly, excluding `fetched_at` and `rate_limit`. `reviews`: `submitted_at`, `id`. `latest_by_reviewer`, `review_requests`: login. `threads`: first comment's `created_at`, `id`. A thread's comments: `created_at`, `id`. `checks`: `name`, `url`, `state`. `blocked_by`: code, `detail`. `files`: `path`. Comparison by code point. Logins: ASCII-lowered, then `kind`. Ids are not ordered, so a watermark is a set of seen ids. Absence from a part named in `incomplete` means nothing.
+On GitHub `rate_limit` is the lowest `remaining` among the GraphQL `rateLimit` fields and the REST response headers of the reads after `show`'s own, which carries none. Lists have a fixed order, so two snapshots compare directly, excluding `fetched_at` and `rate_limit`. `reviews`: `submitted_at`, `id`. `latest_by_reviewer`, `review_requests`: login. `threads`: first comment's `created_at`, `id`. A thread's comments: `created_at`, `id`. `checks`: `name`, `url`, `state`. `blocked_by`: code, `detail`. `files`: `path`. Comparison by code point. Logins: ASCII-lowered, then `kind`. Ids are not ordered, so a watermark is a set of seen ids. Absence from a part named in `incomplete` means nothing.
 
 ### `diff`
 

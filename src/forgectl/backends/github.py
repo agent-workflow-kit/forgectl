@@ -17,8 +17,8 @@ Logins are the REST form (interface: Logins): GraphQL names a bot ``name``, REST
 and ``gh`` ``app/name``; ``rest_login`` maps by the actor's ``__typename``.
 
 Parsing helpers (``parse_actor``, ``latest_by_reviewer``, ``read_checks``) are module-level so
-``snapshot``, ``reviews`` and ``ci`` (TODO(#12)) reuse them instead of reading these fields a
-second way.
+``snapshot``, ``reviews`` and ``ci`` (``github_snapshot.py``) reuse them instead of reading these
+fields a second way.
 """
 
 from __future__ import annotations
@@ -35,7 +35,6 @@ from ..gateway import Target, verify_identity
 from ..identifiers import PrRef, RepoRef, bind_login
 from ..reads import SHOW_READINESS, ReadEnv
 from ..sanitize import sanitize_line, sanitize_text
-from .base import not_implemented
 
 T = TypeVar("T")
 
@@ -794,7 +793,7 @@ class GitHubBackend:
             approvals=approvals,
             approvals_at_head=approvals_at_head,
         )
-        return m.PrRead(pr=built, ci=ci)
+        return m.PrRead(pr=built, ci=ci, latest_by_reviewer=table.entries)
 
     # -- parts ---------------------------------------------------------------------------------
 
@@ -859,6 +858,9 @@ class GitHubBackend:
             connection = self._node_page(
                 pages, REVIEWS_QUERY, {"id": pages.node_id, "before": cursor}, "reviews"
             )
+        # TODO(#11): past MAX_PAGES reviews `show` fails, so the `reviews` incomplete path of
+        # `snapshot` and `reviews` (github_snapshot.py) can never be reached; decide whether
+        # show reports a cut-off review list instead.
         raise ForgectlError(
             "upstream_error", "the pull request has more reviews than forgectl reads"
         )
@@ -983,7 +985,9 @@ class GitHubBackend:
         return github_lists.list_prs(self._env, query)
 
     def snapshot(self, ref: PrRef) -> m.Snapshot:
-        raise not_implemented("snapshot")  # TODO(#12): reuse SHOW_QUERY, parse_actor, read_checks
+        from . import github_snapshot  # (#12) lazy: that module imports this one
+
+        return github_snapshot.snapshot(self._env, ref, self.get_pr)
 
     def diff(self, ref: PrRef) -> m.DiffResult:
         from . import github_diff  # a late import: github_diff reads this module's helpers
@@ -1001,13 +1005,19 @@ class GitHubBackend:
         return github_diff.files_result(self._env, ref)
 
     def comments(self, ref: PrRef) -> m.CommentsResult:
-        raise not_implemented("comments")  # TODO(#12)
+        from . import github_snapshot  # (#12)
+
+        return github_snapshot.comments(self._env, ref)
 
     def reviews(self, ref: PrRef) -> m.ReviewsResult:
-        raise not_implemented("reviews")  # TODO(#12): reuse latest_by_reviewer
+        from . import github_snapshot  # (#12)
+
+        return github_snapshot.reviews(self._env, ref, self.get_pr)
 
     def ci(self, ref: PrRef) -> m.CiResult:
-        raise not_implemented("ci")  # TODO(#12): reuse read_checks and the CHECKS_QUERY paging
+        from . import github_snapshot  # (#12)
+
+        return github_snapshot.ci(ref, self.get_pr)
 
     def access(self, repo: RepoRef, user: str) -> m.AccessResult:
         from . import github_lists
