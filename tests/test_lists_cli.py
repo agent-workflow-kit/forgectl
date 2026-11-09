@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -749,7 +750,8 @@ def test_whoami_warns_when_me_is_not_the_authenticated_login(
     assert json.loads(done.stdout)["hosts"][0]["me_matches_login"] is False
     warnings = [line for line in done.stderr.splitlines() if line.startswith("forgectl: warning:")]
     assert len(warnings) == 1
-    assert "github.com" in warnings[0] and "user-9" in warnings[0] and "user-1" in warnings[0]
+    assert re.search(r"(?<![\w.])github\.com(?![\w.-])", warnings[0])
+    assert "user-9" in warnings[0] and "user-1" in warnings[0]
 
 
 def test_whoami_does_not_warn_when_me_matches(

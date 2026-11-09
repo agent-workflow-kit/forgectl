@@ -17,7 +17,7 @@ from .harness.safety import assert_call_safe
 from .test_github_diff import BASE, FROM, HEAD, PR_ENDPOINT, RECORDINGS, TO, pull, recording
 from .test_github_show import TOKEN
 
-PR = "github.com/example-org/example-repo#7"
+PR = "github.com/user-7/example-repo#7"
 Run = Callable[..., subprocess.CompletedProcess[str]]
 
 
