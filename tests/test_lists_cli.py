@@ -230,6 +230,36 @@ def test_an_identity_read_counts_for_the_rate_limit(
     )
     gh_login()
     fake_forges.answer(
+        "gh",
+        "user",
+        host="github.com",
+        body={"login": "user-1", "id": 1001, "html_url": "https://github.com/user-1"},
+        headers=rate(2),
+    )
+    fake_forges.answer("glab", "user", status=401, body={"message": "x"})
+    fake_forges.answer(
+        "gh", "graphql", method="POST", host="github.com", body=recording(), headers=rate(4987)
+    )
+    fake_forges.answer(
+        "gh", "graphql", method="POST", host=GHE, body=other_host_page(), headers=rate(100)
+    )
+    done = prs(run_forgectl, config, "--author", "user-1")
+    assert done.returncode == 0, done.stderr
+    out = json.loads(done.stdout)
+    assert out["hosts_queried"] == [GHE, "github.com"]
+    assert out["rate_limit"]["host"] == "github.com" and out["rate_limit"]["remaining"] == 2
+
+
+def test_a_skipped_host_reading_is_not_the_rate_limit(
+    run_forgectl: Run, fake_forges: FakeForges, tmp_path: Path
+) -> None:
+    config = tmp_path / "ghe.yaml"
+    config.write_text(
+        f"retries: 0\nhosts:\n  {GHE}:\n    backend: github\n    token_env: TOK_B\n",
+        encoding="utf-8",
+    )
+    gh_login()
+    fake_forges.answer(
         "gh", "user", host="github.com", status=401, body={"message": "x"}, headers=rate(2)
     )
     fake_forges.answer("glab", "user", status=401, body={"message": "x"})
@@ -240,7 +270,23 @@ def test_an_identity_read_counts_for_the_rate_limit(
     assert done.returncode == 0, done.stderr
     out = json.loads(done.stdout)
     assert out["hosts_queried"] == [GHE]
-    assert out["rate_limit"]["host"] == "github.com" and out["rate_limit"]["remaining"] == 2
+    assert out["rate_limit"] == {"host": GHE, "remaining": 100, "reset_at": "2026-10-03T01:00:00Z"}
+
+
+def test_no_host_in_scope_has_null_rate_limit_even_after_a_probe_reading(
+    run_forgectl: Run, fake_forges: FakeForges, tmp_path: Path
+) -> None:
+    config = tmp_path / "noglab.yaml"
+    config.write_text("retries: 0\nglab_bin: glab-absent\n", encoding="utf-8")
+    gh_login()
+    fake_forges.answer(
+        "gh", "user", host="github.com", status=401, body={"message": "x"}, headers=rate(2)
+    )
+    done = prs(run_forgectl, config, "--author", "user-1")
+    assert done.returncode == 0, done.stderr
+    out = json.loads(done.stdout)
+    assert out["hosts_queried"] == []
+    assert out["rate_limit"] == {"host": None, "remaining": None, "reset_at": None}
 
 
 def test_a_failure_message_never_holds_a_token(

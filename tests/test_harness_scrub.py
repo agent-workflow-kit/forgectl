@@ -123,6 +123,9 @@ def test_gitlab_shapes_are_scrubbed() -> None:
         {"url": "https://github.com/org-sample/tools/pull/3"},
         {"html_url": "https://github.com/jdoe-real"},
         {"html_url": "https://github.com/orgs/org-sample/teams/x"},
+        {"detailsUrl": "https://github.com/org-sample/tools/actions/runs/1"},
+        {"commit_url": "https://github.com/jdoe-real/widgets/commit/abc"},
+        {"resourcePath": "/org-sample/tools/pull/3"},
     ],
 )
 def test_the_check_flags_a_github_owner_that_is_not_a_placeholder(leak: dict[str, object]) -> None:
@@ -137,6 +140,9 @@ def test_the_check_flags_a_github_owner_that_is_not_a_placeholder(leak: dict[str
         {"url": "https://github.com/apps/some-app"},
         {"url": "https://api.github.com/repos/user-1/r"},
         {"url": "https://ghe.example.test/whatever/r/pull/1"},
+        {"detailsUrl": "https://github.com/user-7/tools/actions/runs/1"},
+        {"resourcePath": "/user-7/tools/pull/3"},
+        {"resourcePath": "/apps/some-app"},
     ],
 )
 def test_a_placeholder_owner_or_an_unchecked_url_passes(fine: dict[str, object]) -> None:

@@ -13,7 +13,8 @@ The contract a backend meets:
   host's failure as ``{host, code, message}`` (message redacted of tokens, one line), merges the
   items (``updated_at`` descending, then ``pr``), cuts to ``limit`` and sets ``complete`` (false
   when any host failed). ``rate_limit`` is the lowest ``remaining`` in the headers of every answer
-  the command received (``Gateway.rate_readings``), whatever the call and whether it failed.
+  the command received from a host in ``hosts_queried`` (``Gateway.rate_readings``), whatever
+  the call and whether it failed; a skipped host's probe does not count.
 - A failure with several hosts asked is ``ForgectlError("partial_results", output=...)``: the
   normal output plus ``errors``, printed by ``output.emit_error`` with exit 12. With one target
   (``--repo``, ``--host``, or a single host asked) the host's own error is raised instead.
@@ -121,12 +122,14 @@ def _login_for(env: ReadEnv, host: str, value: str | None, known: Identity | Non
     return bind_login(value, env.hosts.backend(host))
 
 
-def lowest_rate_limit(env: ReadEnv, single: str | None) -> m.RateLimit:
-    """The lowest ``remaining`` in the headers of every answer this command received, on any
-    host, success or failure. With none known: that host's nulls when one host was asked, else
-    null for every field."""
-    reading = env.gateway.lowest_rate()
+def lowest_rate_limit(env: ReadEnv, queried: list[str]) -> m.RateLimit:
+    """The lowest ``remaining`` in the headers of every answer this command received from a
+    host in ``queried``, success or failure (a skipped host's probe does not count). With none
+    known: that host's nulls when one host was asked, else null for every field."""
+    readings = [r for r in env.gateway.rate_readings if r.host in queried]
+    reading = min(readings, key=lambda r: r.remaining) if readings else None
     if reading is None:
+        single = queried[0] if len(queried) == 1 else None
         return m.RateLimit(host=single, remaining=None, reset_at=None)
     return m.RateLimit(host=reading.host, remaining=reading.remaining, reset_at=reading.reset_at)
 
@@ -215,7 +218,7 @@ def run_prs(env: ReadEnv, args: PrsArgs, *, now: datetime | None = None) -> dict
         "complete": not failures and all(page.complete for _, page in pages) and not cut,
         "errors": [host_error(host, error) for host, error in failures],
         "hosts_queried": queried,
-        "rate_limit": lowest_rate_limit(env, queried[0] if len(queried) == 1 else None).to_dict(),
+        "rate_limit": lowest_rate_limit(env, queried).to_dict(),
     }
     if failures:
         shown = ", ".join(f"{host} ({error.code})" for host, error in failures)
