@@ -11,10 +11,11 @@ warning is due.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -30,6 +31,7 @@ LatestState = Literal["approved", "changes_requested", "dismissed"]
 FileStatus = Literal["added", "modified", "deleted", "renamed"]
 CompareStatus = Literal["ahead", "behind", "diverged", "identical", "unavailable"]
 CheckSource = Literal["github_check", "github_status", "gitlab"]
+PushSource = Literal["push_event", "commit_date"]
 Warn = Callable[[str], None]
 
 #: Parts a caller may name in `Snapshot.incomplete`; `ci` comes only from `ci.complete`.
@@ -885,6 +887,47 @@ def compute_blocked_by(facts: BlockFacts) -> tuple[Blocker, ...]:
 
 # --- snapshot and command results --------------------------------------------------------------
 
+PUSH_SOURCES: frozenset[str] = frozenset({"push_event", "commit_date"})
+# RFC 3339 with an explicit offset; the same shape as `ts` in schemas/defs.json.
+_RFC3339 = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(?:\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PushTime:
+    """When the current head was last pushed and how that was determined (interface: Push time).
+
+    ``push_event`` is a host push event for the head sha; ``commit_date`` is the head commit's
+    date, which can precede the push. An unknown time is not a ``PushTime``: ``Snapshot.head_push``
+    is ``None`` and both serialized fields are null, so a time without a source cannot be
+    expressed. The model reads no clock, so it cannot say a time lies in the future.
+    """
+
+    at: str
+    source: PushSource
+    #: ``at`` in UTC as emitted, computed once so ``to_dict`` cannot fail.
+    _utc_text: str = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.source not in PUSH_SOURCES:
+            raise ValueError(f"pushed_at_source must be one of {sorted(PUSH_SOURCES)}")
+        if not isinstance(self.at, str) or not _RFC3339.fullmatch(self.at):
+            raise ValueError("pushed_at must be an RFC 3339 time with an offset")
+        try:
+            # RFC 3339 allows lowercase `t` and `z`; fromisoformat does not.
+            utc = datetime.fromisoformat(self.at.upper()).astimezone(UTC)
+        except (ValueError, OverflowError):
+            raise ValueError("pushed_at must be an RFC 3339 time with an offset") from None
+        object.__setattr__(self, "_utc_text", utc.isoformat().removesuffix("+00:00") + "Z")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"pushed_at": self._utc_text, "pushed_at_source": self.source}
+
+
+_UNKNOWN_PUSH: dict[str, Any] = {"pushed_at": None, "pushed_at_source": None}
+
 
 @dataclass(frozen=True, slots=True)
 class Snapshot:
@@ -900,6 +943,10 @@ class Snapshot:
     #: Parts a host cut off, from `review_requests`, `reviews`, `threads`; `ci` follows
     #: `ci.complete` and is added by `to_dict`, never by the caller.
     incomplete: tuple[str, ...] = ()
+    #: `snapshot` only; ``None`` serializes as null/null (unknown).
+    #: TODO(#12): fill `Snapshot.head_push` from the host (GitHub: the PR timeline).
+    #: TODO(#16): fill `Snapshot.head_push` from the host (GitLab: the MR versions).
+    head_push: PushTime | None = None
 
     def __post_init__(self) -> None:
         unknown = set(self.incomplete) - INCOMPLETE_PARTS
@@ -915,6 +962,10 @@ class Snapshot:
         if not self.ci.complete:
             incomplete.add("ci")
         out = self.pr.to_dict()
+        out["head"] = {
+            **out["head"],
+            **(self.head_push.to_dict() if self.head_push else _UNKNOWN_PUSH),
+        }
         out.update(
             {
                 "review_requests": [
