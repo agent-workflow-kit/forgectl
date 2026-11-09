@@ -202,3 +202,18 @@ def refused(
 def usage(message: str, **kwargs: Any) -> ForgectlError:
     """An exit 2 usage error."""
     return ForgectlError("usage", message, **kwargs)
+
+
+class SignalExit(BaseException):
+    """A SIGINT, SIGTERM or SIGHUP arrived: exit 128+N with no envelope, unless a write was
+    attempted (``write_attempted``): then exit 12 ``outcome_unknown``.
+
+    The gateway ends the child's group, removes its private directories and lets this propagate.
+    ``audit.Attempt`` sets ``write_attempted`` when the signal passes through its block after
+    ``begin()``, once it has recorded ``outcome_unknown``.
+    """
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+        self.write_attempted = False

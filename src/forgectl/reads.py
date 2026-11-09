@@ -34,7 +34,7 @@ from .errors import ForgectlError
 from .gateway import Gateway
 from .hosts import Hosts
 from .identifiers import PrRef
-from .model import Warn
+from .model import Readiness, Warn
 
 T = TypeVar("T")
 
@@ -52,18 +52,6 @@ RETRYABLE_CODES = frozenset({"rate_limited", "upstream_error", "network_error"})
 def _ignore(_message: str) -> None:
     # TODO(#9): write a `warn` line to the log (jsonlog.py)
     return None
-
-
-@dataclass(frozen=True)
-class Readiness:
-    """How long a read may be repeated while a value is still being computed."""
-
-    tries: int
-    window: float  # seconds, from the first try
-
-    @property
-    def pause(self) -> float:
-        return self.window / self.tries
 
 
 SHOW_READINESS = Readiness(tries=3, window=4.0)  # `show` and `snapshot`
@@ -90,6 +78,10 @@ class ReadEnv:
         # the wait is part of the command's budget, so retrying never overruns it
         with self.gateway.budget.spending():
             self.sleep(seconds)
+
+    def wait(self, seconds: float) -> None:
+        """Wait inside the command's budget, as a retry does (a caller polling a verification)."""
+        self._wait(seconds)
 
     def backoff(self, attempt: int) -> float:
         """The wait before retry number ``attempt`` (0 is the first): the table value plus up to

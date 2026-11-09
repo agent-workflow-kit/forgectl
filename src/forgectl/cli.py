@@ -13,7 +13,7 @@ from typing import Any
 
 from . import gateway, jsonlog, registry
 from .config import load_config
-from .errors import ForgectlError
+from .errors import ForgectlError, SignalExit
 from .humanactions import Tty, build_context, default_me_name
 from .identifiers import bind_args
 from .output import RecordStream, emit_error, emit_success, warn
@@ -21,19 +21,6 @@ from .registry import Invocation
 from .surface import WRITE_COMMANDS, build_parser, parse
 
 __all__ = ["build_parser", "main"]
-
-
-class SignalExit(BaseException):
-    """A SIGINT, SIGTERM or SIGHUP arrived: exit 128+N with no envelope.
-
-    The gateway ends the child's group, removes its private directories and lets this propagate.
-    TODO(#21): once a write was attempted, map this to audit `outcome_unknown` and exit 12
-    instead, so 128+N applies only before any write.
-    """
-
-    def __init__(self, signum: int) -> None:
-        super().__init__(signum)
-        self.signum = signum
 
 
 def _raise_signal_exit(signum: int, frame: FrameType | None) -> None:
@@ -138,6 +125,19 @@ def _wants_json(argv: list[str]) -> bool:
     return any(arg == "--json" or arg.startswith("--json=") for arg in head)
 
 
+def _fail(err: ForgectlError, args: Namespace | None, *, json_mode: bool) -> int:
+    """Print a failure and log it; the exit code."""
+    code = emit_error(err, command=getattr(args, "command", None), args=args, json_mode=json_mode)
+    details = {
+        "command": getattr(args, "command", None),
+        "exit_code": code,
+        "reason": err.reason,
+        "message": err.message,
+    }
+    _log(_failure_level(err), err.code, args, details)
+    return code
+
+
 def _dispatch(argv: list[str], tty: Tty | None) -> int:
     json_mode = _wants_json(argv)
     args: Namespace | None = None
@@ -150,17 +150,17 @@ def _dispatch(argv: list[str], tty: Tty | None) -> int:
             _log(level, "command_done", args, {"command": args.command})
         return 0
     except ForgectlError as err:
-        code = emit_error(
-            err, command=getattr(args, "command", None), args=args, json_mode=json_mode
+        return _fail(err, args, json_mode=json_mode)
+    except SignalExit as signalled:
+        if not signalled.write_attempted:
+            raise  # no write was attempted: main() exits 128+N with no envelope
+        # A signal after Attempt.begin(): the audit already says outcome_unknown, so the exit
+        # says it too (interface: Exit codes), whatever the host did with the write.
+        err = ForgectlError(
+            "outcome_unknown",
+            "a signal arrived after the write was attempted; it may have landed",
         )
-        details = {
-            "command": getattr(args, "command", None),
-            "exit_code": code,
-            "reason": err.reason,
-            "message": err.message,
-        }
-        _log(_failure_level(err), err.code, args, details)
-        return code
+        return _fail(err, args, json_mode=json_mode)
     except Exception as exc:  # last line of defense: never a traceback
         internal = ForgectlError("internal", f"internal error: {type(exc).__name__}")
         code = emit_error(
@@ -185,6 +185,5 @@ def main(argv: list[str] | None = None, *, tty: Tty | None = None) -> int:
     with _signals():
         try:
             return _dispatch(argv, tty)
-        except SignalExit as signalled:
-            # TODO(#21): map a signal after Attempt.begin() to exit 12 outcome_unknown.
+        except SignalExit as signalled:  # before any write, or one that is already recorded
             return 128 + signalled.signum

@@ -24,7 +24,7 @@ from types import TracebackType
 from typing import Any, Literal
 
 from . import jsonlog
-from .errors import ForgectlError
+from .errors import ForgectlError, SignalExit
 from .jsonlog import PATTERNS, JsonlError, matches, parse_ts
 
 # The one import point for sanitization.
@@ -363,6 +363,8 @@ class Attempt:
     ) -> Literal[False]:
         if not self._begun or self._finished:
             return False
+        if isinstance(exc, SignalExit):
+            exc.write_attempted = True  # cli exits 12 outcome_unknown, not 128+N
         try:
             self.finish("outcome_unknown")
         except ForgectlError:
