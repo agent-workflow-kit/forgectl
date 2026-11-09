@@ -250,9 +250,7 @@ def test_every_query_is_a_constant_text_and_values_travel_as_variables(
     push = next(r for r in rig.router.requests if operation(r) == "ForgectlPush")
     assert push["variables"]["head"] == HEAD
     rest_argv = rig.router.argvs[3]
-    assert (
-        rest_argv[-1] == "repos/user-7/example-repo/pulls/7/requested_reviewers?per_page=100"
-    )
+    assert rest_argv[-1] == "repos/user-7/example-repo/pulls/7/requested_reviewers?per_page=100"
     assert rest_argv[rest_argv.index("-X") + 1] == "GET"
 
 
