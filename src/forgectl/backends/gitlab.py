@@ -184,8 +184,9 @@ def _sha(value: Any, what: str) -> str:
 
 def _login(value: Any, what: str) -> str:
     """A GitLab username under the project's login grammar; anything else is an error (a login
-    reaches later commands and hooks, so it is validated, not merely sanitized)."""
-    if not isinstance(value, str):
+    reaches later commands and hooks, so it is validated, not merely sanitized). A login that
+    contains a token in use cannot be redacted without changing it, so it is an error too."""
+    if not isinstance(value, str) or redact_secrets(value) != value:
         raise _bad(what)
     try:
         return bind_login(value, "gitlab")
@@ -334,9 +335,10 @@ class GitLabBackend:
     # -- version -------------------------------------------------------------------------------
 
     def host_version(self, host: str) -> tuple[int, int] | None:
-        """`GET /version`, once per instance: `(major, minor)`, or None when the host has no such
-        route (404) or the answer is not readable (an unreadable version counts as below every
-        row). Any other failure is the read's own error."""
+        """`GET /version`, once per instance: `(major, minor)`, or None when the version is
+        unreadable (an unreadable version counts as below every row): the host has no such route,
+        the answer is not readable, or the read fails with any code other than `auth_required`,
+        `wrong_host_response` or `tool_missing`, which are raised. Every answer is cached."""
         if host in self._versions:
             return self._versions[host]
         target = self._hosts.target(host)
@@ -344,7 +346,7 @@ class GitLabBackend:
         try:
             response = self._get(target, ["version"], shape="any", sub=False)
         except ForgectlError as error:
-            if error.code != "not_found":
+            if error.code in _NEVER_DEGRADED:
                 raise
         else:
             data = response.data
@@ -354,17 +356,6 @@ class GitLabBackend:
                 found = (int(match.group(1)), int(match.group(2)))
         self._versions[host] = found
         return found
-
-    def _version_or_unreadable(self, host: str) -> tuple[int, int] | None:
-        """`host_version`, with a failed read (other than the never-degraded codes) read as an
-        unreadable version, cached like any other answer."""
-        try:
-            return self.host_version(host)
-        except ForgectlError as error:
-            if error.code in _NEVER_DEGRADED:
-                raise
-            self._versions[host] = None
-            return None
 
     # -- show ----------------------------------------------------------------------------------
 
@@ -648,7 +639,7 @@ class GitLabBackend:
     def _detailed_status(self, mr: Mapping[str, Any], target: Target) -> str:
         raw = mr.get("detailed_merge_status")
         if raw is None or "detailed_merge_status" not in mr:
-            version = self._version_or_unreadable(target.host)
+            version = self.host_version(target.host)
             shown = f"{version[0]}.{version[1]}" if version else "unreadable"
             raise ForgectlError(
                 "unsupported_host_version",
@@ -959,7 +950,7 @@ class GitLabBackend:
             self._warn("the fork's pipeline could not be read; CI is incomplete")
             status_rows, complete = [], False
         checks = self._checks(status_rows)
-        version = self._version_or_unreadable(target.host)
+        version = self.host_version(target.host)
         if version is None or version < _STATUSES_PIPELINE_FILTER:
             # Older hosts ignore `pipeline_id` and list every pipeline's statuses on the sha.
             self._warn(
@@ -1007,16 +998,17 @@ class GitLabBackend:
         self, target: Target, project: int, pipeline_id: int
     ) -> tuple[list[m.Check], bool]:
         """One `(child) <bridge name>` check per bridge of the head pipeline, from its downstream
-        pipeline's status. A list that cannot be read or is cut is incomplete."""
+        pipeline's status. A list that cannot be read or is cut is incomplete; a malformed row is
+        `upstream_error`, like a malformed commit-status row."""
         segments = ["projects", path_int(project), "pipelines", path_int(pipeline_id), "bridges"]
         try:
             rows, done = self._pages(target, segments)
-            checks = [self._bridge_check(row) for row in rows]
         except ForgectlError as error:
             if error.code in _NEVER_DEGRADED:
                 raise
             self._warn("the child pipelines could not be read; CI is incomplete")
             return [], False
+        checks = [self._bridge_check(row) for row in rows]
         if not done:
             self._warn("the child pipelines hit the page cap; CI is incomplete")
         return checks, done

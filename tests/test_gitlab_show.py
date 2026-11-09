@@ -1367,10 +1367,17 @@ def test_the_version_parse_and_an_unreadable_version_is_none(
     assert make_backend(fake, tmp_path).host_version("gitlab.com") == expected
 
 
-def test_a_failed_version_read_is_none_for_a_missing_route_and_raises_otherwise(
+def test_a_failed_version_read_is_unreadable_except_auth_failures(
     fake: FakeGitLab, tmp_path: Path
 ) -> None:
     assert make_backend(fake, tmp_path).host_version("gitlab.com") is None  # 404
+    for n, status in enumerate((403, 500, 429)):
+        other = FakeGitLab()
+        other.on("version", {"message": "x"}, status=status)
+        backend = make_backend(other, tmp_path / f"d{n}")
+        assert backend.host_version("gitlab.com") is None
+        assert backend.host_version("gitlab.com") is None
+        assert other.count("version") == 1  # the unreadable answer is cached
     fake.on("version", {"message": "x"}, status=401)
     with pytest.raises(ForgectlError) as raised:
         make_backend(fake, tmp_path / "b").host_version("gitlab.com")
@@ -1565,6 +1572,15 @@ def test_a_bridges_auth_failure_fails_the_read(fake: FakeGitLab, tmp_path: Path)
     with pytest.raises(ForgectlError) as raised:
         make_backend(fake, tmp_path).get_pr(ref())
     assert raised.value.code == "auth_required"
+
+
+def test_a_malformed_bridge_row_is_upstream_error(fake: FakeGitLab, tmp_path: Path) -> None:
+    rows = [bridge("deploy", "failed"), bridge("other", "success")]
+    rows[1]["name"] = None
+    standard(fake, bridges=rows)
+    with pytest.raises(ForgectlError) as raised:
+        make_backend(fake, tmp_path).get_pr(ref())
+    assert raised.value.code == "upstream_error"
 
 
 def test_a_bridges_list_cut_at_the_page_cap_is_incomplete(fake: FakeGitLab, tmp_path: Path) -> None:
@@ -1872,6 +1888,30 @@ def test_a_token_echoed_by_the_host_is_redacted_in_every_field(
     assert TOKEN not in text
     assert "[redacted]" in read.pr.title and "[redacted]" in (read.pr.body or "")
     assert any("[redacted]" in b.detail for b in read.pr.blocked_by if b.detail)
+
+
+@pytest.mark.parametrize("where", ["author", "reviewer", "approver"])
+def test_a_login_equal_to_the_token_is_upstream_error_without_the_token(
+    fake: FakeGitLab, tmp_path: Path, where: str
+) -> None:
+    from .gitlab_support import TOKEN
+
+    mr = recording("mr")
+    reviewers = recording("reviewers")
+    approvals = recording("approvals")
+    if where == "author":
+        mr["author"]["username"] = TOKEN
+    elif where == "reviewer":
+        reviewers[0]["user"]["username"] = TOKEN
+    else:
+        approvals["approved_by"][0]["user"]["username"] = TOKEN
+    standard(fake, mr=mr, reviewers=reviewers, approvals=approvals)
+    with pytest.raises(ForgectlError) as raised:
+        make_backend(fake, tmp_path).get_pr(ref())
+    assert raised.value.code == "upstream_error"
+    envelope = raised.value.envelope()
+    assert TOKEN not in json.dumps(envelope) and TOKEN not in str(raised.value)
+    schemas.validate_error_envelope(envelope)
 
 
 def test_wrong_host_response_shows_the_observed_url_without_the_token(
