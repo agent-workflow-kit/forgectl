@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -1223,6 +1224,18 @@ def test_push_time_is_emitted_in_utc() -> None:
     validate(make_snapshot(head_push=frac).to_dict(), "forgectl/cli/snapshot.json")
 
 
+@pytest.mark.parametrize("at", ["2026-01-02T00:00:00z", "2026-01-02t00:00:00z"])
+def test_push_time_accepts_lowercase_t_and_z(at: str) -> None:
+    pt = m.PushTime(at=at, source="push_event")
+    assert pt.to_dict()["pushed_at"] == T1
+
+
+@pytest.mark.parametrize("at", ["0001-01-01T00:00:00+01:00", "9999-12-31T23:59:59-01:00"])
+def test_push_time_rejects_times_outside_the_utc_range(at: str) -> None:
+    with pytest.raises(ValueError):
+        m.PushTime(at=at, source="push_event")
+
+
 @pytest.mark.parametrize(
     "at",
     [
@@ -1258,7 +1271,10 @@ def test_new_push_gives_a_later_time_and_a_different_comparable() -> None:
     a = make_snapshot(head_push=m.PushTime(at=T0, source="push_event")).to_dict()
     b = make_snapshot(head_push=m.PushTime(at=T1, source="push_event")).to_dict()
     assert m.comparable(a) != m.comparable(b)
-    assert a["head"]["pushed_at"] < b["head"]["pushed_at"]
+    # consumers parse `pushed_at` (its precision varies), so compare times, not strings
+    assert datetime.fromisoformat(a["head"]["pushed_at"]) < datetime.fromisoformat(
+        b["head"]["pushed_at"]
+    )
     same = make_snapshot(
         head_push=m.PushTime(at=T0, source="push_event"), fetched_at="2027-01-01T00:00:00Z"
     ).to_dict()
@@ -1273,6 +1289,9 @@ def test_snapshot_schema_requires_both_push_fields_or_neither_filled() -> None:
         {"pushed_at": T1, "pushed_at_source": "unknown"},
         {"pushed_at": "2026-01-02T00:00:00+02:00", "pushed_at_source": "push_event"},
         {"pushed_at": "yesterday", "pushed_at_source": "push_event"},
+        {"pushed_at": T1 + "\n", "pushed_at_source": "push_event"},
+        {"pushed_at": "2026-01-02T00:00:00z", "pushed_at_source": "push_event"},
+        {"pushed_at": "2026-01-02t00:00:00Z", "pushed_at_source": "push_event"},
     ]
     for over in bad_cases:
         d = {**good, "head": {**good["head"], **over}}
@@ -1282,6 +1301,16 @@ def test_snapshot_schema_requires_both_push_fields_or_neither_filled() -> None:
         d = {**good, "head": {k: v for k, v in good["head"].items() if k != missing}}
         with pytest.raises(Exception):  # noqa: B017
             validate(d, "forgectl/cli/snapshot.json")
+
+
+@pytest.mark.parametrize(
+    "at", [T1, "2026-01-02T00:00:00.5Z", "2026-01-02T00:00:00.123456789Z", None]
+)
+def test_snapshot_schema_accepts_utc_push_times_and_null(at: str | None) -> None:
+    good = make_snapshot(head_push=m.PushTime(at=T1, source="push_event")).to_dict()
+    source = None if at is None else "push_event"
+    d = {**good, "head": {**good["head"], "pushed_at": at, "pushed_at_source": source}}
+    validate(d, "forgectl/cli/snapshot.json")
 
 
 def test_show_schema_rejects_push_fields() -> None:

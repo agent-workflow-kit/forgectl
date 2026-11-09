@@ -907,6 +907,8 @@ class PushTime:
 
     at: str
     source: PushSource
+    #: ``at`` in UTC as emitted, computed once so ``to_dict`` cannot fail.
+    _utc_text: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.source not in PUSH_SOURCES:
@@ -914,14 +916,14 @@ class PushTime:
         if not isinstance(self.at, str) or not _RFC3339.fullmatch(self.at):
             raise ValueError("pushed_at must be an RFC 3339 time with an offset")
         try:
-            datetime.fromisoformat(self.at)
-        except ValueError:
+            # RFC 3339 allows lowercase `t` and `z`; fromisoformat does not.
+            utc = datetime.fromisoformat(self.at.upper()).astimezone(UTC)
+        except (ValueError, OverflowError):
             raise ValueError("pushed_at must be an RFC 3339 time with an offset") from None
+        object.__setattr__(self, "_utc_text", utc.isoformat().removesuffix("+00:00") + "Z")
 
     def to_dict(self) -> dict[str, Any]:
-        at = datetime.fromisoformat(self.at).astimezone(UTC)
-        text = at.isoformat().removesuffix("+00:00") + "Z"
-        return {"pushed_at": text, "pushed_at_source": self.source}
+        return {"pushed_at": self._utc_text, "pushed_at_source": self.source}
 
 
 _UNKNOWN_PUSH: dict[str, Any] = {"pushed_at": None, "pushed_at_source": None}
@@ -942,8 +944,8 @@ class Snapshot:
     #: `ci.complete` and is added by `to_dict`, never by the caller.
     incomplete: tuple[str, ...] = ()
     #: `snapshot` only; ``None`` serializes as null/null (unknown).
-    #: TODO(#11): the GitHub backend fills this from the PR timeline.
-    #: TODO(#15): the GitLab backend fills this from the MR versions.
+    #: TODO(#12): fill `Snapshot.head_push` from the host (GitHub: the PR timeline).
+    #: TODO(#16): fill `Snapshot.head_push` from the host (GitLab: the MR versions).
     head_push: PushTime | None = None
 
     def __post_init__(self) -> None:
