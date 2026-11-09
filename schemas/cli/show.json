@@ -6,6 +6,16 @@
   "allOf": [
     {
       "$ref": "../defs.json#/$defs/pr_fields"
+    },
+    {
+      "properties": {
+        "head": {
+          "properties": {
+            "pushed_at": false,
+            "pushed_at_source": false
+          }
+        }
+      }
     }
   ],
   "unevaluatedProperties": false,
