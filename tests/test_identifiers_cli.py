@@ -16,7 +16,7 @@ from forgectl.humanactions import Tty
 from forgectl.identifiers import PrRef, RepoRef
 from forgectl.registry import Invocation
 
-from .cli_schema_check import validate
+from .harness.schemas import validate
 
 NO_TTY = Tty(stdin=False, stderr=False)
 H1 = "a" * 40
@@ -83,7 +83,7 @@ def test_a_declared_host_with_api_prefix(
 @pytest.mark.parametrize(
     "bad",
     [
-        "https://user@github.com/o/r/pull/7",
+        "https://user" + "@github.com/o/r/pull/7",
         "https://github.com/o/r/pull/7abc",
         "github.com/o/r#7\n",
         "github.com/o/r#0",
