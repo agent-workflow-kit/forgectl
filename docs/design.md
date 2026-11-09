@@ -167,6 +167,7 @@ Each has a conservative default in place.
 | `pipeline_id` on `/statuses`; a status on a commit with a real pipeline | an unclear answer has no counted check, so `none` |
 | Merged-results and merge-train pipelines on a paid tier | `for_current_head: false`, so `pending` |
 | `/diffs`' first version, and a binary file's empty fragment | `unsupported_host_version`; `too_large`, which is safe |
+| GitLab `/diffs` and `/repository/compare` built from the documented API only: the entry fields (`old_path`, `new_path`, `a_mode`, `b_mode`, `diff`, `new_file`, `renamed_file`, `deleted_file`, `generated_file`, `too_large`, `collapsed`), `x-next-page` on `/diffs`, `changes_count` as `1000+` or null, `diff_refs.base_sha` as the merge base, the `commit`, `commits`, `diffs`, `compare_timeout`, `compare_same_ref` and `web_url` of a comparison, and its file cap (1000 assumed) | a fragment that is not hunks, a missing field or a list that does not add up is `upstream_error`; a cut or unclear one is `too_large` (`diff`, `compare`) or `files_complete: false`; an empty modified file with no path or mode change reads as cut |
 | A posted body with a trailing newline and a neutralized first line, compared with its stored form | the comparison in [Post order](interface.md#post-order) step 11 |
 | A self-managed instance whose `external_url` differs from the API host | `wrong_host_response` |
 | GitLab `position` for a `line_range`; GitHub comment-level `startLine` on a single line | as tabled in [Threads and comments](interface.md#threads-and-comments) |
