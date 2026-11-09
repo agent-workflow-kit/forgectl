@@ -501,9 +501,8 @@ def test_missing_gh_is_tool_missing_only_for_github_and_names_the_install_comman
     fake_forges: FakeForges,
 ) -> None:
     script_ok(fake_forges, "glab")
-    gateway = make_gateway(
-        fake_forges, env={"PATH": str(fake_forges.bin_dir / "nowhere") + ":/usr/bin"}
-    )
+    # Only a nonexistent dir on PATH: a real gh in /usr/bin (as on CI runners) must not be found.
+    gateway = make_gateway(fake_forges, env={"PATH": str(fake_forges.bin_dir / "nowhere")})
     with pytest.raises(ForgectlError) as raised:
         gateway.api(GH, "GET", ["x"])
     assert raised.value.code == "tool_missing"
