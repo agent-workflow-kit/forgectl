@@ -41,6 +41,11 @@ VERSIONS = f"{MR_ID}/versions"
 COMMIT = f"projects/101/repository/commits/{HEAD}"
 REVIEWERS = f"{MR_ID}/reviewers"
 APPROVALS = f"{MR_ID}/approvals"
+MR_NUMERIC_ID = 90001  # the `id` of the `mr` recording
+OWNED = {"noteable_id": MR_NUMERIC_ID, "noteable_type": "MergeRequest"}
+
+
+REQUESTED = "requested review from "
 
 
 def snap_rec(name: str) -> Any:
@@ -57,6 +62,8 @@ class Rig:
         self.fake = fake
         self.warnings: list[str] = []
         self.data = standard(fake, **overrides)
+        # the notes API names each note's merge request (the base recording predates that check)
+        fake.pages(NOTES, [[{**note, **OWNED} for note in self.data["notes"]]])
         fake.pages(DISCUSSIONS, [snap_rec("discussions")])
         fake.on(VERSIONS, snap_rec("versions"))
         fake.on(COMMIT, snap_rec("commit"))
@@ -87,7 +94,14 @@ def reset_on(fake: FakeGitLab) -> None:
 
 
 def request_note(note_id: int, body: str, at: str, *, system: bool = True) -> dict[str, Any]:
-    return {"id": note_id, "system": system, "body": body, "created_at": at, "updated_at": at}
+    return {
+        "id": note_id,
+        "system": system,
+        "body": body,
+        "created_at": at,
+        "updated_at": at,
+        **OWNED,
+    }
 
 
 def request_of(out: dict[str, Any], login: str) -> dict[str, Any]:
@@ -148,6 +162,12 @@ def test_the_output_carries_no_token_and_no_unknown_keys(rig: Rig) -> None:
         ("requested review from @user-4, @user-5 and removed approval", ("user-4", "user-5")),
         ("requested review from @user-4 and removed review request for @user-5", ("user-4",)),
         ("requested review from @user-8.x_y", ("user-8.x_y",)),
+        # GitLab usernames may begin with `.` and end with `-`; one character is a username too
+        (REQUESTED + "@user-4-", ("user-4-",)),
+        (REQUESTED + "@.user-4", (".user-4",)),
+        (REQUESTED + "@user-4- and @user-5", ("user-4-", "user-5")),
+        (REQUESTED + "@u", ("u",)),
+        (REQUESTED + "@user-4.", ()),
         ("requested review from @user-4!x", ()),
         ("requested review from @", ()),
         ("requested review from a", ()),
@@ -536,7 +556,7 @@ def test_host_text_is_sanitized_per_field_and_never_becomes_a_key(
     rig = Rig(fake, tmp_path)
     docs = snap_rec("discussions")
     note = docs[0]["notes"][0]
-    note["body"] = f"hi \x1b[31mred\x1b[0m ‮ rtl {TOKEN} \x00 end"
+    note["body"] = f"hi \x1b[31mred\x1b[0m \u202e rtl {TOKEN} \x00 end"
     docs[1]["notes"][0]["position"]["new_path"] = "src/\x1b]0;title\x07evil\n.py"
     docs[1]["notes"][0]["position"]["__proto__"] = "x"
     fake.pages(DISCUSSIONS, [docs])
@@ -724,13 +744,35 @@ def test_versions_of_other_heads_only_fall_back_to_the_commit_date(
     assert push_of(rig.snapshot()) == ("2026-10-01T08:59:00Z", "commit_date")
 
 
-@pytest.mark.parametrize("status", [404, 403, 500])
+@pytest.mark.parametrize("status", [404, 403])
 def test_unavailable_versions_fall_back_to_the_commit_date(
     fake: FakeGitLab, tmp_path: Path, status: int
 ) -> None:
     rig = Rig(fake, tmp_path)
     fake.on(VERSIONS, {"message": "x"}, status=status)
     assert push_of(rig.snapshot()) == ("2026-10-01T08:59:00Z", "commit_date")
+
+
+@pytest.mark.parametrize("path", [VERSIONS, COMMIT])
+def test_a_failed_push_time_read_fails_the_snapshot(
+    fake: FakeGitLab, tmp_path: Path, path: str
+) -> None:
+    rig = Rig(fake, tmp_path)
+    if path == COMMIT:
+        fake.on(VERSIONS, [])
+    fake.on(path, {"message": "x"}, status=500)
+    with pytest.raises(ForgectlError) as raised:
+        rig.snapshot()
+    assert raised.value.code == "upstream_error"
+
+
+def test_a_versions_answer_that_is_not_a_list_warns_and_falls_back(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    rig = Rig(fake, tmp_path)
+    fake.on(VERSIONS, {"versions": []})
+    assert push_of(rig.snapshot()) == ("2026-10-01T08:59:00Z", "commit_date")
+    assert any("not readable" in w for w in rig.warnings)
 
 
 def test_malformed_versions_warn_and_fall_back(fake: FakeGitLab, tmp_path: Path) -> None:
@@ -956,3 +998,298 @@ def test_an_mr_that_became_another_object_during_the_reading_is_moved(
     with pytest.raises(ForgectlError) as raised:
         rig.comments()
     assert raised.value.code == "upstream_error" and "changed while" in raised.value.message
+
+
+# -- parse caps, thread roots, identity and flags ------------------------------------------------
+
+
+def cut_note(before: str, after: str) -> str:
+    """A request note whose scanned part (4096 characters) ends exactly after ``before``;
+    ``after`` lies past the cut. Filler logins name nobody the tests know."""
+    head = "requested review from "
+    parts: list[str] = []
+
+    def length() -> int:
+        return len(head + ", ".join([*parts, before]))
+
+    while 4096 - length() > 60:
+        parts.append("@f" + "x" * 50)
+    parts[-1] += "y" * (4096 - length())
+    text = head + ", ".join([*parts, before])
+    assert len(text) == 4096
+    return text + after
+
+
+def test_a_login_split_by_the_character_cut_is_never_taken() -> None:
+    logins, cut = gs._parse_note(cut_note("@user-2", "x and @user-3"))
+    assert "user-2" not in logins and cut is True
+
+
+def test_the_token_cap_reports_a_cut_only_when_another_login_follows() -> None:
+    names = [f"@user-{i}" for i in range(200)]
+    exact = "requested review from " + ", ".join(names)
+    assert gs._parse_note(exact) == (tuple(n[1:] for n in names), False)
+    assert gs._parse_note(exact + " and @user-200")[1] is True
+    assert gs._parse_note(exact + " and removed approval")[1] is False
+
+
+def test_a_login_split_by_the_cut_gives_no_forged_instance(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    rig = Rig(fake, tmp_path)
+    split = request_note(900, cut_note("@user-2", "x"), "2026-10-05T10:00:00.000Z")
+    fake.pages(NOTES, [[split]])
+    out = rig.snapshot()
+    assert request_of(out, "user-2")["instance"] != "900"
+    assert out["incomplete"] == ["review_requests"]
+    assert any("too long to parse whole" in w for w in rig.warnings)
+
+
+def test_a_reviewer_past_the_cut_never_takes_an_older_notes_instance(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    rig = Rig(fake, tmp_path)
+    long_note = request_note(900, cut_note("@user-2", ", @user-3"), "2026-10-05T10:00:00.000Z")
+    older = request_note(801, "requested review from @user-2 and @user-3", "2026-10-02T10:00:00Z")
+    fake.pages(NOTES, [[long_note, older]])
+    out = rig.snapshot()
+    assert request_of(out, "user-3")["instance"] is None  # not 801: the walk stopped
+    assert out["incomplete"] == ["review_requests"] and out["complete"] is False
+    assert any("too long to parse whole" in w for w in rig.warnings)
+    assert not any("no review request note matches" in w for w in rig.warnings)
+
+
+def test_reviewers_found_before_a_cut_note_keep_their_instance(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    rig = Rig(fake, tmp_path)
+    newer = request_note(950, "requested review from @user-3", "2026-10-06T10:00:00.000Z")
+    long_note = request_note(900, cut_note("@user-9", ", @user-2"), "2026-10-05T10:00:00.000Z")
+    fake.pages(NOTES, [[newer, long_note]])
+    out = rig.snapshot()
+    assert request_of(out, "user-3")["instance"] == "950"
+    assert request_of(out, "user-2")["instance"] is None
+    assert out["incomplete"] == ["review_requests"]
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (("2026-10-02T11:05:00.000Z", 10), ("2026-10-02T11:05:00.000Z", 9)),
+        (("2026-10-02T11:05:00.500Z", 5), ("2026-10-02T11:05:00Z", 6)),
+        (("2026-10-02T11:05:00Z", 6), ("2026-10-02T13:05:00.000+02:00", 5)),
+    ],
+)
+def test_the_root_of_a_thread_is_the_first_comment_emitted(
+    fake: FakeGitLab, tmp_path: Path, first: tuple[str, int], second: tuple[str, int]
+) -> None:
+    rig = Rig(fake, tmp_path)
+    docs = snap_rec("discussions")
+    for note, (at, note_id) in zip(docs[1]["notes"], (first, second), strict=True):
+        note.update(id=note_id, created_at=at, updated_at=at)
+    fake.pages(DISCUSSIONS, [docs])
+    emitted = thread_of(rig.comments(), "d2")["comments"]
+    assert emitted[0]["reply_to"] is None
+    assert all(c["reply_to"] == emitted[0]["id"] for c in emitted[1:])
+
+
+def test_a_note_id_in_two_discussions_is_an_upstream_error(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    rig = Rig(fake, tmp_path)
+    docs = snap_rec("discussions")
+    docs[1]["notes"][1]["id"] = docs[0]["notes"][0]["id"]
+    fake.pages(DISCUSSIONS, [docs])
+    with pytest.raises(ForgectlError) as raised:
+        rig.comments()
+    assert raised.value.code == "upstream_error" and "note id" in raised.value.message
+    assert fake.count(DISCUSSIONS) == 1  # a malformed answer, not a moving list: no repeat
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda n: n.pop("noteable_id"),
+        lambda n: n.__setitem__("noteable_id", None),
+        lambda n: n.__setitem__("noteable_id", str(MR_NUMERIC_ID)),
+        lambda n: n.__setitem__("noteable_id", True),
+        lambda n: n.pop("noteable_type"),
+        lambda n: n.__setitem__("noteable_type", None),
+    ],
+)
+def test_a_discussion_note_without_a_usable_noteable_is_an_upstream_error(
+    fake: FakeGitLab, tmp_path: Path, mutate: Any
+) -> None:
+    rig = Rig(fake, tmp_path)
+    docs = snap_rec("discussions")
+    mutate(docs[0]["notes"][0])
+    fake.pages(DISCUSSIONS, [docs])
+    with pytest.raises(ForgectlError) as raised:
+        rig.comments()
+    assert raised.value.code == "upstream_error"
+
+
+def test_a_discussion_note_of_another_kind_of_object_is_wrong_host(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    rig = Rig(fake, tmp_path)
+    docs = snap_rec("discussions")
+    docs[0]["notes"][0]["noteable_type"] = "Issue"
+    fake.pages(DISCUSSIONS, [docs])
+    with pytest.raises(ForgectlError) as raised:
+        rig.comments()
+    assert raised.value.code == "wrong_host_response"
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda n: n.pop("noteable_id"),
+        lambda n: n.__setitem__("noteable_id", "x"),
+        lambda n: n.pop("noteable_type"),
+    ],
+)
+def test_a_request_note_without_a_usable_noteable_is_an_upstream_error(
+    fake: FakeGitLab, tmp_path: Path, mutate: Any
+) -> None:
+    rig = Rig(fake, tmp_path)
+    note = request_note(5, "requested review from @user-2", "2026-10-02T10:00:00.000Z")
+    mutate(note)
+    fake.pages(NOTES, [[note]])
+    with pytest.raises(ForgectlError) as raised:
+        rig.snapshot()
+    assert raised.value.code == "upstream_error"
+
+
+@pytest.mark.parametrize("value", [None, "90001", True, 1.5])
+def test_a_version_without_a_usable_merge_request_id_warns_and_falls_back(
+    fake: FakeGitLab, tmp_path: Path, value: Any
+) -> None:
+    rig = Rig(fake, tmp_path)
+    versions = snap_rec("versions")
+    versions[0]["merge_request_id"] = value
+    fake.on(VERSIONS, versions)
+    assert push_of(rig.snapshot()) == ("2026-10-01T08:59:00Z", "commit_date")
+    assert any("not readable" in w for w in rig.warnings)
+
+
+def test_a_version_with_no_merge_request_id_warns_and_falls_back(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    rig = Rig(fake, tmp_path)
+    versions = snap_rec("versions")
+    del versions[0]["merge_request_id"]
+    fake.on(VERSIONS, versions)
+    assert push_of(rig.snapshot())[1] == "commit_date"
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"), [("system", "true"), ("system", None), ("draft", "false"), ("draft", 1)]
+)
+def test_a_note_flag_that_is_not_a_bool_is_an_upstream_error(
+    fake: FakeGitLab, tmp_path: Path, flag: str, value: Any
+) -> None:
+    rig = Rig(fake, tmp_path)
+    docs = snap_rec("discussions")
+    docs[1]["notes"][1][flag] = value
+    fake.pages(DISCUSSIONS, [docs])
+    with pytest.raises(ForgectlError) as raised:
+        rig.comments()
+    assert raised.value.code == "upstream_error"
+
+
+def test_a_long_path_of_marked_characters_is_never_cut_inside_a_marker(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    from forgectl.sanitize import sanitize_line
+
+    rig = Rig(fake, tmp_path)
+    docs = snap_rec("discussions")
+    raw = "\u202e" * 3000
+    docs[1]["notes"][0]["position"]["new_path"] = raw
+    fake.pages(DISCUSSIONS, [docs])
+    out = rig.comments()
+    assert thread_of(out, "d2")["path"] == sanitize_line(raw)
+    schemas.validate_cli_output("comments", out)
+
+
+def test_a_version_time_with_no_utc_form_warns_and_falls_back(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    rig = Rig(fake, tmp_path)
+    versions = snap_rec("versions")
+    versions[0]["created_at"] = "0001-01-01T00:00:00+14:00"
+    fake.on(VERSIONS, versions)
+    assert push_of(rig.snapshot()) == ("2026-10-01T08:59:00Z", "commit_date")
+    assert any("not readable" in w for w in rig.warnings)
+
+
+def test_a_commit_date_with_no_utc_form_is_null_with_a_warning(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    rig = Rig(fake, tmp_path)
+    fake.on(VERSIONS, [])
+    fake.on(COMMIT, {**snap_rec("commit"), "committed_date": "0001-01-01T00:00:00+14:00"})
+    assert push_of(rig.snapshot()) == (None, None)
+    assert any("commit date" in w for w in rig.warnings)
+
+
+def test_warnings_of_a_discarded_attempt_are_not_written(fake: FakeGitLab, tmp_path: Path) -> None:
+    rig = Rig(fake, tmp_path)
+    bad = snap_rec("versions")
+    bad[0]["created_at"] = "soon"
+    answers = iter([bad])
+
+    def versions(_q: dict[str, str]) -> Answer:
+        return Answer(200, next(answers, snap_rec("versions")))
+
+    fake.on_handler(VERSIONS, versions)
+    first = recording("mr")
+    moved = copy.deepcopy(first)
+    moved["sha"] = "d4" * 20
+    moved["head_pipeline"]["sha"] = "d4" * 20
+    mr_sequence(fake, [first, first, moved, first, first, first])
+    out = rig.snapshot()
+    assert push_of(out) == ("2026-10-02T11:35:00Z", "push_event")
+    assert fake.count(VERSIONS) == 2
+    assert not any("not readable" in w for w in rig.warnings)
+
+
+def test_warnings_of_the_final_failing_attempt_are_written(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    rig = Rig(fake, tmp_path)
+    reviewers = recording("reviewers")
+    reviewers[1]["state"] = "brand_new_state"
+    fake.on(REVIEWERS, reviewers)
+    fake.on(DISCUSSIONS, {"message": "x"}, status=502)
+    with pytest.raises(ForgectlError):
+        rig.snapshot()
+    assert any("not one forgectl knows" in w for w in rig.warnings)
+
+
+def test_reviews_fails_when_the_head_keeps_moving_at_the_closing_check(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    rig = Rig(fake, tmp_path)
+    first = recording("mr")
+    moved = copy.deepcopy(first)
+    moved["sha"] = "d4" * 20
+    moved["head_pipeline"]["sha"] = "d4" * 20
+    mr_sequence(fake, [first, first, moved, first, first, moved])
+    with pytest.raises(ForgectlError) as raised:
+        rig.reviews()
+    assert raised.value.code == "upstream_error" and "changed while" in raised.value.message
+
+
+def test_reviews_reads_again_after_one_move_at_the_closing_check(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    rig = Rig(fake, tmp_path)
+    first = recording("mr")
+    moved = copy.deepcopy(first)
+    moved["sha"] = "d4" * 20
+    moved["head_pipeline"]["sha"] = "d4" * 20
+    mr_sequence(fake, [first, first, moved, first, first, first])
+    out = rig.reviews()
+    assert out["head_sha"] == HEAD and fake.count(mr_path()) == 6

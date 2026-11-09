@@ -46,11 +46,12 @@ FUTURE_SKEW = timedelta(minutes=5)
 _REQUEST_PREFIX = "requested review from "
 _MAX_NOTE_SCAN = 4096  # characters of a note body parsed for logins
 _MAX_TOKENS = 200
-_LOGIN_TOKEN = re.compile(r"@([A-Za-z0-9_](?:[A-Za-z0-9_.-]{0,253}[A-Za-z0-9_])?)")
+#: A GitLab username (interface: Other input grammars), the longer form first so a name of one
+#: character never cuts a longer one short.
+_LOGIN_TOKEN = re.compile(r"@([A-Za-z0-9_.][A-Za-z0-9_.-]{0,253}[A-Za-z0-9_-]|[A-Za-z0-9_])")
 _SEPARATOR = re.compile(r", and |, | and ")
 _DISCUSSION_ID = re.compile(r"^[0-9a-f]{40}\Z")
 _DIGITS = re.compile(r"[0-9]{1,18}")
-_MAX_PATH = 4096
 _MAX_LINE = 10_000_000
 #: `/reviewers` states: `outstanding` for no review yet or a draft only, `reviewed` for the rest
 #: (interface: Review requests). UNVERIFIED: the value names are from the documented enum.
@@ -83,15 +84,35 @@ def _guarded[T](read: Callable[[], T]) -> T:
         raise gl._bad("data") from None
 
 
-def _twice[T](read: Callable[[], T]) -> T:
-    """``read``, repeated once when the MR moved during it, then `upstream_error`."""
-    for attempt in range(2):
-        try:
-            return _guarded(read)
-        except _Moved:
-            if attempt == 1:
-                raise _moved() from None
+def _twice[T](backend: GitLabBackend, read: Callable[[], T]) -> T:
+    """``read``, repeated once when the MR moved during it, then `upstream_error`. The warnings
+    of each attempt are held back and written only for the attempt that ends the command, so a
+    discarded attempt never contradicts the output."""
+    sink = backend._warn_to
+    try:
+        for attempt in range(2):
+            held: list[str] = []
+            backend._warn_to = held.append
+            try:
+                result = _guarded(read)
+            except _Moved:
+                if attempt == 1:
+                    _flush(sink, held)
+                    raise _moved() from None
+                continue
+            except BaseException:
+                _flush(sink, held)
+                raise
+            _flush(sink, held)
+            return result
+    finally:
+        backend._warn_to = sink
     raise _moved()  # unreachable: the second attempt returns or raises
+
+
+def _flush(sink: Callable[[str], None], held: list[str]) -> None:
+    for message in held:
+        sink(message)
 
 
 def _parse(text: str) -> datetime:
@@ -279,16 +300,28 @@ def parse_requested(body: str) -> tuple[str, ...]:
     """The logins a `requested review from` note names: every `@login` up to the first word that
     is not a login, `,` or `and`. A token counts only when it is a whole word (followed by a
     separator or the end), so `@a!x` names nobody. Empty when the wording does not begin so."""
+    return _parse_note(body)[0]
+
+
+def _parse_note(body: str) -> tuple[tuple[str, ...], bool]:
+    """``parse_requested``'s logins, and whether a cap cut the note: a body longer than
+    `_MAX_NOTE_SCAN` characters, or another token after `_MAX_TOKENS`. A token that ends exactly
+    at the character cut is never taken (it may be the start of a longer login)."""
     text = body[:_MAX_NOTE_SCAN]
     if not text.startswith(_REQUEST_PREFIX):
-        return ()
+        return (), False
+    cut_short = len(body) > len(text)
     pos = len(_REQUEST_PREFIX)
     found: list[str] = []
-    while len(found) < _MAX_TOKENS:
+    while True:
         token = _LOGIN_TOKEN.match(text, pos)
         if token is None:
             break
+        if len(found) == _MAX_TOKENS:
+            return tuple(found), True
         end = token.end()
+        if end == len(text) and cut_short:
+            break  # the cut may have split this login
         separator = _SEPARATOR.match(text, end)
         if end != len(text) and separator is None:
             break  # `@a!x`: the token is not a whole word
@@ -296,7 +329,7 @@ def parse_requested(body: str) -> tuple[str, ...]:
         if separator is None:
             break
         pos = separator.end()
-    return tuple(found)
+    return tuple(found), cut_short
 
 
 @dataclass(frozen=True)
@@ -335,11 +368,15 @@ def _read_requests(r: _Reader, reviewers: list[_Reviewer]) -> RequestsRead:
         return RequestsRead((), True)
     wanted = {m.ascii_lower(x.user.login) for x in reviewers}
     newest: dict[str, tuple[datetime, int, str]] = {}
-    state = {"ordered": True, "last": None}
+    state: dict[str, Any] = {"ordered": True, "last": None, "cut": False}
 
     def take(batch: list[dict[str, Any]]) -> bool:
         for note in batch:
-            _scan_note(r, note, wanted, newest)
+            if _scan_note(r, note, wanted, newest):
+                # A note cut by a cap: which instance is newest for a reviewer not yet found
+                # cannot be told, so the walk stops here and the list is incomplete.
+                state["cut"] = True
+                return True
             at = gl._rfc3339(note.get("created_at"))
             if at is not None:
                 when = _parse(at)
@@ -352,9 +389,11 @@ def _read_requests(r: _Reader, reviewers: list[_Reviewer]) -> RequestsRead:
 
     segments = [*r.base(), "notes"]
     _items, done = r.pages(segments, (("order_by", "created_at"), ("sort", "desc")), take)
-    complete = done
+    complete = done and not state["cut"]
     if not done:
         r.warn("the review request notes hit the page cap; review_requests is incomplete")
+    if state["cut"]:
+        r.warn("a review request note is too long to parse whole; review_requests is incomplete")
     requests: list[m.ReviewRequest] = []
     unmatched = 0
     for x in reviewers:
@@ -370,7 +409,7 @@ def _read_requests(r: _Reader, reviewers: list[_Reviewer]) -> RequestsRead:
                 requested_at=None if hit is None else hit[2],
             )
         )
-    if unmatched and done:
+    if unmatched and complete:
         r.warn(f"no review request note matches {unmatched} reviewer(s); their instance is null")
     return RequestsRead(tuple(requests), complete)
 
@@ -380,21 +419,22 @@ def _scan_note(
     note: Mapping[str, Any],
     wanted: set[str],
     newest: dict[str, tuple[datetime, int, str]],
-) -> None:
-    """Record a system note's request for each wanted reviewer it names (newest per reviewer).
-    A note from a user is never a request, whatever its wording."""
+) -> bool:
+    """Record a system note's request for each wanted reviewer it names (newest per reviewer),
+    and say whether a cap cut the note. A note from a user is never a request, whatever its
+    wording."""
     body = note.get("body")
     if note.get("system") is not True or not isinstance(body, str):
-        return
-    logins = parse_requested(body)
-    if not logins:
-        return
+        return False
+    logins, cut = _parse_note(body)
+    if not logins and not cut:
+        return False
     _same_mr(r, note)
     at = gl._rfc3339(note.get("created_at"))
     note_id = note.get("id")
     if at is None or isinstance(note_id, bool) or not isinstance(note_id, int) or note_id < 1:
         r.warn("a review request note has no usable id or time and is skipped")
-        return
+        return cut
     when = _parse(at)
     for login in logins:
         key = m.ascii_lower(login)
@@ -403,13 +443,20 @@ def _scan_note(
         current = newest.get(key)
         if current is None or (when, note_id) > (current[0], current[1]):
             newest[key] = (when, note_id, at)
+    return cut
 
 
 def _same_mr(r: _Reader, note: Mapping[str, Any]) -> None:
-    """A note that names its noteable must name this MR (a mismatch is another host's answer)."""
-    if "noteable_id" in note and note["noteable_id"] != r.mr_id:
+    """A note must name this MR as its noteable: a missing or mistyped noteable is a malformed
+    answer, a well-typed other one is another host's answer."""
+    noteable_id, noteable_type = note.get("noteable_id"), note.get("noteable_type")
+    if isinstance(noteable_id, bool) or not isinstance(noteable_id, int):
+        raise gl._bad("note's merge request id")
+    if not isinstance(noteable_type, str):
+        raise gl._bad("note's object type")
+    if noteable_id != r.mr_id:
         raise r.backend._wrong_host(r.target, "another merge request's note", None)
-    if "noteable_type" in note and note["noteable_type"] != "MergeRequest":
+    if noteable_type != "MergeRequest":
         raise r.backend._wrong_host(r.target, "a note of another kind of object", None)
 
 
@@ -447,6 +494,9 @@ def _posted(r: _Reader, raw: Any) -> list[dict[str, Any]]:
     for item in gl._list(raw, "notes"):
         note = gl._obj(item, "note")
         _same_mr(r, note)
+        for flag in ("system", "draft"):
+            if flag in note and not isinstance(note[flag], bool):
+                raise gl._bad(f"note {flag} flag")
         if note.get("system") is True or note.get("draft") is True:
             continue
         out.append(note)
@@ -461,11 +511,11 @@ def _position(
     if raw is None:
         return None, None, None, None, None
     pos = gl._obj(raw, "position")
-    path = None
+    path: str | None = None
     for key in ("new_path", "old_path"):
         value = pos.get(key)
         if isinstance(value, str) and value:
-            path = gl._line(value)[:_MAX_PATH] or None
+            path = gl._line(value) or None
             break
     sha = pos.get("head_sha")
     commit_sha = sha if isinstance(sha, str) and gl._SHA.match(sha) else None
@@ -473,7 +523,9 @@ def _position(
     if kind in ("file", "image"):
         return path, None, None, None, commit_sha
     new_line, old_line = _positive(pos.get("new_line")), _positive(pos.get("old_line"))
-    line, side, key = None, None, ""
+    line: int | None = None
+    side: Literal["left", "right"] | None = None
+    key = ""
     if new_line is not None:
         line, side, key = new_line, "right", "new_line"
     elif old_line is not None:
@@ -484,10 +536,12 @@ def _position(
         candidate = _positive(span["start"].get(key))
         if candidate is not None and candidate < line:
             start = candidate
-    return path, line, side, start, commit_sha  # type: ignore[return-value]
+    return path, line, side, start, commit_sha
 
 
-def _thread(r: _Reader, raw: dict[str, Any]) -> m.Thread | None:
+def _thread(r: _Reader, raw: dict[str, Any], note_ids: set[int]) -> m.Thread | None:
+    """One discussion as a thread. ``note_ids`` holds the note ids of the discussions before it
+    in this reading: a note id seen in two discussions is a malformed answer."""
     discussion = raw.get("id")
     if not isinstance(discussion, str) or not _DISCUSSION_ID.match(discussion):
         raise gl._bad("discussion id")
@@ -498,16 +552,20 @@ def _thread(r: _Reader, raw: dict[str, Any]) -> m.Thread | None:
     posted = _posted(r, notes)
     if not posted:
         return None  # only system notes (or drafts): nothing was posted
+    # The order the output uses (`Comment.sort_key`), so the root is the first comment emitted.
     keyed = sorted(
         (
             (gl._required_time(n.get("created_at"), "created_at"), _note_int(n.get("id")), n)
             for n in posted
         ),
-        key=lambda item: (item[0], item[1]),
+        key=lambda item: (item[0], _comment_id(item[1])),
     )
     ids = [item[1] for item in keyed]
     if len(set(ids)) != len(ids):
         raise _Moved  # a note listed twice: the list shifted while it was read
+    if note_ids.intersection(ids):
+        raise gl._bad("note id")  # one note in two discussions
+    note_ids.update(ids)
     first = keyed[0][2]
     individual = raw.get("individual_note") is True
     resolvable = (not individual) and any(n.get("resolvable") is True for n in posted)
@@ -549,15 +607,16 @@ def _thread(r: _Reader, raw: dict[str, Any]) -> m.Thread | None:
 def _read_threads(r: _Reader) -> ThreadsRead:
     rows, done = r.pages([*r.base(), "discussions"])
     threads: list[m.Thread] = []
-    seen: set[str] = set()
+    seen: set[object] = set()
+    note_ids: set[int] = set()
     for raw in rows:
-        found = _thread(r, raw)
-        if found is None:
-            continue
-        if found.id in seen:
+        discussion = raw.get("id")
+        if discussion in seen:
             raise _Moved  # the same discussion on two pages: the list shifted while it was read
-        seen.add(found.id)
-        threads.append(found)
+        found = _thread(r, raw, note_ids)
+        seen.add(discussion)
+        if found is not None:
+            threads.append(found)
     if not done:
         r.warn("the discussions hit the page cap; threads is incomplete")
     return ThreadsRead(tuple(threads), done)
@@ -568,26 +627,28 @@ def _read_threads(r: _Reader) -> ThreadsRead:
 
 def _version_time(r: _Reader, head: str) -> tuple[datetime, str] | None:
     """The newest `created_at` of the versions whose head is `head`, or None when there is none
-    or the versions cannot be read (unreadable is a fallback, a malformed answer a warning)."""
+    or the versions are absent (a 404 or 403) or malformed (a warning). Any other failure of the
+    read fails the command, as every other read does (interface: Completeness)."""
     try:
-        response = r.get([*r.base(), "versions"], query=(("per_page", gl.PER_PAGE),), shape="list")
+        response = r.get([*r.base(), "versions"], query=(("per_page", gl.PER_PAGE),), shape="any")
     except ForgectlError as error:
-        if error.code in gl._NEVER_DEGRADED:
-            raise
-        if not gl._part_missing(error):
-            r.warn("the versions of the merge request could not be read")
-        return None
+        if gl._part_missing(error):
+            return None
+        raise
     best: tuple[datetime, str] | None = None
     try:
         for item in gl._list(response.data, "versions"):
             row = gl._obj(item, "version")
-            if "merge_request_id" in row and row["merge_request_id"] != r.mr_id:
+            owner = row.get("merge_request_id")
+            if isinstance(owner, bool) or not isinstance(owner, int):
+                raise gl._bad("version's merge request id")
+            if owner != r.mr_id:
                 raise r.backend._wrong_host(r.target, "another merge request's version", None)
             sha = gl._sha(row.get("head_commit_sha"), "version head")
             created = gl._required_time(row.get("created_at"), "version time")
             if sha != head:
                 continue
-            when = _parse(created)
+            when = _utc(created, "version time")
             if best is None or when > best[0]:
                 best = (when, created)
     except ForgectlError as error:
@@ -599,20 +660,37 @@ def _version_time(r: _Reader, head: str) -> tuple[datetime, str] | None:
 
 
 def _commit_time(r: _Reader, head: str) -> tuple[datetime, str] | None:
+    """The head commit's date, or None (a warning) when the commit is absent (a 404 or 403) or
+    its answer is malformed; any other failure of the read fails the command."""
+    segments = ["projects", path_int(r.project_id), "repository", "commits", head]
     try:
-        data = gl._obj(
-            r.get(["projects", path_int(r.project_id), "repository", "commits", head]).data,
-            "head commit",
-        )
+        response = r.get(segments, shape="any")
+    except ForgectlError as error:
+        if not gl._part_missing(error):
+            raise
+        r.warn("the head commit date could not be read")
+        return None
+    try:
+        data = gl._obj(response.data, "head commit")
         if data.get("id") != head:
             raise gl._bad("head commit id")
         stamp = gl._required_time(data.get("committed_date"), "commit date")
+        when = _utc(stamp, "commit date")
     except ForgectlError as error:
         if error.code in gl._NEVER_DEGRADED:
             raise
         r.warn("the head commit date could not be read")
         return None
-    return _parse(stamp), stamp
+    return when, stamp
+
+
+def _utc(stamp: str, what: str) -> datetime:
+    """An RFC 3339 time in UTC; one that has no UTC form (such as year 1 at `+14:00`) is a
+    malformed answer."""
+    try:
+        return _parse(stamp).astimezone(UTC)
+    except (ValueError, OverflowError):
+        raise gl._bad(what) from None
 
 
 def read_head_push(r: _Reader, head: str) -> m.PushTime | None:
@@ -672,7 +750,7 @@ def snapshot(backend: GitLabBackend, ref: PrRef, now: Now | None = None) -> m.Sn
             head_push=head_push,
         )
 
-    return _twice(once)
+    return _twice(backend, once)
 
 
 def comments(backend: GitLabBackend, ref: PrRef, now: Now | None = None) -> m.CommentsResult:
@@ -691,7 +769,7 @@ def comments(backend: GitLabBackend, ref: PrRef, now: Now | None = None) -> m.Co
             complete=threads.complete,
         )
 
-    return _twice(once)
+    return _twice(backend, once)
 
 
 def reviews(backend: GitLabBackend, ref: PrRef, now: Now | None = None) -> m.ReviewsResult:
@@ -719,4 +797,4 @@ def reviews(backend: GitLabBackend, ref: PrRef, now: Now | None = None) -> m.Rev
             complete=True,
         )
 
-    return _twice(once)
+    return _twice(backend, once)

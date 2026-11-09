@@ -948,7 +948,7 @@ class Snapshot:
     incomplete: tuple[str, ...] = ()
     #: `snapshot` only; ``None`` serializes as null/null (unknown).
     #: GitHub: `backends/github_snapshot.read_head_push` (the PR timeline, #12).
-    #: TODO(#16): fill `Snapshot.head_push` from the host (GitLab: the MR versions).
+    #: GitLab: `backends/gitlab_snapshot.read_head_push` (the MR versions, #16).
     head_push: PushTime | None = None
 
     def __post_init__(self) -> None:
