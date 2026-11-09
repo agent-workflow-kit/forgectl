@@ -975,8 +975,9 @@ class GitLabBackend:
             checks.append(own)
         children, children_complete = self._children(target, pipeline_project, pipeline_id)
         checks.extend(children)
-        # TODO(#31): a merged-results or merge-train pipeline runs on the merge ref, so its sha
-        # differs from the head and `for_current_head` is false (pending) until a spec decision.
+        # Merged-results and merge-train pipelines run on the merge ref, so their sha differs from
+        # the head: `for_current_head` is false and CI stays pending (fail closed; see
+        # gitlab_ci.py, TODO(#31) for the pending decision).
         return m.aggregate_ci(
             checks,
             pr_head_sha=head_sha,
@@ -1120,7 +1121,9 @@ class GitLabBackend:
         raise _not_yet("reviews", 16)  # TODO(#16): GitLab reviews
 
     def ci(self, ref: PrRef) -> m.CiResult:
-        raise _not_yet("ci", 17)  # TODO(#17): GitLab ci; `_ci` above is the shared read
+        from . import gitlab_ci  # (#17)
+
+        return gitlab_ci.ci(ref, self.get_pr)
 
     def access(self, repo: RepoRef, user: str) -> m.AccessResult:
         raise _not_yet("access", 19)  # TODO(#19): GitLab access; `_member_can_push` is the rule
