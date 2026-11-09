@@ -6,10 +6,11 @@ Nothing here knows about widgets.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from . import safe
-from .opener import is_openable
+from .opener import URL_MAX_LENGTH, is_openable
 from .source import Row
 
 MAX_THREADS = 200
@@ -17,6 +18,9 @@ MAX_COMMENTS_PER_THREAD = 50
 MAX_CHECKS = 500
 MAX_REVIEWS = 200
 COMMENT_LIMIT = 4_000
+# One budget for the reviews and comments of the pane, counted after sanitizing, so no
+# combination of per-field caps can build a pane that freezes the UI.
+REST_BUDGET = 200_000
 
 
 def _d(value: Any) -> dict[str, Any]:
@@ -57,9 +61,9 @@ def check_label(check: dict[str, Any]) -> str:
     if url is None:
         suffix = ""
     elif is_openable(url):
-        suffix = f"  {safe.line(url, 500)}"
+        suffix = f"  {safe.line(url, URL_MAX_LENGTH)}"  # shown whole: what o opens
     else:  # shown, never opened
-        suffix = f"  {safe.line(url, 500)}  (not opened: not http or https)"
+        suffix = f"  {safe.line(url, URL_MAX_LENGTH)}  (not opened: not http or https)"
     return f"{safe.line(check.get('state'))}  {safe.line(check.get('name'))}{suffix}"
 
 
@@ -75,7 +79,7 @@ def facts_text(snap: dict[str, Any]) -> str:
     ci = _d(snap.get("ci"))
     lines = [
         safe.line(snap.get("title")),
-        f"{safe.line(snap.get('pr'))}   {safe.line(snap.get('url'), 500)}",
+        f"{safe.line(snap.get('pr'))}   {safe.line(snap.get('url'), URL_MAX_LENGTH)}",
         f"state: {safe.line(snap.get('state'))}"
         + ("  draft" if snap.get("draft") else "")
         + f"   author: {_login(snap.get('author'))}",
@@ -103,43 +107,117 @@ def checks_of(snap: dict[str, Any]) -> list[dict[str, Any]]:
     return [c for c in checks if isinstance(c, dict)][:MAX_CHECKS]
 
 
+class _Budget:
+    """Lines added while they fit in ``limit`` characters; the rest are only counted."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.used = 0
+        self.lines: list[str] = []
+        self.skipped = 0
+
+    @property
+    def full(self) -> bool:
+        return self.skipped > 0
+
+    def add(self, *lines: str) -> None:
+        """Add ``lines`` as one block, whole or not at all."""
+        size = sum(len(x) + 1 for x in lines)
+        if self.full or self.used + size > self.limit:
+            self.skipped += 1
+            return
+        self.used += size
+        self.lines.extend(lines)
+
+    def skip(self, n: int) -> None:
+        self.skipped += n
+
+    def note(self, *lines: str) -> None:
+        """A heading or marker: added while there is room, never counted as not shown."""
+        if not self.full and self.used + sum(len(x) + 1 for x in lines) <= self.limit:
+            self.used += sum(len(x) + 1 for x in lines)
+            self.lines.extend(lines)
+
+
 def rest_text(snap: dict[str, Any], diff: dict[str, Any] | None) -> str:
-    out: list[str] = ["Reviews"]
+    """Reviews and comments within ``REST_BUDGET``, then the diff (bounded by its own limit)."""
+    out = _Budget(REST_BUDGET)
+    out.note("Reviews")
     latest = [x for x in (snap.get("latest_by_reviewer") or []) if isinstance(x, dict)]
+    reviews = [x for x in (snap.get("reviews") or []) if isinstance(x, dict)]
     for entry in latest[:MAX_REVIEWS]:
-        out.append(f"  {safe.line(entry.get('state'))}  @{safe.line(entry.get('login'))}")
-    for review in [x for x in (snap.get("reviews") or []) if isinstance(x, dict)][:MAX_REVIEWS]:
-        out.append(f"  review {safe.line(review.get('state'))} by {_login(review.get('author'))}")
+        out.add(f"  {safe.line(entry.get('state'))}  @{safe.line(entry.get('login'))}")
+    for review in reviews[:MAX_REVIEWS]:
+        if out.full:  # count what is left, without sanitizing it
+            out.skip(1)
+            continue
+        head = f"  review {safe.line(review.get('state'))} by {_login(review.get('author'))}"
         body = review.get("body")
-        if body:
-            out.append(_indent(safe.text(body, COMMENT_LIMIT)))
-    if len(out) == 1:
-        out.append("  (none)")
-    out += ["", "Comments"]
+        out.add(head, *([_indent(safe.text(body, COMMENT_LIMIT))] if body else []))
+    if not latest and not reviews:
+        out.note("  (none)")
+    out.note("", "Comments")
     threads = [t for t in (snap.get("threads") or []) if isinstance(t, dict)]
     for thread in threads[:MAX_THREADS]:
+        comments = [c for c in (thread.get("comments") or []) if isinstance(c, dict)]
+        comments = comments[:MAX_COMMENTS_PER_THREAD]
+        if out.full:
+            out.skip(1 + len(comments))
+            continue
         where = ""
         if thread.get("path"):
             where = f" {safe.line(thread['path'])}"
             if thread.get("line"):
                 where += f":{safe.line(thread['line'])}"
         state = "resolved" if thread.get("resolved") else "open"
-        out.append(f"  thread{where} ({state})")
-        for comment in [c for c in (thread.get("comments") or []) if isinstance(c, dict)][
-            :MAX_COMMENTS_PER_THREAD
-        ]:
-            out.append(f"    @{_login(comment.get('author'))}:")
-            out.append(_indent(safe.text(comment.get("body"), COMMENT_LIMIT), 6))
+        out.add(f"  thread{where} ({state})")
+        for comment in comments:
+            if out.full:
+                out.skip(1)
+                continue
+            out.add(
+                f"    @{_login(comment.get('author'))}:",
+                _indent(safe.text(comment.get("body"), COMMENT_LIMIT), 6),
+            )
     if not threads:
-        out.append("  (none)")
+        out.note("  (none)")
     if len(threads) > MAX_THREADS:
-        out.append(f"  ... {len(threads) - MAX_THREADS} more threads not shown")
-    out += ["", "Diff"]
+        if out.full:
+            out.skip(len(threads) - MAX_THREADS)
+        else:
+            out.note(f"  ... {len(threads) - MAX_THREADS} more threads not shown")
+    lines = out.lines
+    if out.full:
+        lines.append(f"  ... {out.skipped} more not shown")
+    lines += ["", "Diff"]
     if diff is None:
-        out.append("  (not loaded)")
+        lines.append("  (not loaded)")
     else:
-        out.append(safe.text(diff.get("diff"), safe.DIFF_LIMIT))
-    return "\n".join(out)
+        lines.append(safe.text(diff.get("diff"), safe.DIFF_LIMIT))
+    return "\n".join(lines)
+
+
+@dataclass
+class Detail:
+    """Everything the detail pane shows, built off the event loop."""
+
+    url: str | None
+    checks: list[dict[str, Any]]
+    facts: str
+    check_labels: list[str]
+    rest: str
+
+
+def detail_of(snap: dict[str, Any], diff: dict[str, Any] | None) -> Detail:
+    url = snap.get("url")
+    checks = checks_of(snap)
+    return Detail(
+        url=url if isinstance(url, str) else None,
+        checks=checks,
+        facts=facts_text(snap),
+        check_labels=[check_label(c) for c in checks],
+        rest=rest_text(snap, diff),
+    )
 
 
 def _indent(text: str, n: int = 4) -> str:

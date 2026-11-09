@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/cli/browse.json",
+  "title": "browse output",
+  "description": "Printed with --json on exit 0: an empty object. The result goes to --result-file (browse-result.json).",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 0
+}

@@ -11,6 +11,7 @@ import json
 import os
 import re
 import stat
+import tempfile
 from typing import Any
 
 from .errors import ForgectlError, usage
@@ -24,6 +25,7 @@ _PR_RE = re.compile(
     r"(?:/(?!\.\.?(?:/|#))[A-Za-z0-9._-]+)+#[1-9][0-9]{0,9}"
 )
 _PR_MAX_LENGTH = 512
+_ASCII_UPPER_TO_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 _INTENTS = ("open", "back")
 _RESULT_KEYS = frozenset({"intent", "selected", "merged"})
 
@@ -37,14 +39,18 @@ def is_pr(value: object) -> bool:
 
 
 def parse_focus(text: str) -> str:
-    """``--focus`` takes the ``host/path#N`` form, matched whole on the raw text.
+    """``--focus`` takes the ``host/path#N`` form, matched whole; the ASCII host is lowercased.
 
     TODO(#5): accept the URL forms too, through the grammars of ``identifiers.py`` (host
-    lookup, closed host set), once that module is on this branch's base.
+    lookup, closed host set), once that module is on this branch's base; and refuse a host that
+    is neither built in nor declared in config with ``unknown_host`` (exit 20) before the UI
+    starts.
     """
-    if not is_pr(text):
+    host, slash, rest = text.partition("/")
+    candidate = host.translate(_ASCII_UPPER_TO_LOWER) + slash + rest
+    if not is_pr(candidate):
         raise ForgectlError("invalid_pr", "--focus takes a PR in the form host/<project path>#N")
-    return text
+    return candidate
 
 
 def validate_result(result: object) -> None:
@@ -68,6 +74,8 @@ def preflight_result_file(path: str) -> None:
     try:
         if not stat.S_ISDIR(os.stat(directory).st_mode):
             raise usage("--result-file: parent is not a directory")
+        if not os.access(directory, os.W_OK | os.X_OK):
+            raise usage("--result-file: the parent directory is not writable")
         st = os.lstat(path)
     except FileNotFoundError:
         if os.path.isdir(directory):
@@ -82,19 +90,24 @@ def preflight_result_file(path: str) -> None:
 def write_result_file(path: str, result: dict[str, Any]) -> None:
     """Write the result atomically: a private temporary file in the same directory, then a rename.
 
-    The temporary file is created with ``O_EXCL`` and ``O_NOFOLLOW`` at mode 0600. A symlink or
-    special file at ``path`` is refused (the rename would otherwise replace it).
+    The temporary file has an unpredictable name and is created by ``mkstemp`` (``O_EXCL``,
+    ``O_NOFOLLOW``, mode 0600). A symlink or special file at ``path`` is refused (the rename
+    would otherwise replace it). Any failure here, the re-run preflight included, is
+    ``internal``: the command line was already accepted.
     """
     validate_result(result)
-    preflight_result_file(path)
+    try:
+        preflight_result_file(path)
+    except ForgectlError as err:
+        raise ForgectlError("internal", f"could not write --result-file: {err.message}") from None
     data = json.dumps(result, ensure_ascii=True).encode("ascii") + b"\n"
     directory = os.path.dirname(path) or "."
-    temp = os.path.join(directory, f".{os.path.basename(path)}.{os.getpid()}.tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    base = os.path.basename(path)
     try:
-        fd = os.open(temp, flags, 0o600)
+        fd, temp = tempfile.mkstemp(dir=directory, prefix="." + base + ".", suffix=".tmp")
         try:
             with os.fdopen(fd, "wb") as handle:
+                os.fchmod(handle.fileno(), 0o600)
                 handle.write(data)
                 handle.flush()
                 os.fsync(handle.fileno())

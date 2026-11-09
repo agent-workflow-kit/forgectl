@@ -7,6 +7,8 @@ them against the schemas, so a fixture cannot drift from the contract.
 from __future__ import annotations
 
 import copy
+import threading
+from collections.abc import Callable
 from typing import Any
 
 SHA_A = "a" * 40
@@ -211,11 +213,36 @@ class FakeSource:
         return copy.deepcopy(self.diffs.get(pr) or make_diff(pr))
 
 
+class GatedSource(FakeSource):
+    """A ``FakeSource`` whose chosen calls block until ``gate`` is set (at most ``timeout``)."""
+
+    def __init__(self, *, gated: tuple[str, ...], timeout: float = 10.0, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.gated = gated
+        self.gate = threading.Event()
+        self.timeout = timeout
+
+    def _wait(self, name: str) -> None:
+        if name in self.gated:
+            self.gate.wait(self.timeout)
+
+    def prs(self, **kwargs: Any) -> dict[str, Any]:
+        answer = super().prs(**kwargs)
+        self._wait("prs")
+        return answer
+
+    def snapshot(self, pr: str) -> dict[str, Any]:
+        answer = super().snapshot(pr)
+        self._wait("snapshot")
+        return answer
+
+
 class FakeOpener:
     """Records the URLs it was asked to open; never starts a process."""
 
     def __init__(self) -> None:
         self.opened: list[str] = []
 
-    def open(self, url: str) -> None:
+    def open(self, url: str, on_exit: Callable[[int], None] | None = None) -> str:
         self.opened.append(url)
+        return "fake-opener"

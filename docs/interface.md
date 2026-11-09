@@ -784,7 +784,7 @@ A list and a detail pane with facts, CI, reviews, comments and diff. The default
 
 `m` runs the merge in process, with `--actor human:<me.name>`, and `--expected-head`, `--expected-base` from that read. `m`'s dialog is [Merge order](#merge-order) step 5's, plus a choice of `merge_methods_allowed`, preselecting the configured method, when the method is unresolved. A blocked PR gets no merge: the status line shows `not_ready` and the CLI command. Audit: `actor_source: tty`. A veto, an escalation or any refusal shows in the status line. `o` opens only the built `url`; a check's `url` is shown, opened only when `http` or `https`. Forge text renders with Textual markup disabled.
 
-`--result-file` writes `{"intent": "open"|"back", "selected": [...], "merged": [...]}` on exit (`schemas/cli/browse-result.json`). `selected` holds zero or one `pr`; `merged` lists the PRs merged with `m`. `enter` opens the detail pane and `intent` stays `back` on exit; `intent: open` means `o` was used. Keys: `q` quit, `?` help, `/` filter, `enter` open, `r` refresh.
+`--result-file` writes `{"intent": "open"|"back", "selected": [...], "merged": [...]}` on exit (`schemas/cli/browse-result.json`). `selected` holds zero or one `pr`; `merged` lists the PRs merged with `m`. `enter` opens the detail pane and `intent` stays `back` on exit; `intent: open` means `o` was used. Keys: `q` quit, `?` help, `/` filter, `enter` open, `r` refresh. The result file is written only when `browse` exits 0; on any other exit an existing file is left unchanged and must be ignored by callers.
 
 ## Files
 

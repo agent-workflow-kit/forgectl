@@ -449,7 +449,9 @@ def build_parser() -> argparse.ArgumentParser:
     _writes(p)
 
     p = add("browse", "terminal browser (needs the tui extra)")
-    _once(p, "--focus", type=nonempty, metavar="PR")  # TODO(#38): parse and normalize
+    # TODO(#5): the URL forms of --focus, through identifiers.py (see browse.parse_focus).
+    _once(p, "--focus", type=nonempty, metavar="PR")
+    # TODO(#59): --interval D (a duration or 0) is not parsed yet.
     _once(p, "--result-file", dest="result_file", type=nonempty, metavar="PATH")
 
     p = add("export", "audit records as JSONL")

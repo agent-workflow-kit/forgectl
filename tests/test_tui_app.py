@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import stat
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -10,15 +13,18 @@ from typing import Any
 import pytest
 from textual.content import Content
 from textual.pilot import Pilot
-from textual.widgets import OptionList, Static
+from textual.widgets import Input, OptionList, Static
 
 from forgectl.errors import ForgectlError
+from forgectl.tui import render
 from forgectl.tui.app import BrowseApp
+from forgectl.tui.opener import BrowserOpener
 
 from .cli_schema_check import validate
 from .tui_fakes import (
     FakeOpener,
     FakeSource,
+    GatedSource,
     make_check,
     make_comment,
     make_diff,
@@ -44,14 +50,18 @@ def drive(
     source: FakeSource,
     script: Callable[[BrowseApp, Pilot[None]], Awaitable[None]],
     *,
-    opener: FakeOpener | None = None,
+    opener: Any = None,
     focus: str | None = None,
+    wait: bool = True,
 ) -> BrowseApp:
     app = BrowseApp(source, opener or FakeOpener(), focus=focus)
 
     async def go() -> None:
         async with app.run_test(size=(140, 50)) as pilot:
-            await settle(app, pilot)
+            if wait:
+                await settle(app, pilot)
+            else:
+                await pilot.pause()
             await script(app, pilot)
 
     asyncio.run(go())
@@ -180,6 +190,7 @@ def test_help_lists_the_keys_and_any_key_closes_it() -> None:
         help_text = as_content(app.screen.query_one("#help", Static).content).plain
         for key in ("q ", "? ", "/ ", "enter", "o ", "r ", "R "):
             assert key in help_text
+        assert "refresh selected" in help_text and "refresh all" in help_text
         await pilot.press("x")
         await pilot.pause()
         assert not app.screen.query("#help")
@@ -199,7 +210,8 @@ def test_refresh_keys_refetch() -> None:
         await settle(app, pilot)
 
     drive(source, script)
-    assert [c for c in source.calls if c[0] == "snapshot"] == [("snapshot", PR1)] * 2
+    # r refetches the open PR; R reloads both lists and then the visible detail pane
+    assert [c for c in source.calls if c[0] == "snapshot"] == [("snapshot", PR1)] * 3
     assert len([c for c in source.calls if c[0] == "prs"]) == 4
 
 
@@ -382,7 +394,16 @@ def test_the_markup_title_is_shown_literally() -> None:
 
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         assert title in list_prompts(app)[0].plain
-        await pilot.click("#list")  # a click on the text runs nothing
+        olist = app.query_one("#list", OptionList)
+        column = len(PR1) + 2 + 3  # three characters into the title, after the pr and 2 spaces
+        line0 = olist.render_line(0).text  # the first content line of the list, as drawn
+        assert line0[column - 3 : column + 6] == title[:9]  # the offset is on the title text
+        inner = olist.content_region
+        x = inner.x - olist.region.x + column  # widget-relative: past border and padding
+        y = inner.y - olist.region.y
+        widget, _ = app.screen.get_widget_at(inner.x + column, inner.y)
+        assert widget is olist
+        await pilot.click("#list", offset=(x, y))  # a click on the text runs nothing
         await pilot.pause()
         assert app.is_running
 
@@ -458,7 +479,7 @@ def test_a_failing_detail_read_keeps_the_list_usable() -> None:
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         await pilot.press("enter")  # PR2 has no snapshot: the fake raises KeyError
         await settle(app, pilot)
-        assert "failed" in content_of(app, "#status").plain
+        assert "internal: KeyError" in content_of(app, "#status").plain
         assert app.is_running
         assert len(list_prompts(app)) == 2
 
@@ -484,3 +505,357 @@ def test_every_result_validates_against_the_schema() -> None:
 
     app = drive(basic_source(), script)
     validate(app.result(), "forgectl/cli/browse-result.json")
+
+
+async def wait_until(pilot: Pilot[None], check: Callable[[], bool], timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not check():
+        assert time.monotonic() < deadline, "condition never held"
+        await pilot.pause(0.02)
+
+
+def status_of(app: BrowseApp) -> str:
+    return content_of(app, "#status").plain
+
+
+@pytest.mark.parametrize("bad", [{"labels": 5}, {"ci": {"checks": 5}}, {"threads": 7}])
+def test_type_confused_data_reaches_the_status_line_and_the_app_keeps_running(
+    bad: dict[str, Any],
+) -> None:
+    source = basic_source()
+    source.snapshots[PR1].update(bad)
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        assert app.is_running
+        assert "internal: TypeError" in status_of(app)
+
+    app = drive(source, script, focus=PR1)
+    assert not app.return_code  # run_test re-raises a recorded crash; none happened
+
+
+def test_a_list_item_of_the_wrong_type_reaches_the_status_line() -> None:
+    source = basic_source()
+    source.authored = [{"pr": PR1, "title": 5, "labels": 5, "author": "x"}]  # type: ignore[list-item]
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        assert app.is_running
+        await pilot.press("slash", "a")
+        await pilot.pause()
+        assert app.is_running
+
+    app = drive(source, script)
+    assert not app.return_code  # run_test re-raises a recorded crash; none happened
+
+
+def test_R_during_a_load_is_ignored_with_a_note() -> None:
+    source = gated_basic("prs")
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await wait_until(pilot, lambda: len(source.calls) == 1)
+        await pilot.press("R", "R", "R")
+        await pilot.pause()
+        assert "already running" in status_of(app)
+        source.gate.set()
+        await settle(app, pilot)
+
+    drive(source, script, wait=False)
+    assert [c[0] for c in source.calls] == ["prs", "prs"]
+
+
+def gated_basic(*gated: str) -> GatedSource:
+    base = basic_source()
+    return GatedSource(
+        gated=gated,
+        authored=base.authored,
+        requested=base.requested,
+        snapshots=base.snapshots,
+        diffs=base.diffs,
+    )
+
+
+def test_repeated_enter_and_r_on_the_same_pr_load_it_once() -> None:
+    source = gated_basic("snapshot")
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down", "enter")
+        await wait_until(pilot, lambda: ("snapshot", PR1) in source.calls)
+        await pilot.press("enter", "r", "enter", "r")
+        await pilot.pause()
+        assert "already loading" in status_of(app)
+        source.gate.set()
+        await settle(app, pilot)
+
+    drive(source, script)
+    assert [c for c in source.calls if c[0] == "snapshot"] == [("snapshot", PR1)]
+
+
+def test_a_load_for_another_pr_replaces_the_stale_one() -> None:
+    source = gated_basic("snapshot")
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down", "enter")
+        await wait_until(pilot, lambda: ("snapshot", PR1) in source.calls)
+        await pilot.press("up", "enter")
+        await wait_until(pilot, lambda: ("snapshot", PR2) in source.calls)
+        source.gate.set()
+        await settle(app, pilot)
+        assert "Theirs" in content_of(app, "#facts").plain
+
+    drive(source, script)
+
+
+def test_a_diff_error_stays_in_the_final_status() -> None:
+    class DiffFails(FakeSource):
+        def diff(self, pr: str) -> dict[str, Any]:
+            raise ForgectlError("not_found", "no diff\x1b[31m")
+
+    base = basic_source()
+    source = DiffFails(authored=base.authored, snapshots=base.snapshots)
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("enter")
+        await settle(app, pilot)
+        status = status_of(app)
+        assert "1 checks" in status and "diff: not_found: no diff" in status
+        assert "\x1b" not in status
+
+    drive(source, script)
+
+
+def test_a_list_error_survives_the_detail_load() -> None:
+    class PrsFails(FakeSource):
+        def prs(self, **kwargs: Any) -> dict[str, Any]:
+            if kwargs.get("author"):
+                raise ForgectlError("upstream_error", "authored list down")
+            return super().prs(**kwargs)
+
+    base = basic_source()
+    source = PrsFails(requested=base.requested, snapshots=base.snapshots)
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        status = status_of(app)
+        assert "authored list down" in status and "list incomplete" in status
+        assert "checks" in status
+
+    drive(source, script, focus=PR1)
+
+
+def test_the_rest_of_the_pane_has_one_total_budget() -> None:
+    hostile = "\x1b" * 4_000
+    threads = [
+        {
+            "id": f"gh:rt:T{i}",
+            "resolved": False,
+            "path": "f.py",
+            "line": 1,
+            "comments": [make_comment(hostile, "bob", n) for n in range(50)],
+        }
+        for i in range(200)
+    ]
+    snap = make_snapshot(1)
+    snap["threads"] = threads
+    started = time.monotonic()
+    rest = render.rest_text(snap, None)
+    assert time.monotonic() - started < 2.0
+    body, _, _ = rest.partition("\n\nDiff\n")
+    footer = body.rsplit("\n", 1)[-1]
+    assert footer.strip().startswith("...") and footer.endswith("more not shown")
+    assert len(body) <= render.REST_BUDGET + len(footer) + 1
+
+    source = FakeSource(authored=[make_item(1)], snapshots={PR1: snap})
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("enter")
+        await settle(app, pilot)
+        shown = content_of(app, "#rest").plain
+        assert "more not shown" in shown and len(shown) < render.REST_BUDGET + 1_000
+
+    started = time.monotonic()
+    drive(source, script)
+    assert time.monotonic() - started < 15.0
+
+
+def test_a_detail_arriving_does_not_steal_focus_from_the_filter() -> None:
+    source = gated_basic("snapshot")
+    opener = FakeOpener()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: ("snapshot", PR2) in source.calls)
+        await pilot.press("slash", *"ca")
+        source.gate.set()
+        await settle(app, pilot)
+        assert app.query_one("#detail").display is True
+        await pilot.press("o", "space", "q")
+        await pilot.pause()
+        assert app.query_one("#filter", Input).value == "cao q"
+        assert app.is_running
+
+    drive(source, script, opener=opener)
+    assert opener.opened == []
+
+
+def test_selected_is_the_pr_the_last_o_opened() -> None:
+    opener = FakeOpener()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("o")  # row 0 is PR2
+        await settle(app, pilot)
+        await pilot.press("down", "enter")  # PR1's detail
+        await settle(app, pilot)
+
+    app = drive(basic_source(), script, opener=opener)
+    assert opener.opened == ["https://github.com/acme/widgets/pull/2"]
+    assert app.result() == {"intent": "open", "selected": [PR2], "merged": []}
+
+
+def test_o_on_the_checks_list_opens_the_first_check_without_arrowing() -> None:
+    opener = FakeOpener()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down", "enter")
+        await settle(app, pilot)
+        await pilot.press("tab")
+        assert app.focused is app.query_one("#checks")
+        await pilot.press("o")
+        await settle(app, pilot)
+
+    drive(basic_source(), script, opener=opener)
+    assert opener.opened == ["https://ci.example/b/1"]
+
+
+def test_o_with_nothing_to_open_says_so() -> None:
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("o")
+        await settle(app, pilot)
+        assert "not opened" in status_of(app)
+
+    drive(FakeSource(), script)
+
+
+def test_quit_does_not_wait_for_a_slow_read() -> None:
+    source = gated_basic("snapshot")
+    source.timeout = 5.0
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: ("snapshot", PR2) in source.calls)
+        await pilot.press("q")
+
+    started = time.monotonic()
+    app = BrowseApp(source, FakeOpener())
+
+    async def go() -> None:
+        async with app.run_test(size=(140, 50)) as pilot:
+            await settle(app, pilot)
+            await script(app, pilot)
+
+    # A fresh loop with its default executor shut down at the end, as App.run does.
+    asyncio.run(go())
+    elapsed = time.monotonic() - started
+    source.gate.set()
+    assert elapsed < 3.0
+
+
+def test_the_status_says_the_url_was_handed_to_the_opener() -> None:
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("o")
+        await settle(app, pilot)
+        assert "launched fake-opener for https://github.com/acme/widgets/pull/2" in status_of(app)
+
+    drive(basic_source(), script)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a shell script stands in for the opener")
+def test_an_opener_exiting_non_zero_is_noted_and_the_intent_stays_open(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("xdg-open", "open"):
+        prog = bindir / name
+        prog.write_text("#!/bin/sh\nexit 4\n")
+        prog.chmod(prog.stat().st_mode | stat.S_IXUSR)
+    opener = BrowserOpener({"PATH": str(bindir)})
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("o")
+        await wait_until(pilot, lambda: "opener exited 4" in status_of(app))
+
+    app = drive(basic_source(), script, opener=opener)
+    assert app.result()["intent"] == "open"
+
+
+def test_the_command_palette_is_disabled() -> None:
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        assert len(app.screen_stack) == 1
+        assert app.is_running
+
+    drive(basic_source(), script)
+
+
+def test_r_refreshes_the_pr_in_the_visible_pane_not_the_highlighted_row() -> None:
+    source = basic_source()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down", "enter")  # PR1
+        await settle(app, pilot)
+        app.query_one("#list", OptionList).highlighted = 0  # PR2 highlighted, PR1 shown
+        await pilot.press("r")
+        await settle(app, pilot)
+
+    drive(source, script)
+    assert [c for c in source.calls if c[0] == "snapshot"] == [("snapshot", PR1)] * 2
+
+
+def test_r_after_escape_opens_the_highlighted_row_not_the_hidden_pr() -> None:
+    source = basic_source()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down", "enter")  # PR1
+        await settle(app, pilot)
+        await pilot.press("escape", "up", "r")  # pane hidden, PR2 highlighted
+        await settle(app, pilot)
+        assert app.query_one("#detail").display is True
+        assert "Theirs" in content_of(app, "#facts").plain
+
+    drive(source, script)
+    assert [c for c in source.calls if c[0] == "snapshot"] == [("snapshot", PR1), ("snapshot", PR2)]
+
+
+def test_R_without_a_pane_reloads_only_the_lists() -> None:
+    source = basic_source()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("R")
+        await settle(app, pilot)
+
+    drive(source, script)
+    assert [c[0] for c in source.calls] == ["prs"] * 4
+
+
+def test_R_keeps_the_highlighted_pr_when_rows_shift() -> None:
+    source = basic_source()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down")  # PR1 at index 1
+        source.requested.insert(0, make_item(3, title="Newest", updated_at="2026-11-03T12:00:00Z"))
+        await pilot.press("R")
+        await settle(app, pilot)
+        olist = app.query_one("#list", OptionList)
+        assert olist.option_count == 3
+        assert olist.highlighted == 2
+        assert PR1 in list_prompts(app)[2].plain
+
+    drive(source, script)
+
+
+def test_filtering_keeps_the_highlighted_pr() -> None:
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down", "slash", *"acme")
+        await pilot.pause()
+        olist = app.query_one("#list", OptionList)
+        assert olist.option_count == 2
+        assert olist.highlighted == 1
+
+    drive(basic_source(), script)
