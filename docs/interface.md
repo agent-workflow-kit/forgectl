@@ -8,12 +8,12 @@ forgectl gives one normalized interface to pull requests on GitHub and merge req
 
 ### Identifiers
 
-- **Repo id:** `host/<full project path>`. The host is lowercase, with an optional `:port` only for a non-default port; the path is one or more segments of `[A-Za-z0-9._-]`, none equal to `.` or `..`. Backend `github` takes exactly two segments. Backend `gitlab` takes one or more; with `api_prefix`, a URL must begin with the prefix, which is stripped first, and `-` and `merge_requests` are not valid project segments when parsing a URL. Output uses the host's canonical path and case. `repos.<id>` lookups are case-insensitive against the canonical path. A bad `--repo` exits 2 (`usage`).
+- **Repo id:** `host/<full project path>`. The host is lowercase, with an optional `:port` only for a non-default port; the path is one or more segments of `[A-Za-z0-9._-]`, none equal to `.` or `..`. Backend `github` takes exactly two segments. Backend `gitlab` takes one or more; with `api_prefix`, a URL must begin with the prefix, which is stripped first, and `-` and `merge_requests` are not valid project segments when parsing a merge request URL. No GitLab segment and no GitHub owner segment starts with `-` (a GitHub repo name may), in a URL, `host/path#N` and `--repo` alike; a PR breaking this exits 2 (`invalid_pr`), a `--repo` exits 2 (`usage`). Output uses the host's canonical path and case. `repos.<id>` lookups are case-insensitive against the canonical path. A bad `--repo` exits 2 (`usage`).
 - **PR reference:** an `https` URL, or `host/<full project path>#N`. `N` matches `^[1-9][0-9]{0,9}$`, checked before any path is built (GitHub resolves `/pulls/7abc` to PR 7). GitLab numbers are written without `!`. Output always uses the `#N` form, in the field `pr`. A bad PR exits 2 (`invalid_pr`).
 - **Accepted URLs.** GitHub: `https://<host>/<owner>/<repo>/pull/<N>`, optionally followed by `/files`, `/commits`, `/commits/<sha>`, `/checks`, `.diff` or `.patch`. GitLab: `https://<host>/<path>/-/merge_requests/<N>`, or the older form without `/-/`, optionally followed by `/diffs`, `/commits` or `/pipelines`. A trailing slash is accepted. A query and fragment made of `[A-Za-z0-9._~=&-]` are accepted and dropped. `@`, `\`, `%`, whitespace and non-ASCII exit 2. Anything else exits 2 too; forgectl never hands an unparsed reference to `gh` or `glab`.
 - **Parsing.** References and ids are matched by one anchored ASCII pattern over the whole input (Python `fullmatch`), on the raw text, before any normalization, with no URL library. The child gets the matched config key and validated parts, never input text. Lowercasing uses ASCII rules.
 - **Hosts in input.** Lowercased; `:443` is normalized away; userinfo is refused. A leading `www.` is stripped only for the built-in hosts.
-- **Other input grammars,** exit 2 otherwise. GitHub login: `^[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\[bot\])?$`. GitLab username: `^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254}$`. `me` is reserved in `--author` and `--review-requested-from`. A branch name (`--expected-base`) follows git's `check-ref-format` rules, with no leading `-`, no space, `~^:?*[\`, `..`, `@{` or control character.
+- **Other input grammars,** exit 2 otherwise. GitHub login: `^[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\[bot\])?$`. GitLab username: `^(?:[A-Za-z0-9_]|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,253}[A-Za-z0-9_-])$`, so it never ends in `.` (`.` and `..` are refused). `me` is reserved in `--author` and `--review-requested-from`. A branch name (`--expected-base`) follows git's `check-ref-format` rules, with no leading `-`, no space, `~^:?*[\`, `..` or `@{`; no control, format or line/paragraph-separator character (such as bidi marks); neither `refs` nor anything starting with `refs/` (a branch is never given as a full ref); and at most 1024 characters.
 - **Commit shas.** `--expected-head` and the shas of `compare` are full 40-hex shas. Uppercase is lowered first. A GitLab project using SHA-256 (64 hex) is not supported.
 - **No derivation from the working directory.** forgectl never reads a repository in the current directory: a PR is always given in full, and `--repo` is never derived from `origin`. It never needs a local checkout, so it has no reason to run git.
 - **Comment and thread ids** are stable across calls. `reply --to` takes comment, thread and review ids; `resolve --thread` and `unresolve --thread` take thread ids. Treat them as opaque; the prefix is for forgectl. `<node>` is `[A-Za-z0-9_=-]{1,100}`. Nothing outside these forms is accepted.
@@ -31,7 +31,7 @@ forgectl gives one normalized interface to pull requests on GitHub and merge req
 
 ### Hosts
 
-The set of hosts is **closed**. `github.com` (backend `github`) and `gitlab.com` (backend `gitlab`) are built in; any other host must be declared as `hosts.<host>.backend`. A PR, `--repo` or `--host` naming any other host exits 20 (`reason: unknown_host`) before any process starts. forgectl never probes a host to guess its backend, because a reference may come from third-party text and must never receive a token; this protects references, not a caller who controls the config.
+The set of hosts is **closed**. `github.com` (backend `github`) and `gitlab.com` (backend `gitlab`) are built in; any other host must be declared as `hosts.<host>.backend`. A host key, and the host part of a `repos.<id>` key, is written in normalized form: no `:443`, no leading-zero port, a port from 1 to 65535, and no `www.` in front of a built-in host; any other key exits 2 (`config_invalid`) naming the key. A PR, `--repo` or `--host` naming any other host exits 20 (`reason: unknown_host`) before any process starts. forgectl never probes a host to guess its backend, because a reference may come from third-party text and must never receive a token; this protects references, not a caller who controls the config.
 
 ### Human actions
 
@@ -112,7 +112,7 @@ Field rules:
 | `draft` | `DRAFT`, `isDraft` | `draft_status` |
 | `conflicts` | `DIRTY` | `conflict`; `has_conflicts: true`, whatever the status (`need_rebase` can hide conflicts) |
 | `checks_pending` | any counted check pending ([CI object](#ci-object)); `ci.state` is `pending`; `BLOCKED` with `ci.state: none`, a required check that has not reported | any counted check pending; `ci.state` is `pending`; `ci_still_running`; `ci_must_pass` when no counted check is failing; `for_current_head: false` |
-| `checks_failing` | any counted check failing | any counted check failing |
+| `checks_failing` | any counted check of the current head failing | any counted check of the current head failing; an old commit's failing checks give `checks_pending` instead (`for_current_head: false`) |
 | `reviews_required` | `BLOCKED` with `reviewDecision: REVIEW_REQUIRED` | `not_approved` |
 | `changes_requested` | any `latest_by_reviewer` entry with that state and `can_push` not false, whether or not the host would block | `requested_changes`; any `latest_by_reviewer` entry with that state and `can_push` not false |
 | `discussions_unresolved` | `BLOCKED` with unresolved resolvable threads, when no other code explains it | `discussions_not_resolved` |
@@ -237,7 +237,7 @@ A check's `state`:
 
 An unmapped value is `pending` with a `warn` log line, so a new host state never reads as passing.
 
-- `counted` is false for a GitLab `allow_failure` job and for `skipped`; true otherwise. `required` is `true`, `false` or `null`; GitLab gives `false` for `allow_failure: true`, else `null`. A check's `url` is null for a scheme other than `http` or `https`.
+- `counted` is false for a GitLab `allow_failure` job and for `skipped`; true otherwise. `required` is `true`, `false` or `null`; GitLab gives `false` for `allow_failure: true`, else `null`. A check's `url` is null for a scheme other than lowercase `http://` or `https://`, matching the schema's pattern, and for a url holding whitespace or a control character.
 - **Aggregation over counted checks:** any `failing` gives `failing`; else any `pending` gives `pending`; else any `passing` gives `passing`; else `none`. **`none` is not passing:** it means no evidence, including a head whose only pipeline was skipped.
 - `for_current_head` false (GitLab `head_pipeline.sha` differs from the head) forces `state: pending`, whatever the old pipeline reported; `head_sha` names the old commit. With `state: none`, `for_current_head` is true and `head_sha` is the PR's head. `passing` means no counted check registered for this head is failing or pending, and at least one passed. It does not say which checks, that every expected check registered, or who ran them.
 - `complete` false (a host cap on the check list) turns `passing` into `pending`.
@@ -266,7 +266,7 @@ Applied to every forge text field, diffs, and anything printed from input or a c
 
 - Characters of Unicode categories `Cc` (except tab and newline), `Cf`, `Cs`, `Co`, `Cn`, `Zl` and `Zp` are replaced by a visible marker `<U+XXXX>`, for example `<U+202E>`. Bidi overrides stay visible rather than disappearing, because in a diff they can be the attack.
 - So are these code points: all variation selectors, U+034F, U+17B4, U+17B5, U+180B to U+180F, U+115F, U+1160, U+3164, U+FFA0 and U+2800.
-- **One-line fields** (`title`, `head.ref`, `base.ref`, `path`, `login`, a check's `name`, labels; `x-one-line` in the schemas): tab and LF also become markers.
+- **One-line fields** (`title`, `head.ref`, `base.ref`, `path`, `login`, a check's `name` and `url`, labels; `x-one-line` in the schemas): tab and LF also become markers.
 - In text fields CRLF becomes LF. A lone CR becomes `<U+000D>`. In a diff, a CR before LF stays as it is.
 - Bytes that are not valid UTF-8 become U+FFFD.
 

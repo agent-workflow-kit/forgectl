@@ -81,7 +81,9 @@ _UNIT_SECONDS = {
 _DECIMAL = Context(prec=34)  # a private context: the thread's context may have been changed
 _NAME_RE = re.compile(r"[A-Za-z0-9._@-]{1,64}", re.ASCII)
 _LOGIN_RE = re.compile(
-    r"(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\[bot\])?|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254})", re.ASCII
+    r"(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\[bot\])?"
+    r"|[A-Za-z0-9_]|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,253}[A-Za-z0-9_-])",
+    re.ASCII,
 )
 _BIN_RE = re.compile(r"/.*|[^/]+", re.ASCII)
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*", re.ASCII)
@@ -560,6 +562,7 @@ def _check_keys(config: Config) -> None:
             continue
         if not _HOST_RE.fullmatch(host):
             raise _invalid(key, "not a valid host name (lowercase, with an optional port)")
+        _check_host_normalized(key, host)
         if entry.backend is None:
             raise _invalid(f"{key}.backend", "required for a host that is not built in")
         if entry.backend == "github" and entry.api_prefix is not None:
@@ -569,9 +572,26 @@ def _check_keys(config: Config) -> None:
         key = f"repos.{repo}"
         if not _REPO_RE.fullmatch(repo):
             raise _invalid(key, "not a valid repo id: host/path")
+        _check_host_normalized(key, repo.split("/", 1)[0])
         if repo.lower() in seen:  # stricter: the lookup ignores case, so these would collide
             raise _invalid(key, "differs from another repo key only by case")
         seen.add(repo.lower())
+
+
+def _check_host_normalized(key: str, host: str) -> None:
+    """A host (already matching ``_HOST_RE``) must be in the form input normalizes to, or no
+    reference could ever reach it. Uses the input normalization so the two stay in step."""
+    from .identifiers import _normalize_host  # here: identifiers imports this module
+
+    name, _, port = host.partition(":")
+    if _normalize_host(name, port or None) != host or (
+        name.startswith("www.") and name[4:] in BUILT_IN_HOSTS
+    ):
+        raise _invalid(
+            key,
+            "the host is not in normalized form (no :443, no leading-zero port, port 1-65535,"
+            " no www. in front of a built-in host)",
+        )
 
 
 # --- the environment -----------------------------------------------------------------------------
