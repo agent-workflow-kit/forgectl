@@ -703,8 +703,8 @@ INVALID: dict[str, tuple[str, str]] = {
     ),
     "host name uppercase": ("hosts:\n  H.Example.com: {backend: gitlab}\n", "hosts.H.Example.com"),
     "host name with userinfo": (
-        "hosts:\n  'user@example.test': {backend: gitlab}\n",
-        "hosts.user@example.test",
+        "hosts:\n  'u@h.example.test': {backend: gitlab}\n",
+        "hosts.u@h.example.test",
     ),
     "host name with a path": ("hosts:\n  b.com/x: {backend: gitlab}\n", "hosts.b.com/x"),
     "host name uppercase builtin": (

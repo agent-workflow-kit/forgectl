@@ -1,0 +1,9 @@
+{
+  "permission": "write",
+  "role_name": "maintain",
+  "user": {
+    "id": 1001,
+    "login": "user-1",
+    "type": "User"
+  }
+}

@@ -4,7 +4,7 @@ Normalized access to pull/merge requests across GitHub and GitLab: read them, po
 
 ## Status
 
-Designed; not yet implemented. The contract is [docs/interface.md](docs/interface.md), interface 0.1.0-design. Rationale and live-verification results are in [docs/design.md](docs/design.md); the staged plan is in [docs/plan.md](docs/plan.md).
+Designed; not yet implemented. The contract is [docs/interface.md](docs/interface.md), interface 0.2.0-design. Rationale and live-verification results are in [docs/design.md](docs/design.md); the staged plan is in [docs/plan.md](docs/plan.md).
 
 ## Layer
 
