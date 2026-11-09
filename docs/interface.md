@@ -286,7 +286,7 @@ Every call to a forge goes through one gateway:
 
 ## Reliability
 
-**Reads** are retried up to `retries` times (default 3) on 429, GitHub's secondary rate limit, 5xx and network errors, with backoff from 1 s doubling to 8 s, with jitter, honoring `retry-after`, within `--timeout`. A `retry-after` past the budget exits at once with `retry_after` set. A read timeout is `network_error`. After the retries, a read exits 12 with the code below, plus `retry_after` when known.
+**Reads** are retried up to `retries` times (default 3) on 429, GitHub's secondary rate limit, 5xx and network errors, with backoff from 1 s doubling to 8 s, with jitter, honoring `retry-after`, within `--timeout`. A `retry-after` past the budget exits at once with `retry_after` set. A read timeout is `network_error`. An answer that is not the documented shape (`upstream_error`) is retried like a 5xx, since the gateway does not tell the two apart. Each wait counts against the budget. After the retries, a read exits 12 with the code below, plus `retry_after` when known.
 
 | Answer | Code |
 |---|---|

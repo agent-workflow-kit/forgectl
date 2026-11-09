@@ -79,20 +79,19 @@ def test_a_retryable_failure_is_retried_until_it_succeeds(code: str) -> None:
 )
 def test_other_codes_are_never_retried(code: str) -> None:
     env, clock = make_env()
-    fn = failing(code, 1, retry_after=None) if code != "host_rejected" else None
-    if fn is None:
+    details = {"status": 400} if code == "host_rejected" else None
+    if code == "wrong_host_response":
+        details = {"observed": "x"}
+    calls_made: list[int] = []
 
-        def fn() -> str:  # host_rejected needs details.status
-            raise ForgectlError("host_rejected", "no", details={"status": 400})
-
-    elif code == "wrong_host_response":
-
-        def fn() -> str:
-            raise ForgectlError("wrong_host_response", "no", details={"observed": "x"})
+    def fn() -> str:
+        calls_made.append(1)
+        raise ForgectlError(code, "no", details=details)
 
     with pytest.raises(ForgectlError) as caught:
         env.call(fn)
     assert caught.value.code == code
+    assert calls_made == [1]
     assert clock.slept == []
 
 

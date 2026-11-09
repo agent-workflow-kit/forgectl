@@ -236,3 +236,10 @@ def test_truncate_utf8_never_splits_a_character() -> None:
     assert truncate_utf8("a€b", 4) == "a€"
     assert truncate_utf8("abc", 10) == "abc"
     assert truncate_utf8("😀😀", 5) == "😀"
+
+
+def test_sanitize_tree_marks_forge_keys_too() -> None:
+    from forgectl.errors import sanitize_tree
+
+    out = sanitize_tree({"a\nb‮": {"k\t": ["v‮", 1, None]}, 5: "x"})
+    assert out == {"a<U+000A>b<U+202E>": {"k<U+0009>": ["v<U+202E>", 1, None]}, 5: "x"}

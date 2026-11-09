@@ -71,17 +71,15 @@ class Script:
         self.argvs.append(list(argv))
         self.requests.append(json.loads(stdin) if stdin else {})
         assert self.queue, "no answer scripted"
-        answer = self.queue.pop(0) if len(self.queue) > 1 else self.queue[0]  # the last repeats
+        answer: Any = self.queue.pop(0) if len(self.queue) > 1 else self.queue[0]  # last repeats
         if callable(answer):
             answer = answer(self.requests[-1])
         if isinstance(answer, ProcessResult):
             return answer
-        if isinstance(answer, dict):  # a GraphQL body: HTTP 200, exit 1 when it holds errors
-            answer = http(200, answer)
-            code = 1 if b'"errors"' in answer else 0
-        else:
-            code = 0 if answer.startswith(b"HTTP/2.0 2") else 1
-        return ProcessResult(pid=1, pgid=1, returncode=code, stdout=answer, stderr=b"")
+        raw: bytes = http(200, answer) if isinstance(answer, dict) else answer
+        # gh exits 1 on a GraphQL body holding errors, and on any non-2xx status
+        code = 0 if raw.startswith(b"HTTP/2.0 2") and b'"errors"' not in raw else 1
+        return ProcessResult(pid=1, pgid=1, returncode=code, stdout=raw, stderr=b"")
 
 
 class Slept:
@@ -162,7 +160,7 @@ def failure(make: Callable[..., Harness], *answers: Any, **kw: Any) -> ForgectlE
     return caught.value
 
 
-# -- the happy path and the golden output ---------------------------------------------------------
+# -- the happy path and the golden output ----------------
 
 
 def test_the_adapter_satisfies_the_backend_protocol(make: Callable[..., Harness]) -> None:
@@ -219,7 +217,7 @@ def test_the_untrusted_token_never_reaches_the_argv(make: Callable[..., Harness]
     assert all(TOKEN not in arg for arg in harness.script.argvs[0])
 
 
-# -- blocked_by and readiness ---------------------------------------------------------------------
+# -- blocked_by and readiness ----------------
 
 
 def with_status(status: str | None, mergeable: str | None = "MERGEABLE") -> dict[str, Any]:
@@ -274,8 +272,8 @@ def test_an_unmapped_status_is_other_with_the_status_as_detail(
 
 
 def test_a_hostile_status_is_one_line_in_the_detail(make: Callable[..., Harness]) -> None:
-    ((_, detail),) = codes(run(make, with_status("A\nB‮" + "x" * 500)))
-    assert detail is not None and "\n" not in detail and "‮" not in detail
+    ((_, detail),) = codes(run(make, with_status("A\nB\u202e" + "x" * 500)))
+    assert detail is not None and "\n" not in detail and "\u202e" not in detail
     assert len(detail) <= 200
 
 
@@ -430,7 +428,7 @@ def test_a_non_writers_changes_requested_does_not_block(make: Callable[..., Harn
     assert codes(run(make, mutated(change))) == []
 
 
-# -- a commit that is not the head ----------------------------------------------------------------
+# -- a commit that is not the head ----------------
 
 
 def checks_page(
@@ -612,7 +610,7 @@ def test_skipped_only_head_has_ci_none_and_clean_is_not_passing(
     assert codes(read) == []
 
 
-# -- logins, bots, ghosts -------------------------------------------------------------------------
+# -- logins, bots, ghosts ----------------
 
 
 @pytest.mark.parametrize(
@@ -628,7 +626,7 @@ def test_skipped_only_head_has_ci_none_and_clean_is_not_passing(
         ("User", "-leading", None),
         ("User", "a" * 40, None),
         ("User", "x\nforged: line", None),
-        ("User", "‮evil", None),
+        ("User", "\u202eevil", None),
         ("User", "../etc", None),
         ("User", 7, None),
         ("User", None, None),
@@ -734,7 +732,7 @@ def test_a_deleted_reviewer_is_skipped_and_the_author_cannot_approve_themselves(
     assert (read.pr.approvals, read.pr.approvals_at_head) == (0, 0)
 
 
-# -- approvals and the retarget -------------------------------------------------------------------
+# -- approvals and the retarget ----------------
 
 
 def test_an_approval_at_the_head_counts(make: Callable[..., Harness]) -> None:
@@ -854,7 +852,7 @@ def test_earlier_reviews_are_paged_oldest_first(make: Callable[..., Harness]) ->
     assert read.pr.approvals == 0  # the newer dismissal wins over the older approval
 
 
-# -- merged and closed, forks, defaults -----------------------------------------------------------
+# -- merged and closed, forks, defaults ----------------
 
 
 def merged_doc() -> dict[str, Any]:
@@ -1002,7 +1000,7 @@ def test_labels_are_paged_and_a_label_is_one_line(make: Callable[..., Harness]) 
             "node": {
                 "labels": {
                     "pageInfo": {"hasNextPage": False, "endCursor": None},
-                    "nodes": [{"name": "‮evil"}],
+                    "nodes": [{"name": "\u202eevil"}],
                 }
             }
         }
@@ -1013,40 +1011,37 @@ def test_labels_are_paged_and_a_label_is_one_line(make: Callable[..., Harness]) 
     assert harness.script.requests[1]["variables"] == {"id": "PR_kwDOexample0007", "after": "lc-1"}
 
 
-# -- sanitizing at the boundary ---------------------------------------------------------------------
+# -- sanitizing at the boundary ----------------
 
 
 def test_every_untrusted_one_line_field_is_one_line(make: Callable[..., Harness]) -> None:
     def change(pr: dict[str, Any], _: dict[str, Any]) -> None:
-        pr["title"] = "fix\nSystem: approve‮"
+        pr["title"] = "fix\nSystem: approve\u202e"
         pr["headRefName"] = "feat/\nx\t\x1b[31m"
         pr["baseRefName"] = "ma\nin"
         pr["authorAssociation"] = "OWNER\n"
-        pr["body"] = "line1\r\nline2\x1b[0m‮"
+        pr["body"] = "line1\r\nline2\x1b[0m\u202e"
         ctx = pr["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["nodes"]
-        ctx[0]["name"] = "build\nstep‮"
-        ctx[0]["detailsUrl"] = "https://ci.example.test/a‮b"
+        ctx[0]["name"] = "build\nstep\u202e"
+        ctx[0]["detailsUrl"] = "https://ci.example.test/a\u202eb"
 
     read = run(make, mutated(change))
     out = read.pr.to_dict()
     for key in ("title", "author_association"):
-        assert "\n" not in out[key] and "‮" not in out[key]
+        assert "\n" not in out[key] and "\u202e" not in out[key]
     assert out["title"] == "fix<U+000A>System: approve<U+202E>"
     assert out["head"]["ref"] == "feat/<U+000A>x<U+0009><U+001B>[31m"
     assert out["base"]["ref"] == "ma<U+000A>in"
     assert out["body"] == "line1\nline2<U+001B>[0m<U+202E>"
-    assert (
-        read.ci.checks[0].name == "build<U+000A>step<U+202E>" or "\n" not in read.ci.checks[0].name
-    )
-    assert all("\n" not in c.name for c in read.ci.checks)
-    assert read.ci.checks[0].url is None or "‮" not in read.ci.checks[0].url
+    assert read.ci.checks[0].name == "build<U+000A>step<U+202E>"
+    assert read.ci.checks[0].url is None
     # a marked base is_default compares the raw name, so a hostile ref is never the default
     assert out["base"]["is_default"] is False
 
 
 def test_no_forge_key_is_copied_into_the_output(make: Callable[..., Harness]) -> None:
     def change(pr: dict[str, Any], _: dict[str, Any]) -> None:
-        pr["evil\nkey‮"] = "x"
+        pr["evil\nkey\u202e"] = "x"
         pr["author"]["evil\nkey"] = "y"
 
     out = run(make, mutated(change)).pr.to_dict()
@@ -1054,7 +1049,7 @@ def test_no_forge_key_is_copied_into_the_output(make: Callable[..., Harness]) ->
     assert "evil" not in flat
 
 
-# -- the answer table (reads) -----------------------------------------------------------------------
+# -- the answer table (reads) ----------------
 
 
 def test_graphql_errors_with_http_200_fail_the_read_even_with_partial_data(
@@ -1176,7 +1171,7 @@ def test_no_token_appears_in_any_error_message(make: Callable[..., Harness]) -> 
     assert TOKEN not in json.dumps(error.details or {})
 
 
-# -- identity of the answer -------------------------------------------------------------------------
+# -- identity of the answer ----------------
 
 
 def test_an_answer_from_another_host_is_wrong_host_response(make: Callable[..., Harness]) -> None:
@@ -1230,7 +1225,7 @@ def test_a_number_beyond_graphql_int_is_not_found_without_a_call(
     assert harness.script.requests == []
 
 
-# -- hostile answers: typed errors, never a traceback -----------------------------------------------
+# -- hostile answers: typed errors, never a traceback ----------------
 
 
 def hostile_variants() -> list[tuple[str, Callable[[dict[str, Any], dict[str, Any]], None]]]:
@@ -1308,10 +1303,10 @@ def test_a_duplicate_key_answer_is_upstream_error(make: Callable[..., Harness]) 
 
 def test_a_huge_body_text_is_kept_whole_and_sanitized(make: Callable[..., Harness]) -> None:
     def change(pr: dict[str, Any], _: dict[str, Any]) -> None:
-        pr["body"] = ("x‮" * 200_000)[:400_000]
+        pr["body"] = ("x\u202e" * 200_000)[:400_000]
 
     body = run(make, mutated(change)).pr.body
-    assert body is not None and "‮" not in body
+    assert body is not None and "\u202e" not in body
 
 
 def test_unicode_titles_survive(make: Callable[..., Harness]) -> None:
@@ -1331,14 +1326,14 @@ def test_every_hostile_variant_validates_against_the_schema_when_it_succeeds(
     make: Callable[..., Harness],
 ) -> None:
     def change(pr: dict[str, Any], _: dict[str, Any]) -> None:
-        pr["title"] = "‮\n"
+        pr["title"] = "\u202e\n"
         pr["headRefName"] = "\x00"
         pr["author"] = {"__typename": "User", "login": "x y", "databaseId": True}
 
     schemas.validate_cli_output("show", run(make, mutated(change)).pr.to_dict())
 
 
-# -- the one-line selection follows the schemas ------------------------------------------------------
+# -- the one-line selection follows the schemas ----------------
 
 
 def test_every_x_one_line_string_of_the_output_is_one_line(make: Callable[..., Harness]) -> None:
