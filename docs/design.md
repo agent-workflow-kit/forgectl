@@ -1,6 +1,6 @@
 # forgectl: design
 
-Status: designed, interface 0.2.0-design, 2026-11-09, after review pass 2 and spot checks. [`interface.md`](interface.md) is the single normative source for rules; this document records why, and how forgectl is built. It links to interface headings and does not restate their tables.
+Status: designed, interface 0.2.0-design, 2026-11-09; 0.1.0-design went through review pass 2 and spot checks, and the 0.2.0 amendments have had one review. [`interface.md`](interface.md) is the single normative source for rules; this document records why, and how forgectl is built. It links to interface headings and does not restate their tables.
 
 ## Role and layer
 

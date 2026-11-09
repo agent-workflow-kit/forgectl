@@ -800,7 +800,7 @@ forgectl stores no long-lived objects, so it has no labels of its own. Conventio
 
 ## TUI
 
-`browse [--focus <pr>] [--result-file PATH] [--interval SECONDS]` needs the extra `forgectl[tui]`; without it, exit 2 with the install command.
+`browse [--focus <pr>] [--result-file PATH] [--interval D]` needs the extra `forgectl[tui]`; without it, exit 2 with the install command.
 
 `browse` is read-only: a dashboard of your open PRs and MRs on GitHub and GitLab, a detail pane with facts, CI, reviews, comments and diff, and one action, `o` open in a browser. Posting stays with the tools that own drafts. Merging is a separate follow-up ([Merge from `browse`](#merge-from-browse-follow-up)). Forge text renders with Textual markup disabled. GitLab rows rely on the GitLab path being verified against a self-managed instance (#35).
 
@@ -813,18 +813,18 @@ The default list is the union of requested-from-you and authored-by-you, as two 
 | repo and number, title | the `prs` item |
 | badge | state, draft and the first blocker |
 | CI glyph | `ci.state` |
-| approvals | `approvals` over the required count when known, such as `1/2` |
+| approvals | `approvals`, with the required count when the host reports one, such as `1/2`; the bare count otherwise |
 | comments | `activity`: `comments_total`, `unresolved_threads`, `others_since_push` (new since push) and `awaiting_my_reply` |
-| age | since `head.pushed_at` and since `updated_at` |
+| age | since `head.pushed_at` (blank when it is null) and since `updated_at` |
 
 - **Grouping and order.** Rows group by repo. A "needs attention first" order puts rows with failing CI, new comments from others since the push, a thread awaiting my reply or changes requested first, then the rest; a key switches between it and the default order. Authors in `activity.ignore_authors` never move a row.
 - **Filters.** Authored by me or review-requested from me; CI failing; has new comments. Filters combine as an intersection, and the status bar names the active ones. `/` filters by text.
-- **Loading.** One `prs` call per query builds the rows, then `snapshot` runs per PR with bounded concurrency (configurable, a small default), visible rows first. Rows render as each snapshot arrives, with a per-row loading state and a progress count in the status bar. A failed snapshot marks its row with the error and does not block the others.
+- **Loading.** One `prs` call per query builds the rows, then `snapshot` runs per PR with bounded concurrency (configurable, a small default), visible rows first. Rows render as each snapshot arrives, with a per-row loading state and a progress count in the status bar. The names and defaults of the tunables here and in Refresh (concurrency, the full pass every Nth cycle, the rate-limit threshold) are fixed with their schema entries when the implementation lands. A failed snapshot marks its row with the error and does not block the others.
 
 ### Refresh
 
 - **Manual.** `r` refreshes the selected PR (its `snapshot`); `R` refreshes all (`prs`, then snapshots). A refresh in flight is never started twice: `R` during a cycle is ignored, with a status note.
-- **Automatic.** Every `browse.refresh_interval` seconds, default 120, `0` disables it; `--interval` wins over the config. Each cycle re-runs `prs`, re-snapshots only PRs whose `updated_at` or head sha changed and PRs with pending CI, and re-snapshots all every Nth cycle (configurable, default 5), because `updated_at` is not a reliable change signal and can miss CI and approval changes.
+- **Automatic.** Every `browse.refresh_interval` seconds, default 120, `0` disables it; `--interval` takes a duration like the config value, or `0`, wins over the config, and an invalid value exits 2. Each cycle re-runs `prs`, re-snapshots only PRs whose `updated_at` or head sha changed and PRs with pending CI, and re-snapshots all every Nth cycle (configurable, default 5), because `updated_at` is not a reliable change signal and can miss CI and approval changes.
 - **Place and change.** Selection and scroll position survive any refresh. Rows whose data changed are highlighted until the next cycle or a keypress. A failed refresh keeps the row's last good data and marks it stale.
 - **Status bar.** Last refresh time, `rate_limit.remaining` per host, the active filters, loading progress, and partial errors (`complete` false, `errors`).
 - **Cost control.** When `rate_limit.remaining` for a host drops below a threshold, the interval for that host lengthens and the status bar says so; the normal interval resumes after `rate_limit.reset_at`. Polling stays within [Reliability](#reliability); an ETag pass-through may later lower its cost.
