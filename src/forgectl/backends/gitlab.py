@@ -1129,7 +1129,4 @@ class GitLabBackend:
         raise _not_yet("whoami", 19)  # TODO(#19): GitLab whoami
 
 
-#: The one-line registration seam for the backend factory table.
-BACKEND = GitLabBackend
-
-__all__ = ["BACKEND", "MAX_PAGES", "READINESS_UNKNOWN", "GitLabBackend", "UntilKnown"]
+__all__ = ["MAX_PAGES", "READINESS_UNKNOWN", "GitLabBackend", "UntilKnown"]
