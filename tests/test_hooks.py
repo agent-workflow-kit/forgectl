@@ -811,8 +811,9 @@ def real_spawner(argv: list[str]) -> Any:
 def test_the_watchdog_imports_forgectl_from_the_running_package_not_from_site(
     tmp_path: Path,
 ) -> None:
-    """R1-1: the watchdog argv keeps ``-I`` and puts the directory holding the running package
-    first on ``sys.path``, so a PYTHONPATH-only or user-site install still finds it."""
+    """R1-1: the watchdog argv keeps ``-I`` and adds the directory holding the running package
+    to ``sys.path``, so a PYTHONPATH-only or user-site install still finds it (modelled by an
+    interpreter that has no forgectl in its own site-packages; R2-4: appended, not first)."""
     import forgectl
     from forgectl import gateway as gw
 
@@ -827,9 +828,9 @@ def test_the_watchdog_imports_forgectl_from_the_running_package_not_from_site(
         f"def main():\n    open({str(marker)!r}, 'w').write(__file__)\n    return 0\n"
     )
     spawned = Spawned()
-    gw.spawn_detached(
-        hooks.watchdog_argv(str(alt)), env=dict(os.environ), cwd="/", stdin=b"", on_start=spawned
-    )
+    alt_argv = hooks.watchdog_argv(str(alt))
+    alt_argv[0] = base_interpreter()
+    gw.spawn_detached(alt_argv, env=dict(os.environ), cwd="/", stdin=b"", on_start=spawned)
     assert wait_for(marker)
     finish_detached()
     assert marker.read_text() == str(alt / "forgectl" / "hookwatch.py")
@@ -903,7 +904,7 @@ def test_a_spec_refused_after_the_directory_check_removes_the_directory_and_logs
         "payload": "{}", "timeout": 0, "state_dir": str(state), "hook": "post-merge", "index": 1,
     }  # fmt: skip
     acked: list[int] = []
-    assert hookwatch.start(spec, lambda: acked.append(1)) == 2
+    assert hookwatch.start(spec, lambda: acked.append(1) or True) == 2
     assert acked == [] and not os.path.exists(dirs.root)
     (record,) = [json.loads(line) for line in (state / "log.jsonl").read_text().splitlines()]
     assert record["event"] == "hook_failed" and record["details"]["index"] == 1
@@ -1074,3 +1075,158 @@ def test_non_string_keys_and_bad_caller_ids_are_programming_errors() -> None:
         hooks.build_payload("post-merge", post_merge_fields(), ["bad id"])
     with pytest.raises(ValueError, match="decision"):
         hooks.build_payload("post-merge", post_merge_fields(), [5])  # type: ignore[list-item]
+
+
+# -- Round 2 fixes ---------------------------------------------------------------------------------
+
+
+def base_interpreter() -> str:
+    """A Python with none of this project's dependencies: the one the venv was made from."""
+    candidates = [
+        getattr(sys, "_base_executable", None),
+        os.path.join(sys.base_prefix, "bin", f"python{sys.version_info[0]}.{sys.version_info[1]}"),
+        os.path.join(sys.base_prefix, "bin", "python3"),
+    ]
+    for candidate in candidates:
+        if (
+            candidate
+            and os.path.isfile(candidate)
+            and os.access(candidate, os.X_OK)
+            and not os.path.abspath(candidate).startswith(os.path.abspath(sys.prefix) + os.sep)
+        ):
+            return candidate
+    pytest.skip("no base interpreter outside the virtual environment")
+
+
+def run_boot(argv: list[str], stdin: bytes = b"") -> tuple[int, bytes]:
+    """Run a watchdog boot argv to completion in its own session, by exact pid."""
+    import subprocess
+
+    proc = subprocess.Popen(
+        argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        env=dict(os.environ), cwd="/", start_new_session=True,
+    )  # fmt: skip
+    spawned = Spawned()
+    spawned(proc.pid, proc.pid)
+    try:
+        _, err = proc.communicate(stdin, timeout=60)
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)  # our unreaped child: the id is ours
+            proc.wait()
+    spawned.reap_and_assert_gone()
+    return proc.returncode, err
+
+
+def test_the_watchdog_imports_with_only_the_standard_library(tmp_path: Path) -> None:
+    """R2-1: the boot against the real package directory, under an interpreter with none of the
+    dependencies (a PYTHONPATH-only install), imports ``forgectl.hookwatch``; the import chain
+    loads no third-party module, and it is quick."""
+    import forgectl
+
+    base = base_interpreter()
+    package_dir = str(Path(forgectl.__file__).resolve().parent.parent)
+    argv = hooks.watchdog_argv(package_dir)
+    argv[0] = base
+    code, err = run_boot(argv)  # an empty spec: the watchdog refuses it with 2
+    assert code == 2, err.decode(errors="replace")
+    probe = (
+        "import sys, time; sys.path.append(sys.argv[1]); t = time.monotonic(); "
+        "import forgectl.hookwatch; t = time.monotonic() - t; "
+        "bad = sorted(m for m in ('yaml', 'pydantic', 'pydantic_core') if m in sys.modules); "
+        "print(bad, t)"
+    )
+    out = tmp_path / "out"
+    code, err = run_boot([base, "-I", "-c", f"{probe}; open({str(out)!r}, 'w').write(str(bad))",
+                          package_dir])  # fmt: skip
+    assert code == 0, err.decode(errors="replace")
+    assert out.read_text() == "[]"
+
+
+def test_the_watchdog_package_dir_cannot_shadow_the_standard_library(tmp_path: Path) -> None:
+    """R2-4: the package directory is appended to ``sys.path``, so a stdlib-named module in it is
+    not loaded in place of the standard one; the package itself still is."""
+    alt = tmp_path / "alt"
+    (alt / "forgectl").mkdir(parents=True)
+    marker = tmp_path / "marker"
+    (alt / "json.py").write_text("raise SystemExit(99)\n")
+    (alt / "forgectl" / "__init__.py").write_text("")
+    (alt / "forgectl" / "hookwatch.py").write_text(
+        "import json\n"
+        f"def main():\n    open({str(marker)!r}, 'w').write(json.__file__ + ' ' + __file__)\n"
+        "    return 0\n"
+    )
+    argv = hooks.watchdog_argv(str(alt))
+    assert "sys.path.append(sys.argv[1])" in argv[3]
+    argv[0] = base_interpreter()
+    code, err = run_boot(argv)
+    assert code == 0, err.decode(errors="replace")
+    json_file, hookwatch_file = marker.read_text().split(" ")
+    assert json_file != str(alt / "json.py")
+    assert hookwatch_file == str(alt / "forgectl" / "hookwatch.py")
+
+
+def test_a_failed_acknowledgement_runs_no_hook_and_removes_the_directory(tmp_path: Path) -> None:
+    """R2-3: ``start`` with an acknowledgement that failed removes the directory, logs and
+    returns 2 without running the hook."""
+    from forgectl import gateway as gw
+    from forgectl import hookwatch
+
+    state, ran = tmp_path / "state", tmp_path / "ran"
+    state.mkdir(mode=0o700)
+    dirs = gw.make_private_dirs(os.environ, config=False)
+    spec = {
+        "argv": ["/bin/sh", "-c", f"touch {ran}"], "env": {}, "root": dirs.root,
+        "cwd": dirs.cwd, "payload": "{}", "timeout": 5, "state_dir": str(state),
+        "hook": "post-merge", "index": 0,
+    }  # fmt: skip
+    assert hookwatch.start(spec, lambda: False) == 2
+    assert not ran.exists() and not os.path.exists(dirs.root)
+    (record,) = [json.loads(line) for line in (state / "log.jsonl").read_text().splitlines()]
+    assert record["event"] == "hook_failed" and "acknowledge" in record["details"]["why"]
+
+
+def test_the_watchdog_runs_no_hook_when_its_ack_pipe_is_closed(tmp_path: Path) -> None:
+    """R2-3: the real watchdog, its stdout a pipe nobody reads: the ack write fails, so the hook
+    is not run and the directory is removed."""
+    import subprocess
+
+    from forgectl import gateway as gw
+
+    ran = tmp_path / "ran"
+    dirs = gw.make_private_dirs(os.environ, config=False)
+    spec = {
+        "argv": ["/bin/sh", "-c", f"touch {ran}"], "env": {}, "root": dirs.root,
+        "cwd": dirs.cwd, "payload": "{}", "timeout": 5,
+    }  # fmt: skip
+    read_end, write_end = os.pipe()
+    try:
+        proc = subprocess.Popen(
+            hooks.watchdog_argv(), stdin=subprocess.PIPE, stdout=write_end,
+            stderr=subprocess.DEVNULL, env=dict(os.environ), cwd="/", start_new_session=True,
+        )  # fmt: skip
+    finally:
+        os.close(read_end)
+        os.close(write_end)
+    spawned = Spawned()
+    spawned(proc.pid, proc.pid)
+    try:
+        proc.communicate(json.dumps(spec).encode(), timeout=60)
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)  # our unreaped child: the id is ours
+            proc.wait()
+    spawned.reap_and_assert_gone()
+    assert proc.returncode == 2
+    assert not ran.exists() and not os.path.exists(dirs.root)
+
+
+def test_a_sync_post_hook_leaving_a_mode_000_directory_never_raises(
+    fake_forges: FakeForges, spawned: Spawned
+) -> None:
+    """R2-2: a hook that leaves ``d`` mode 000 in its cwd: the cleanup removes it and the post
+    hook result is returned (a warning at most, never an exception)."""
+    result = run_post(fake_forges, spawned, [entry("mkdir d; chmod 0 d")])
+    assert [r.outcome for r in result.reports] == ["allow"]
+    assert tmp_leftovers() == []
+    spawned.reap_and_assert_gone()

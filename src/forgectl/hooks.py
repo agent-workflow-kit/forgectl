@@ -48,10 +48,12 @@ VETO_EXIT = 11
 DECISION_ID = re.compile(r"[A-Za-z0-9._:@/-]{1,128}")
 ACK_TIMEOUT = 2.0  # seconds the watchdog has to acknowledge its spec
 # Run under -I (no cwd, PYTHONPATH or user site on sys.path), with the directory that holds the
-# running forgectl package put first, so the watchdog imports the same forgectl however it was
-# installed. The directory is an argv item, never an environment variable.
+# running forgectl package appended to sys.path, so a PYTHONPATH-only or user-site install is
+# found, and nothing in that directory can shadow the standard library. An interpreter that has
+# forgectl in its own site-packages imports that one. The import chain of ``forgectl.hookwatch``
+# is standard library only. The directory is an argv item, never an environment variable.
 WATCHDOG_BOOT = (
-    "import sys; sys.path.insert(0, sys.argv[1]); "
+    "import sys; sys.path.append(sys.argv[1]); "
     "from forgectl import hookwatch; sys.exit(hookwatch.main())"
 )
 

@@ -4,17 +4,17 @@ forgectl starts the watchdog detached (its own session) as ``python -I -c <boot>
 ``<dir>`` holds the running forgectl package (``hooks.watchdog_argv``), and hands it one JSON spec
 on stdin: the hook's argv, environment, private directory, timeout and payload. Once the spec is
 valid and its directory is forgectl's, the watchdog acknowledges it with one byte on stdout (which
-forgectl waits for, then reads no more) and points stdout at /dev/null. It runs the hook as the
-leader of its own process group, enforces the timeout (SIGTERM to the group, SIGKILL 2 s later,
-only while the leader is unreaped: ``gateway.run_process``), then removes the hook's private
-directory. A hook failure, and a spec refused after the directory check, is logged as
-``hook_failed`` when the spec names a state directory. SIGTERM, SIGINT and SIGHUP end the hook's
+forgectl waits for, then reads no more) and points stdout at /dev/null; if that byte cannot be
+written (forgectl gave up), no hook runs: the directory is removed and the failure logged. It runs
+the hook as the leader of its own process group, enforces the timeout (SIGTERM to the group,
+SIGKILL 2 s later, only while the leader is unreaped: ``gateway.run_process``), then removes the
+hook's private directory. A hook failure, and a spec refused after the directory check, is logged
+as ``hook_failed`` when the spec names a state directory. SIGTERM, SIGINT and SIGHUP end the hook's
 group and the directory is still removed. Nothing else is written to stdout or stderr.
 """
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import signal
@@ -25,7 +25,7 @@ from typing import Any
 
 from . import gateway as gw
 from . import jsonlog
-from .config import MAX_DURATION
+from .limits import MAX_DURATION
 
 MAX_SPEC = 4 * 1024 * 1024
 MAX_WATCH_STDERR = 1024
@@ -129,9 +129,11 @@ def run(spec: dict[str, Any]) -> int:
     return 0
 
 
-def start(spec: Any, ack: Callable[[], None]) -> int:
+def start(spec: Any, ack: Callable[[], bool]) -> int:
     """Check ``spec``, acknowledge it and run it. Once its directory is known to be forgectl's,
-    a refused spec still has the directory removed and is logged; nothing is acknowledged."""
+    a refused spec still has the directory removed and is logged; nothing is acknowledged. An
+    acknowledgement that could not be written (``ack`` returns False: forgectl gave up waiting)
+    runs no hook: the directory is removed, the failure logged and 2 returned."""
     if not isinstance(spec, dict):
         return 2
     root, cwd = spec.get("root"), spec.get("cwd")
@@ -140,19 +142,24 @@ def start(spec: Any, ack: Callable[[], None]) -> int:
     if not valid_spec(spec):
         _finish(spec, "the watchdog refused its spec")
         return 2
-    ack()
+    if not ack():
+        _finish(spec, "the watchdog could not acknowledge its spec")
+        return 2
     return run(spec)
 
 
-def _acknowledge() -> None:
-    """One byte on stdout for forgectl, then stdout is /dev/null."""
-    with contextlib.suppress(OSError):
-        os.write(1, b"1")
+def _acknowledge() -> bool:
+    """One byte on stdout for forgectl, then stdout is /dev/null; whether the byte was written."""
+    try:
+        written = os.write(1, b"1") == 1
+    except OSError:
+        written = False
     null = os.open(os.devnull, os.O_WRONLY)
     try:
         os.dup2(null, 1)
     finally:
         os.close(null)
+    return written
 
 
 def main() -> int:

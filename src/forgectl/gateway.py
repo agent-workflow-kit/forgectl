@@ -30,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import email.utils
+import errno
 import json
 import math
 import os
@@ -48,11 +49,13 @@ import time
 import urllib.parse
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from .config import LoadedConfig
 from .errors import ForgectlError
 from .sanitize import sanitize_line
+
+if TYPE_CHECKING:  # the watchdog imports this module with the standard library only
+    from .config import LoadedConfig
 
 KILL_GRACE = 2.0  # seconds between SIGTERM and SIGKILL to a child's group
 MAX_SELECT_WAIT = 86400.0  # one select wait; the loop recomputes the deadline after it
@@ -367,30 +370,77 @@ def make_private_dirs(source: Mapping[str, str], *, config: bool) -> PrivateDirs
     return PrivateDirs(root=root, cwd=cwd, config=config_dir)
 
 
-def _chmod_dir(path: str) -> None:
-    """Make ``path`` 0700 if it is a real directory (``lstat``: a symlink is never followed)."""
-    if stat.S_ISDIR(os.lstat(path).st_mode):
-        os.chmod(path, 0o700)
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_O_PATH = getattr(os, "O_PATH", 0)  # Linux: a handle that needs no permission on the dir itself
+
+
+def _open_dir(name: str, dir_fd: int | None) -> tuple[int, bool]:
+    """Open the real directory ``name`` (relative to ``dir_fd``) without following a symlink;
+    returns the fd and whether it is an ``O_PATH`` handle (an unreadable dir, on Linux)."""
+    try:
+        return os.open(name, _DIR_FLAGS, dir_fd=dir_fd), False
+    except PermissionError:
+        if not _O_PATH:
+            raise
+    flags = _O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    return os.open(name, flags, dir_fd=dir_fd), True
+
+
+def _chmod_dir(top: str, path: str) -> None:
+    """Make ``path`` (``top`` or a path inside it) 0700 if it is a real directory, never by path:
+    from an fd for ``top``, each component is opened relative to its parent with ``O_NOFOLLOW |
+    O_DIRECTORY`` and the final fd is changed. A component that is a symlink or not a directory
+    is skipped, so a symlink's target and anything outside ``top`` are never changed."""
+    rel = os.path.relpath(path, top)
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
+        return
+    parts = [] if rel == os.curdir else rel.split(os.sep)
+    fds: list[int] = []
+    try:
+        fd, handle = _open_dir(top, None)
+        fds.append(fd)
+        for name in parts:
+            fd, handle = _open_dir(name, fds[-1])
+            fds.append(fd)
+        if not handle:
+            os.fchmod(fd, 0o700)
+        elif os.path.isdir(f"/proc/self/fd/{fd}"):
+            os.chmod(f"/proc/self/fd/{fd}", 0o700)  # the magic link is the opened dir itself
+    except OSError as exc:
+        if exc.errno not in (errno.ELOOP, errno.ENOTDIR):
+            raise
+    finally:
+        for opened in fds:
+            os.close(opened)
 
 
 def remove_tree(path: str) -> None:
-    """Remove ``path`` (a directory this module made), without following symlinks.
+    """Remove ``path`` (a directory this module made), without following symlinks. Never raises.
 
     An entry that cannot be removed is retried after making its directory (and, for a
-    directory, itself) 0700. Only real directories inside ``path`` are changed: never a
+    directory, itself) 0700; a directory that could not be opened or listed is then removed
+    with the same handling. Only real directories inside ``path`` are changed: never a
     symlink's target and never the parent of ``path``."""
     top = os.path.normpath(path)
+    descended: set[str] = set()
 
     def retry(function: Callable[..., Any], target: str, _exc: BaseException) -> None:
-        with contextlib.suppress(OSError):
+        with contextlib.suppress(Exception):
             target = os.path.normpath(target)
-            parent = os.path.dirname(target)
-            if target != top and (parent == top or parent.startswith(top + os.sep)):
-                _chmod_dir(parent)
-            _chmod_dir(target)
-            function(target)
+            if target != top and not target.startswith(top + os.sep):
+                return
+            if target != top:
+                _chmod_dir(top, os.path.dirname(target))
+            _chmod_dir(top, target)
+            if function in (os.open, os.scandir):
+                if target not in descended and os.path.isdir(target) and not os.path.islink(target):
+                    descended.add(target)
+                    shutil.rmtree(target, onexc=retry)
+            elif function in (os.rmdir, os.unlink):
+                function(target)
 
-    shutil.rmtree(path, onexc=retry)
+    with contextlib.suppress(Exception):
+        shutil.rmtree(path, onexc=retry)
 
 
 @contextlib.contextmanager
@@ -947,13 +997,21 @@ def spawn_detached(
     except BaseException:
         held = old_mask if masked else _block_signals()
         try:
-            _signal_group(proc.pid, signal.SIGKILL)
+            _signal_group(proc.pid, signal.SIGKILL)  # before the ack pipe closes: see _await_ack
             with contextlib.suppress(subprocess.TimeoutExpired, OSError):
                 proc.wait(timeout=REAP_WAIT)
         finally:
+            _close_ack_pipe(proc)
             _restore_signals(held)
         raise
+    _close_ack_pipe(proc)
     return Detached(proc.pid, proc.pid)
+
+
+def _close_ack_pipe(proc: subprocess.Popen[bytes]) -> None:
+    if proc.stdout is not None:
+        with contextlib.suppress(OSError):
+            proc.stdout.close()
 
 
 def _popen_detached(
@@ -999,14 +1057,13 @@ def _hand_over(proc: subprocess.Popen[bytes], data: bytes) -> None:
 
 
 def _await_ack(proc: subprocess.Popen[bytes], seconds: float) -> None:
+    """Wait for the acknowledgement byte. The read end stays open: on failure the caller kills
+    the group first, so a late acknowledgement can only succeed while the child is still ours
+    to kill; a child whose write fails (the pipe was closed) runs nothing."""
     assert proc.stdout is not None
     fd = proc.stdout.fileno()
-    try:
-        ready, _, _ = select.select([fd], [], [], seconds)
-        got = os.read(fd, 1) if ready else b""
-    finally:
-        with contextlib.suppress(OSError):
-            proc.stdout.close()
+    ready, _, _ = select.select([fd], [], [], seconds)
+    got = os.read(fd, 1) if ready else b""
     if not got:
         raise NoAcknowledgement("the detached child did not acknowledge its start")
 

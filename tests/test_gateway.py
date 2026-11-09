@@ -2456,3 +2456,87 @@ def test_spawn_detached_waits_for_an_acknowledgement_when_asked() -> None:
         wait_zombie(pid) if Path(f"/proc/{pid}").exists() else None
     assert gw.detached_children() == []
     assert all(not Path(f"/proc/{pid}").exists() for pid in started)
+
+
+# -- Round 2 fixes ---------------------------------------------------------------------------------
+
+
+def test_remove_tree_removes_a_mode_000_directory_nested_in_a_read_only_one(
+    tmp_path: Path,
+) -> None:
+    """R2-2: ``top/cwd/x`` mode 500 holding ``x/y`` mode 000 (rmtree reports ``os.open``) is
+    removed completely, and nothing is raised."""
+    top = tmp_path / "forgectl-top"
+    x = top / "cwd" / "x"
+    (x / "y").mkdir(parents=True)
+    (x / "y").chmod(0o000)
+    x.chmod(0o500)
+    gw.remove_tree(str(top))
+    assert not top.exists()
+
+
+def test_remove_tree_never_raises_for_an_entry_it_cannot_fix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-2: a retry that fails in any way (here ``_chmod_dir`` raising) is suppressed."""
+
+    def boom(*_args: Any) -> None:
+        raise TypeError("boom")
+
+    top = tmp_path / "forgectl-top"
+    (top / "d" / "e").mkdir(parents=True)
+    (top / "d").chmod(0o500)
+    monkeypatch.setattr(gw, "_chmod_dir", boom)
+    gw.remove_tree(str(top))  # cannot remove d/e, and does not raise
+    monkeypatch.undo()
+    gw.remove_tree(str(top))
+    assert not top.exists()
+
+
+def test_chmod_dir_never_follows_a_symlink_or_changes_a_file(tmp_path: Path) -> None:
+    """R2-5: ``_chmod_dir`` opens each component under ``top`` without following symlinks; a
+    symlinked component or a non-directory is skipped, and a mode 000 directory is fixed."""
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    victim.chmod(0o755)
+    top = tmp_path / "forgectl-top"
+    (top / "d").mkdir(parents=True)
+    (top / "link").symlink_to(victim)
+    (top / "f").write_text("x")
+    (top / "f").chmod(0o644)
+    gw._chmod_dir(str(top), str(top / "link"))
+    gw._chmod_dir(str(top), str(top / "link" / "sub"))
+    gw._chmod_dir(str(top), str(top / "f"))
+    assert (victim.stat().st_mode & 0o777) == 0o755
+    assert ((top / "f").stat().st_mode & 0o777) == 0o644
+    (top / "d").chmod(0o000)
+    gw._chmod_dir(str(top), str(top / "d"))
+    assert ((top / "d").stat().st_mode & 0o777) == 0o700
+    gw.remove_tree(str(top))
+
+
+def test_spawn_detached_kills_the_group_before_closing_the_ack_pipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2-3: with no acknowledgement, the group is killed while the read end is still open, so
+    the child can never see its acknowledgement succeed after forgectl gave up."""
+    seen: list[bool] = []
+    real = gw._signal_group
+
+    def record(pgid: int, signum: int) -> Any:
+        (proc,) = [p for p in gw._DETACHED if p.pid == pgid]
+        assert proc.stdout is not None
+        seen.append(proc.stdout.closed)
+        return real(pgid, signum)
+
+    monkeypatch.setattr(gw, "_signal_group", record)
+    started: list[int] = []
+    with pytest.raises(gw.NoAcknowledgement):
+        gw.spawn_detached(
+            [sys.executable, "-I", "-c", "import time; time.sleep(30)"], env=plain_env(),
+            cwd="/", stdin=b"", on_start=lambda p, _g: started.append(p), ack_timeout=0.3,
+        )  # fmt: skip
+    assert seen == [False]
+    (proc,) = [p for p in gw._DETACHED if p.pid == started[0]] or [None]
+    assert proc is None or (proc.stdout is not None and proc.stdout.closed)
+    assert gw.detached_children() == []
