@@ -276,7 +276,7 @@ class GitLabBackend:
             if header is not None:
                 if header == "":
                     return items, True
-                if not header.isascii() or not header.isdigit() or int(header) <= page:
+                if not header.isascii() or not header.isdigit() or int(header) != page + 1:
                     raise _bad("pagination header")
                 page = int(header)
             elif len(batch) < int(PER_PAGE):

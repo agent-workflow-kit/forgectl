@@ -169,6 +169,7 @@ Each has a conservative default in place.
 | A posted body with a trailing newline and a neutralized first line, compared with its stored form | the comparison in [Post order](interface.md#post-order) step 11 |
 | A self-managed instance whose `external_url` differs from the API host | `wrong_host_response` |
 | GitLab `position` for a `line_range`; GitHub comment-level `startLine` on a single line | as tabled in [Threads and comments](interface.md#threads-and-comments) |
+| GitLab `show` reads built from the documented API only: `reset_approvals_on_push` from `GET /projects/:id/approvals`, `approved_at` on `approved_by`, `GET .../reviewers`, the `x-next-page` header, `bot` on `/users/:id`, `statuses?pipeline_id=`, a finished pipeline whose child pipelines are unfinished, a head project that is hidden (403) rather than deleted | an unreadable or absent value reads null or unknown (`approvals_at_head: null`, `is_bot: null`, a hidden head project `repo: null`); an unfinished head pipeline adds a pending `(pipeline)` check; a page cap of 20 reads as incomplete |
 | macOS, including whether `gh` and `glab` reach the Keychain under a custom config dir | local check before 1.0; treated as reached, a residual risk |
 
 ### Upstream report

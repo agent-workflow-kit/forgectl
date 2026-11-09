@@ -1341,3 +1341,36 @@ def test_anchored_patterns_refuse_a_trailing_newline_and_non_ascii_digits(
 
     with pytest.raises(ForgectlError):
         show(fake, tmp_path, hostile)
+
+
+@pytest.mark.parametrize("header", ["abc", "1", "0", "-2", "2.5", "٢", "99999999999999999999 "])
+def test_a_hostile_next_page_header_is_a_typed_error_never_a_loop(
+    fake: FakeGitLab, tmp_path: Path, header: str
+) -> None:
+    from .gitlab_support import Answer
+
+    standard(fake)
+    fake.on_handler(
+        STATUSES, lambda _q: Answer(200, recording("statuses")[:1], {"x-next-page": header})
+    )
+    with pytest.raises(ForgectlError) as raised:
+        make_backend(fake, tmp_path).get_pr(ref())
+    assert raised.value.code == "upstream_error"
+    assert fake.count(STATUSES) == 1
+
+
+def test_a_missing_next_page_header_ends_a_short_page_and_continues_a_full_one(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    from .gitlab_support import Answer
+
+    statuses = recording("statuses")
+    full = [dict(statuses[0], id=9000 + i, name=f"job-{i}") for i in range(100)]
+
+    def handler(query: dict[str, str]) -> Answer:
+        return Answer(200, full if query["page"] == "1" else statuses[:1])
+
+    standard(fake)
+    fake.on_handler(STATUSES, handler)
+    read = make_backend(fake, tmp_path).get_pr(ref())
+    assert fake.count(STATUSES) == 2 and len(read.ci.checks) == 101
