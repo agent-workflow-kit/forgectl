@@ -43,10 +43,8 @@ class HumanContext:
 
 
 def default_me_name() -> str:
-    """The `<user>` of `human:<user>`: the OS username, `unknown` when it fails the pattern.
-
-    TODO(#4): `me.name` from the loaded config takes precedence.
-    """
+    """The `<user>` of `human:<user>` when `me.name` is not configured: the OS username,
+    `unknown` when it fails the pattern. The caller prefers the config's `me.name`."""
     try:  # the account database, never LOGNAME or USER: the environment is the caller's to set
         name = pwd.getpwuid(os.getuid()).pw_name
     except (KeyError, OSError):
