@@ -206,8 +206,9 @@ class _Reader:
 
     def check_head(self, head: str) -> None:
         """The head is still the one the parts were read for."""
-        again = self.read_mr()
-        if again.get("id") != self.mr_id or self.head != head:
+        before = (self.project_id, self.mr_id, self.canonical)
+        self.read_mr()
+        if (self.project_id, self.mr_id, self.canonical) != before or self.head != head:
             raise _Moved
 
     def pages(

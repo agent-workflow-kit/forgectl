@@ -943,3 +943,16 @@ def test_the_backend_methods_delegate(fake: FakeGitLab, tmp_path: Path) -> None:
     assert rig.backend.snapshot(ref()).pr.number == 7
     assert rig.backend.comments(ref()).head_sha == HEAD
     assert rig.backend.reviews(ref()).reviews == ()
+
+
+def test_an_mr_that_became_another_object_during_the_reading_is_moved(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    rig = Rig(fake, tmp_path)
+    first = recording("mr")
+    other = copy.deepcopy(first)
+    other["id"] = 90002
+    mr_sequence(fake, [first, other, first, other])
+    with pytest.raises(ForgectlError) as raised:
+        rig.comments()
+    assert raised.value.code == "upstream_error" and "changed while" in raised.value.message
