@@ -26,6 +26,7 @@ from ..errors import ForgectlError
 from ..gateway import Gateway, Response, Target, path_int, shown_text, verify_identity
 from ..hosts import Hosts, redact_secrets
 from ..identifiers import PrRef, RepoRef, bind_login
+from ..reads import SHOW_READINESS, ReadEnv
 from ..sanitize import sanitize_line, sanitize_text
 
 T = TypeVar("T")
@@ -277,6 +278,17 @@ class GitLabBackend:
         self._bots: dict[tuple[str, int], bool | None] = {}
         self._push: dict[tuple[str, int, int], bool | None] = {}
 
+    @classmethod
+    def from_env(cls, env: ReadEnv) -> GitLabBackend:
+        """The adapter of one command: reads retry through ``env.call``, and the readiness loop
+        (``env.until_known``) wraps the single-MR GET only, so ``get_pr`` is called once."""
+        return cls(
+            env.hosts,
+            warn=env.warn,
+            retry=env.call,
+            until_known=lambda fetch, unknown: env.until_known(fetch, unknown, SHOW_READINESS),
+        )
+
     # -- plumbing ------------------------------------------------------------------------------
 
     def _warn(self, message: str) -> None:
@@ -501,7 +513,7 @@ class GitLabBackend:
             approvals=approvals,
             approvals_at_head=at_head,
         )
-        return m.PrRead(pr=pr, ci=ci)
+        return m.PrRead(pr=pr, ci=ci, latest_by_reviewer=entries)
 
     # -- identity ------------------------------------------------------------------------------
 
@@ -1118,11 +1130,6 @@ class GitLabBackend:
 
 
 #: The one-line registration seam for the backend factory table.
-# TODO(#11): reads.py's factory table gets
-# `"gitlab": lambda env: GitLabBackend(env.hosts, warn=env.warn, retry=env.call,
-# until_known=lambda f, u: env.until_known(f, u, reads.SHOW_READINESS))`, so the readiness loop
-# wraps the single-MR GET only. The first branch merging both #11 and #15 wires it; the add/add
-# conflict on `backends/__init__.py` keeps #11's version.
 BACKEND = GitLabBackend
 
 __all__ = ["BACKEND", "MAX_PAGES", "READINESS_UNKNOWN", "GitLabBackend", "UntilKnown"]

@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from .. import model as m
+from ..errors import ForgectlError
 from ..identifiers import PrRef, RepoRef
 
 #: Every read an adapter provides; the protocol test keeps this equal to `Backend`.
@@ -32,6 +33,12 @@ READ_METHODS: tuple[str, ...] = (
     "access",
     "whoami",
 )
+
+
+def not_implemented(command: str) -> ForgectlError:
+    """What an adapter raises for a read its own issue has not added yet (an `internal` error,
+    never a traceback). Each such method carries a `TODO(#N)` naming the issue that fills it."""
+    return ForgectlError("internal", f"{command}: not implemented yet")
 
 
 @runtime_checkable

@@ -155,7 +155,7 @@
         "remaining",
         "reset_at"
       ],
-      "description": "From the response headers; each is null where absent. The lowest remaining among the APIs and hosts this command called."
+      "description": "From response headers or the GraphQL `rateLimit` field; each is null where absent. The lowest remaining among the APIs and hosts this command called."
     },
     "exit_code": {
       "enum": [
@@ -1096,6 +1096,25 @@
                 "null"
               ],
               "description": "null when the head project was deleted."
+            },
+            "pushed_at": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/ts"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "snapshot only; absent from the PR object, show and prs. When the current head was last pushed, RFC 3339 UTC; null when it cannot be determined."
+            },
+            "pushed_at_source": {
+              "enum": [
+                "push_event",
+                "commit_date",
+                null
+              ],
+              "description": "snapshot only. push_event: a host push event for the head sha; commit_date: the head commit's date, which can precede the push. null exactly when pushed_at is null."
             }
           },
           "additionalProperties": false,

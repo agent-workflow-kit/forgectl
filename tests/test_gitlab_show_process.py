@@ -28,9 +28,17 @@ def route(forges: FakeForges, path: str, body: Any, **kwargs: Any) -> None:
     )
 
 
-def script(forges: FakeForges, host: str, prefix: str, mr_host: str | None = None) -> None:
+def script(
+    forges: FakeForges,
+    host: str,
+    prefix: str,
+    mr_host: str | None = None,
+    status: str | None = None,
+) -> None:
     web = f"https://{host}{prefix}"
     mr = recording("mr")
+    if status is not None:
+        mr["detailed_merge_status"] = status
     mr["web_url"] = f"https://{mr_host or host}{prefix}/user-9/proj/-/merge_requests/7"
     mr["author"]["web_url"] = f"{web}/user-1"
     project = recording("project")

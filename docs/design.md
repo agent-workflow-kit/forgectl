@@ -173,6 +173,8 @@ Each has a conservative default in place.
 | Merged-results and merge-train pipelines whose `head_pipeline.sha` is the merge ref, not the head | not for the current head (`ci.state: pending`) |
 | GitLab's approval reset on push: asynchronous and keyed on `git patch-id` | an approval GitLab still lists counts |
 | Old merged GitLab MRs with a null `merged_at` | `upstream_error` |
+| GitHub `show` field names and values in the one GraphQL query: `isMergeQueueEnabled`, `isRequired(pullRequestNumber:)` on check runs and status contexts, `timelineItems` item types `BASE_REF_CHANGED_EVENT` and `AUTOMATIC_BASE_CHANGE_SUCCEEDED_EVENT`, `databaseId` on `User`, `Bot`, `Mannequin` and `Organization`, `authorCanPushToRepository`, `object(oid:)`, `mergeStateStatus` and `mergeable` enum values, `reviewDecision` values | any field the host rejects fails the read with a typed error; an unmapped value reads as `other`, `review_required` or `pending`, never as ready |
+| GitHub `show` paging and ordering: `reviews` in chronological order, `reviewThreads` and `contexts` limits, whether `UNKNOWN` mergeability settles within the readiness tries, and `null` against a missing key for the fields above | `reviews` and `labels` are paged by cursor (more than forgectl reads is `upstream_error`); checks are read up to 10 pages, then `complete: false`; threads beyond the first 100 read as unknown; missing values read as null or unknown |
 | macOS, including whether `gh` and `glab` reach the Keychain under a custom config dir | local check before 1.0; treated as reached, a residual risk |
 
 ### Upstream report
