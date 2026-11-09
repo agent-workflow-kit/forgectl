@@ -861,6 +861,112 @@ def _collect(
     )
 
 
+@dataclass(frozen=True)
+class Detached:
+    pid: int
+    pgid: int
+
+
+class Spawner(Protocol):
+    def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        env: Mapping[str, str],
+        cwd: str,
+        stdin: bytes,
+        on_start: Callable[[int, int], None] | None,
+    ) -> Detached: ...
+
+
+SPAWN_WRITE_TIMEOUT = 10.0  # seconds to hand a detached child its stdin
+_DETACHED: list[subprocess.Popen[bytes]] = []  # started here, reaped here (never signaled)
+
+
+def detached_children() -> list[subprocess.Popen[bytes]]:
+    """The detached children not yet reaped; polls each, so a finished one is reaped."""
+    _DETACHED[:] = [p for p in _DETACHED if p.poll() is None]
+    return list(_DETACHED)
+
+
+def spawn_detached(
+    argv: Sequence[str],
+    *,
+    env: Mapping[str, str],
+    cwd: str,
+    stdin: bytes,
+    on_start: Callable[[int, int], None] | None = None,
+) -> Detached:
+    """Start ``argv`` (no shell) as the leader of a new session and hand it ``stdin``; then return
+    without waiting. stdout and stderr go to /dev/null. The child outlives this process, so it
+    must enforce its own deadline. If handing over stdin fails, the child's group is killed
+    (it is our unreaped child, so the id is ours) and the error is raised."""
+    old_mask = _block_signals()
+    try:
+        proc = _popen_detached(argv, env, cwd, old_mask)
+    except BaseException as exc:
+        _restore_signals(old_mask, exc)
+        raise
+    _DETACHED.append(proc)
+    try:
+        if on_start is not None:
+            on_start(proc.pid, proc.pid)
+        _restore_signals(old_mask)
+        _hand_over(proc, stdin)
+    except BaseException:
+        held = _block_signals()
+        try:
+            _signal_group(proc.pid, signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+                proc.wait(timeout=REAP_WAIT)
+        finally:
+            _restore_signals(held)
+        raise
+    return Detached(proc.pid, proc.pid)
+
+
+def _popen_detached(
+    argv: Sequence[str], env: Mapping[str, str], cwd: str, old_mask: Any
+) -> subprocess.Popen[bytes]:
+    def child_signals() -> None:
+        signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+
+    return subprocess.Popen(
+        list(argv),
+        shell=False,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=dict(env),
+        cwd=cwd,
+        close_fds=True,
+        start_new_session=True,
+        preexec_fn=child_signals if old_mask is not None else None,  # noqa: PLW1509
+    )
+
+
+def _hand_over(proc: subprocess.Popen[bytes], data: bytes) -> None:
+    assert proc.stdin is not None
+    fd = proc.stdin.fileno()
+    os.set_blocking(fd, False)
+    view = memoryview(data)
+    deadline = time.monotonic() + SPAWN_WRITE_TIMEOUT
+    try:
+        while view:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError("the detached child did not read its stdin")
+            _, writable, _ = select.select([], [fd], [], left)
+            if writable:
+                try:
+                    view = view[os.write(fd, view[:65536]) :]
+                except BlockingIOError:
+                    continue
+    finally:
+        with contextlib.suppress(OSError):
+            proc.stdin.close()
+
+
 def harden_process() -> bool:
     """``PR_SET_DUMPABLE=0`` on Linux, so a same-user process cannot read this process's memory
     (where a token lives). Returns whether it was applied."""
@@ -1105,8 +1211,10 @@ class Gateway:
         on_spawn: Callable[[int, int], None] | None = None,
         max_stdout: int = MAX_STDOUT,
         max_stderr: int = MAX_STDERR,
+        spawner: Spawner | None = None,
     ) -> None:
         self.config = config
+        self._spawner: Spawner = spawn_detached if spawner is None else spawner
         self.budget = Budget(config.timeout_for(None) if timeout is None else timeout)
         self._environ = environ
         self._runner = runner
@@ -1486,12 +1594,7 @@ class Gateway:
             raise ValueError(f"unknown mode {mode!r}")
         if mode == "token_command" and backend is None:
             raise ValueError("a token_command runs for one backend: pass backend")
-        withheld = self._token_names(token_env_names)
-        for name, value in (extra_env or {}).items():
-            if "\0" in name or "\0" in value:
-                raise ValueError("extra_env holds a NUL")
-            if name in withheld or name in _NEVER_EXTRA:
-                raise ValueError(f"extra_env may not set {name}")
+        inherited = self.inherited_environment(token_env_names, extra_env)
         exe = resolve_executable(argv[0], self.environ.get("PATH"), key="command")
         if exe is None:
             raise ExecutableMissing(argv[0])
@@ -1499,11 +1602,7 @@ class Gateway:
             if mode == "token_command":
                 env = build_environment(self.environ, dirs=dirs, backend=backend)
             else:
-                env = {
-                    k: v
-                    for k, v in self.environ.items()
-                    if k not in withheld and "\0" not in k and "\0" not in v
-                }
+                env = dict(inherited)
             env.update(extra_env or {})
             try:
                 return self._runner(
@@ -1518,6 +1617,39 @@ class Gateway:
                 )
             except (FileNotFoundError, PermissionError, NotADirectoryError):
                 raise ExecutableMissing(argv[0]) from None
+
+    def inherited_environment(
+        self, token_env_names: Collection[str] = (), extra_env: Mapping[str, str] | None = None
+    ) -> dict[str, str]:
+        """forgectl's environment minus every token variable (the hook and browser environment).
+
+        ``extra_env`` is checked here (``ValueError`` for a NUL, a token variable, ``GH_HOST``,
+        ``GH_REPO``, ``GH_FORCE_TTY`` or ``CLICOLOR_FORCE``) and then added on top.
+        """
+        withheld = self._token_names(token_env_names)
+        for name, value in (extra_env or {}).items():
+            if "\0" in name or "\0" in value:
+                raise ValueError("extra_env holds a NUL")
+            if name in withheld or name in _NEVER_EXTRA:
+                raise ValueError(f"extra_env may not set {name}")
+        env = {
+            k: v
+            for k, v in self.environ.items()
+            if k not in withheld and "\0" not in k and "\0" not in v
+        }
+        env.update(extra_env or {})
+        return env
+
+    def spawn_detached(
+        self,
+        argv: Sequence[str],
+        *,
+        env: Mapping[str, str],
+        cwd: str,
+        stdin: bytes,
+    ) -> Detached:
+        """Start ``argv`` in its own session, outliving this process (the async hook watchdog)."""
+        return self._spawner(argv, env=env, cwd=cwd, stdin=stdin, on_start=self._on_spawn)
 
     def _token_names(self, extra: Collection[str]) -> frozenset[str]:
         """Every variable that may hold a token: the ambient list, each configured

@@ -716,15 +716,17 @@ Reads fire none.
 
 **Bodies are never in a payload.** `action` stays `review` for a review, with `event` being `comment`, `request_changes` or `approve`; `event` is null for other actions. For `resolve` and `unresolve`, `body_sha256` is null and `body_bytes` is 0. `body_sha256` is the sha256 of the body as posted; for a `review`, of canonical JSON `{body, comments}` as posted, with `body_bytes` their total. It is null only when nothing is posted. `method` may be null. On a failed attempt `post-post`'s `result` is `failed`, `outcome_unknown`, `outcome_partial` or `quick_action_ran`.
 
-**Environment.** `FORGECTL_HOOK`, `FORGECTL_ID`, `FORGECTL_OBJECT_TYPE`, plus forgectl's environment minus every configured `token_env` variable and the [ambient token list](#credentials).
+**Payload delivery.** The payload is strict JSON (ASCII only, at most 1 MiB, one line) on stdin, never in argv or the environment; every string in it is sanitized as a one-line field, so a control, bidi or invisible character arrives as a `<U+XXXX>` marker. A payload over the limit is exit 1 `internal` for a `pre-` hook and a warning for a `post-` hook. The command is run as `/bin/sh -c <cmd>`.
 
-**Outcomes.** Run in order. Exit 0 continues. Exit 13 escalates and later hooks still run; if none vetoes, the command exits 13 (`escalated`) and nothing is posted or merged. With several escalations, `hook_stderr` is the first's, `escalated_hooks` lists all as `{hook, index}`, and `hook` is the list name. Any other non-zero exit or a timeout vetoes at once (exit 11). `post-` failures are logged and warned, never fatal.
+**Environment.** `FORGECTL_HOOK` (the list name), `FORGECTL_ID` (the `object_id`), `FORGECTL_OBJECT_TYPE` (`pr`), plus forgectl's environment minus every configured `token_env` variable and the [ambient token list](#credentials).
 
-**Stdout.** forgectl reads at most 64 KiB. A JSON object with `decision_id` (string or list), each matching the grammar, is recorded in the audit record; invalid output is warned and ignored, and ids past 32 are dropped with a warning. A later hook sees earlier ids in `decision_ids`. `async` stdout is discarded.
+**Outcomes.** Run in order. Exit 0 continues. Exit 13 escalates and later hooks still run; if none vetoes, the command exits 13 (`escalated`) and nothing is posted or merged. With several escalations, `hook_stderr` is the first's, `escalated_hooks` lists all as `{hook, index}`, and `hook` is the list name. Any other non-zero exit, a death by signal, a timeout, more than 64 KiB on stdout (the hook is killed) or output still held open by a leftover process after the hook exited vetoes at once (exit 11); the leftover processes in the hook's group are killed. `post-` failures are logged and warned, never fatal.
+
+**Stdout.** forgectl reads at most 64 KiB. A JSON object with `decision_id` (string or list), each matching the grammar, is recorded in the audit record; invalid output is warned and ignored, and ids past 32 are dropped with a warning. A later hook sees earlier ids in `decision_ids`. One invalid id invalidates that hook's whole output. Ids are deduplicated in first-seen order before the cap. A `post-` hook's ids are visible to later hooks only. `async` stdout is discarded.
 
 **Time.** Each hook has its own timeout, no total bound applies, and `--timeout` does not cover them. The re-read after hooks is what protects against a slow list.
 
-**Delivery** is inline, with no outbox. A crash between the host call and a `post-` hook loses that hook; the audit record, written first, remains. An `async` hook runs detached under a small watchdog that enforces its timeout. Each `async` hook has its own private directory, which its watchdog removes.
+**Delivery** is inline, with no outbox. A crash between the host call and a `post-` hook loses that hook; the audit record, written first, remains. An `async` hook runs detached under a small watchdog that enforces its timeout. Each `async` hook has its own private directory, which its watchdog removes. The watchdog is a detached `python -m forgectl.hookwatch` in its own session; a failing async hook is logged by it as the `warn` event `hook_failed` with `{hook, index, why}`. A watchdog killed with SIGKILL cannot enforce the timeout or remove the directory.
 
 ## Config
 
