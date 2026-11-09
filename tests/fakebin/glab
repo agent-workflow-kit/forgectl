@@ -1,0 +1,4 @@
+#!/bin/sh
+# Developer launcher: set FORGEFAKE_STATE to a directory outside the repository; the fake
+# refuses to run otherwise. The test fixture generates its own launchers with an absolute interpreter.
+exec python3 "$(dirname "$0")/_forgefake.py" --dev glab "$@"

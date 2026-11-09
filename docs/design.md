@@ -122,7 +122,7 @@ Against `gh` 2.72.0 and `glab` 1.127.0, github.com and gitlab.com (19.6-pre, fre
 | `gh api graphql` with `errors` | exit 1, though HTTP is 200; full body with any partial data on stdout; `--jq` is skipped, so forgectl never uses it | `live` |
 | Project rename | `glab` follows the 301 and resends the token on the same host; a write through the old path gets 405 | `live` |
 | Redirect from a fake server | `glab` repeats `Private-Token` to another host on a read; `gh` does not, and turns a POST into a GET with a final 200 | process test |
-| `gh auth token --hostname` | returns an ambient token for any host; `glab auth token` has no `--hostname` | process test |
+| `gh auth token --hostname` | returns an ambient token for any host; `glab auth token` has no `--hostname`. Version note: on gh 2.87.3 `gh auth token` is host-scoped and returns only a token that applies to the named host | process test |
 | `updated_at` | GitHub misses checks, status, resolves, edits; GitLab moves at most about once a minute (inferred from timing) and not on pipeline end | documented |
 | `gh` with `-R` or a valid URL in a hostile directory | no child process; without them it runs git and uses a planted remote; malformed URLs fall through to git | process test |
 | `glab` in a hostile directory | always runs read-only git; no planted command fired; a cwd remote can redirect the token to a configured host | process test |
