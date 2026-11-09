@@ -554,7 +554,7 @@ Output: `{pr, merged, already_merged, auto_merge_enabled, merged_head_sha, merge
 
 `review <pr> --file <path|-> [--expected-head <sha>] [--expected-base <ref>] [--allow-self] [--dedupe-key K] [--yes] [--dry-run] [--actor A] [--decision-id D]... [--override-escalation]`
 
-The input file (`schemas/review-input.json`) is `{event, body, comments}`: `event` is `comment`, `request_changes` or `approve`; `comments` is a list of `{path, line, side, start_line, body}`, with `line` required, `side` being `left` or `right` (default `right`), and a range on one side. An `approve` event follows [`approve`](#approve)'s rules for self-approval and already-approved; its text is always posted. An empty review means `comment` with neither body nor comments; `approve` with neither is allowed. Attribution footers are the caller's. `--expected-head` and `--expected-base` are required unless the run is interactive.
+The input file (`schemas/review-input.json`) is `{event, body, comments}`: `event` is `comment`, `request_changes` or `approve`; `comments` is a list of `{path, line, side, start_line, body}`, with `line` required, `side` being `left` or `right` (default `right`), and a range on one side. An `approve` event follows [`approve`](#approve)'s rules for self-approval and already-approved; its text is always posted. An empty review means `comment` with neither body nor comments; `approve` with neither is allowed. Attribution footers are the caller's. `review` accepts at most 200 inline comments per call; more is a usage error (exit 2), so the audit outcome record stays under the 64 KiB line cap. `--expected-head` and `--expected-base` are required unless the run is interactive.
 
 Output: `{pr, action, ids, thread_ids, review_id, already_posted, follow_up_done, neutralized_lines, markers_removed, warnings, head_sha, head_verified, dry_run}`, as for every post; `head_verified` is only on `review` and `approve`, and null for other events.
 
@@ -597,7 +597,7 @@ See [TUI](#tui).
 
 ### `export`
 
-`export [--since TIME]`: audit records, as JSONL; `--json` prints an array. `--since` takes RFC 3339 or a duration. A missing file gives empty output; a malformed line warns and is skipped.
+`export [--since TIME]`: audit records, as JSONL; `--json` prints an array. `--since` takes RFC 3339 or a duration. A missing file gives empty output; a malformed line warns and is skipped. If the state directory or `audit.jsonl` exists but is refused (see [Files](#files)) or cannot be read, `export` exits 12 `audit_unavailable`.
 
 ## Global flags
 
@@ -802,7 +802,9 @@ A list and a detail pane with facts, CI, reviews, comments and diff. The default
 | `log.jsonl` | 0600 | public contract |
 | private temporary directories | 0700 | empty cwd and config dirs per process, under `TMPDIR`, removed on exit |
 
-`audit.jsonl` gets mode 0600 on creation; an existing file's mode is not changed. There is no `state.db`.
+`audit.jsonl` gets mode 0600 on creation; an existing file's mode is not changed. There is no `state.db`. Neither file is rotated. Each record is one ASCII line (non-ASCII is escaped) of at most 64 KiB, written with a single append, so concurrent runs never interleave lines. The state directory must be a real directory (not a symlink) owned by the user and not writable by group or others, and a file must be a regular file owned by the user with one link and not writable by group or others (an existing file's mode is still never changed, so 0600 and 0644 are accepted and 0620 or 0666 are not); otherwise it is not used (an audit append fails as `audit_unavailable`, a log write warns). `export` skips a line over 256 KiB.
+
+Either file may contain empty lines: forgectl adds a newline first when an append finds the file not ending in one. A reader skips empty lines.
 
 ## Audit and log
 
@@ -810,9 +812,9 @@ A list and a detail pane with facts, CI, reviews, comments and diff. The default
 
 **Two records per write.** Before a host write, forgectl appends a record with `result: attempted` and an `attempt_id`; after, a second record with the same id and the outcome. `attempted` is written once per run, before its first write, whichever step that is. A record with no outcome means forgectl died in between. If that first append fails, exit 12 (`audit_unavailable`), with nothing sent. If the second fails, exit 12 (`audit_failed`) with the outcome in `details`, so a caller does not retry.
 
-**Fields.** `merge_unverified` is recorded as `merged_unexpected` when the PR merged at another head or base, with `observed: {head_sha, base_ref}` in the outcome record, else as `outcome_unknown`; `observed` is null otherwise. A post's `quick_action_ran` as itself; `approved_stale_head` as `approved`, since the approval exists. `config_hash` is the sha256 hex digest of the canonical JSON of the effective config, after files, environment overrides and defaults but not flags: every key present, each with its default when unset (null only where the default is null, such as `me.name`), keys sorted, compact separators (`,` and `:`), non-ASCII characters as `\u` escapes, encoded as UTF-8, durations as JSON numbers of seconds always written with a fraction part, as Python's float repr does (`60.0`, `0.009`), keys spelled as in the schema (such as `pre-merge` and a hook's `async`), and `me.name` as configured (null when unset, not the OS username). `config_path` is null for the default. `actor_source` is `flag`, `tty` or `default`. `human:` with `stdin_tty: false` is expected from a dashboard, and is checkable, not refused.
+**Fields.** `merge_unverified` is recorded as `merged_unexpected` when the PR merged at another head or base, with `observed: {head_sha, base_ref}` in the outcome record, else as `outcome_unknown`; `observed` is null otherwise. A post's `quick_action_ran` as itself; `approved_stale_head` as `approved`, since the approval exists. `config_hash` is the sha256 hex digest of the canonical JSON of the effective config, after files, environment overrides and defaults but not flags: every key present, each with its default when unset (null only where the default is null, such as `me.name`), keys sorted, compact separators (`,` and `:`), non-ASCII characters as `\u` escapes, encoded as UTF-8, durations as JSON numbers of seconds always written with a fraction part, as Python's float repr does (`60.0`, `0.009`), keys spelled as in the schema (such as `pre-merge` and a hook's `async`), and `me.name` as configured (null when unset, not the OS username). `config_path` is null for the default. `actor_source` is `flag`, `tty` or `default`. `human:` with `stdin_tty: false` is expected from a dashboard, and is checkable, not refused. `inputs.base_ref` and `observed.base_ref` are cut to their first 1024 characters when written. `ts` must be a real instant: `export` skips, as malformed, a record whose `ts` matches the schema pattern but names no real time (such as a leap second `23:59:60`, an offset of `+24:00` or a date that does not exist).
 
-**Log** (`schemas/log.json`): `ts`, `level`, `event`, `pr`, `host`, `details`. `error` for exit 1; `warn` for refusals, vetoes, escalations, exit 12 and an unmatched instance note; `info` otherwise; `debug` for `--verbose`. Reads log only at `--verbose` or on failure, so polling does not grow the file. A log write failure warns only. URLs are recorded without userinfo. Secrets never appear in either file.
+**Log** (`schemas/log.json`): `ts`, `level`, `event`, `pr`, `host`, `details`. `error` for exit 1; `warn` for refusals, vetoes, escalations, exit 12 and an unmatched instance note; `info` otherwise; `debug` for `--verbose`. Reads log only at `--verbose` or on failure, so polling does not grow the file. A log write failure warns only, and never changes the exit code. `export` prints each record with its untrusted fields (`base_ref`, `host_login`, `observed.base_ref`) sanitized, and skips, with a warning that does not repeat the line, any line that is not valid against `schemas/audit.json`. URLs are recorded without userinfo. Secrets never appear in either file.
 
 ## Upgrades
 
