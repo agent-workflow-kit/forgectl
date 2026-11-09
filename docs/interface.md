@@ -80,7 +80,7 @@ Every text field that comes from a forge is untrusted (`x-untrusted` in the sche
 | `head_fetch_ref` | `refs/pull/N/head` or `refs/merge-requests/N/head`; reaches a fork's head from the target repo |
 | `mergeable` | `true`, `false` or `null`: the host's mergeability alone, which may be true with failing checks |
 | `blocked_by` | list of [blocker codes](#blocker-codes); empty means nothing known blocks a merge |
-| `auto_merge` | `{enabled, by}`; `enabled` is false once merged, whatever the host's stale field says |
+| `auto_merge` | `{enabled, by}`; `enabled` is false (and `by` null) unless the PR is open, whatever the host's stale field says |
 | `merge_queue` | `true`, `false` or `null`: a merge queue or merge train applies |
 | `merge_methods_allowed` | list of methods, or null when unknown |
 | `additions`, `deletions`, `changed_files` | sizes |
@@ -110,14 +110,14 @@ Field rules:
 | Code | GitHub (`mergeStateStatus` and others) | GitLab (`detailed_merge_status` and others) |
 |---|---|---|
 | `draft` | `DRAFT`, `isDraft` | `draft_status` |
-| `conflicts` | `DIRTY` | `conflict`; `has_conflicts: true`, whatever the status (`need_rebase` can hide conflicts) |
+| `conflicts` | `DIRTY`; `mergeable: CONFLICTING` | `conflict`; `has_conflicts: true`, whatever the status (`need_rebase` can hide conflicts) |
 | `checks_pending` | any counted check pending ([CI object](#ci-object)); `ci.state` is `pending`; `BLOCKED` with `ci.state: none`, a required check that has not reported | any counted check pending; `ci.state` is `pending`; `ci_still_running`; `ci_must_pass` when no counted check is failing; `for_current_head: false` |
 | `checks_failing` | any counted check of the current head failing | any counted check of the current head failing; an old commit's failing checks give `checks_pending` instead (`for_current_head: false`) |
 | `reviews_required` | `BLOCKED` with `reviewDecision: REVIEW_REQUIRED` | `not_approved` |
 | `changes_requested` | any `latest_by_reviewer` entry with that state and `can_push` not false, whether or not the host would block | `requested_changes`; any `latest_by_reviewer` entry with that state and `can_push` not false |
 | `discussions_unresolved` | `BLOCKED` with unresolved resolvable threads, when no other code explains it | `discussions_not_resolved` |
 | `branch_behind` | `BEHIND` | `need_rebase` |
-| `mergeability_unknown` | `UNKNOWN` after retries | `checking`, `unchecked`, `preparing` after retries |
+| `mergeability_unknown` | `UNKNOWN` after retries; `mergeStateStatus` or `mergeable` UNKNOWN, missing or unmapped after the readiness tries | `checking`, `unchecked`, `preparing` after retries |
 | `other` | `BLOCKED` when nothing above explains it, with `detail: "BLOCKED"` | anything else (`merge_time`, `merge_request_blocked`, `commits_status` and others), with the status as `detail`; `locked` |
 | `checks_absent` | not in `blocked_by`: only in [`merge`](#merge-order)'s refusal of a non-human actor | the same |
 | (adds nothing) | `CLEAN`, `HAS_HOOKS`, `UNSTABLE` | `mergeable`, `not_open` |
@@ -314,7 +314,7 @@ Every call to a forge goes through one gateway:
 
 ## Reliability
 
-**Reads** are retried up to `retries` times (default 3) on 429, GitHub's secondary rate limit, 5xx and network errors, with backoff from 1 s doubling to 8 s, with jitter, honoring `retry-after`, within `--timeout`. A `retry-after` past the budget exits at once with `retry_after` set. A read timeout is `network_error`. After the retries, a read exits 12 with the code below, plus `retry_after` when known.
+**Reads** are retried up to `retries` times (default 3) on 429, GitHub's secondary rate limit, 5xx and network errors, with backoff from 1 s doubling to 8 s, with jitter that adds up to a quarter of the table value and never waits less than it, honoring `retry-after`, within `--timeout`. A `retry-after` past the budget exits at once with `retry_after` set; a wait that would leave less than 1 s of the budget counts as past the budget, and a readiness re-read that does not fit, or fails a retryable way, leaves the value unknown. A read timeout is `network_error`. An answer that is not the documented shape (`upstream_error`), whether the gateway or the backend finds it, is retried like a 5xx; `not_found` and `wrong_host_response` are never retried. Each wait counts against the budget. After the retries, a read exits 12 with the code below, plus `retry_after` when known.
 
 | Answer | Code |
 |---|---|
