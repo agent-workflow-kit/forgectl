@@ -1,6 +1,6 @@
 # forgectl: interface
 
-Status: 0.1.0-design, 2026-11-03. This document is the single normative source for forgectl's rules. `docs/design.md`, the README and the awkit architecture link to its headings and do not restate its tables. Schemas live in [`schemas/`](../schemas/).
+Status: 0.2.0-design, 2026-11-09. This document is the single normative source for forgectl's rules. `docs/design.md`, the README and the awkit architecture link to its headings and do not restate its tables. Schemas live in [`schemas/`](../schemas/).
 
 forgectl gives one normalized interface to pull requests on GitHub and merge requests on GitLab, for reading, posting and merging. It runs `gh api` and `glab api`; it never uses their high-level commands. It keeps no database.
 
@@ -189,6 +189,34 @@ A published GitLab draft is a resolvable thread, including a review's body, so o
 | `reply_to` | `replyTo` | the discussion's first note, null on it |
 
 A comment is `{id, author, body, created_at, updated_at, minimized, reply_to, review_id}`. `review_id` is the review it belongs to, or null. `minimized` is false on GitLab. System notes are left out.
+
+### Push time
+
+`snapshot` adds two fields to `head`: `pushed_at`, an RFC 3339 UTC time, and `pushed_at_source`, `push_event` or `commit_date`. They say when the current head was last pushed and how that was determined, so a consumer can ask what happened after the last push without keeping state. Both are null when the time cannot be determined. `pushed_at` is not part of the PR object, `prs` or `show`.
+
+| Host | `push_event` | `commit_date` |
+|---|---|---|
+| GitHub | the newest push event on the PR timeline for the current head sha: `HeadRefForcePushedEvent` or `PullRequestCommit` | the head commit's committed date, when the timeline holds no such event for the head sha |
+| GitLab | `created_at` of the newest entry of `/merge_requests/:id/versions` | the head commit's date, when versions are unavailable |
+
+A new push gives a later `pushed_at` on the next snapshot. Nothing is stored between runs.
+
+### Activity
+
+`snapshot` carries `activity`, derived in forgectl from the snapshot's own `threads`, `reviews` and `latest_by_reviewer` and from `head.pushed_at`, so every consumer shows the same counts and gets the same answer to "did others comment after my push". It is the same code path for both hosts and stores nothing.
+
+| Field | Meaning |
+|---|---|
+| `comments_total` | all comments across all `threads`, including mine and those of ignored authors |
+| `unresolved_threads` | threads that are not resolved |
+| `others_since_push` | comments plus reviews by an account that is not me and not ignored, timestamped after `head.pushed_at`; null when `pushed_at` is null |
+| `awaiting_my_reply` | unresolved threads whose last comment by a non-ignored author is not mine |
+
+- **Me** is the authenticated user from [`whoami`](#whoami), compared as in [Logins](#logins). My own login is always excluded from "others", whatever the config says.
+- **Ignored** authors are those matching `activity.ignore_authors` ([Config](#config)): logins, with glob patterns allowed, such as `dependabot[bot]`, `renovate*` or `gitlab-bot`. The config list alone decides. `author.is_bot` stays in the output as information and never changes a count: a bot not on the list counts, and a listed account is ignored whatever `is_bot` says.
+- **Resolved threads** are never awaiting my reply, whoever wrote last.
+- **GitHub.** Comments come from `threads`, reviews from `reviews`; a review counts at its `submitted_at`.
+- **GitLab.** `reviews` is always empty, so nothing is inferred from it. Review comments are discussion notes, already in `threads`. Approvals feed `others_since_push` from `latest_by_reviewer`: only entries with state `approved` whose `at` is set, by someone who is not me and not ignored, with `at` after `head.pushed_at`. Such an approval counts once.
 
 ### CI object
 
@@ -484,7 +512,7 @@ With `--repo` or `--host` there is one target, so a failure uses the ordinary ex
 
 ### `snapshot`
 
-`snapshot <pr>`: the PR object plus `review_requests`, `teams_visible`, `reviews`, `latest_by_reviewer`, `threads`, `ci`, `rate_limit`, `complete`, `incomplete` (names of the parts that are not complete) and `fetched_at`. One call for a caller that compares successive states. forgectl emits no events and stores nothing. `updated_at` is not a reliable change signal on either host.
+`snapshot <pr>`: the PR object plus `review_requests`, `teams_visible`, `reviews`, `latest_by_reviewer`, `threads`, `ci`, `activity` ([Activity](#activity)), `rate_limit`, `complete`, `incomplete` (names of the parts that are not complete) and `fetched_at`. In `snapshot` only, `head` also carries `pushed_at` and `pushed_at_source` ([Push time](#push-time)); `prs` and `show` items keep the `head` fields they have. One call for a caller that compares successive states. forgectl emits no events and stores nothing. `updated_at` is not a reliable change signal on either host.
 
 `incomplete` names any of `review_requests`, `reviews`, `threads`, `ci`. The `ci` name follows `ci.complete`.
 
@@ -730,9 +758,11 @@ Reads fire none.
 | `hosts.<host>.me` | null | login on this host |
 | `hosts.<host>.api_prefix` | null | GitLab under a path, such as `/gitlab` |
 | `repos.<id>.merge_method` | null | `squash`, `merge` or `rebase` |
+| `activity.ignore_authors` | `[]` | logins whose comments and reviews [`activity`](#activity) ignores; glob patterns allowed; replaces on merge like any list |
+| `browse.refresh_interval` | `120s` | seconds between automatic refreshes in [`browse`](#tui); `0` disables them; the flag `browse --interval` wins |
 | `hooks.<name>` | `[]` | [Hooks](#hooks) |
 
-Per-repo overrides hold only `merge_method` in v1: no setting lowers a safety rule, so none can be relaxed per repo. A duration is a positive number or a numeric string, in seconds, or `<number><unit>` with unit `ms`, `s`, `m`, `h` or `d`. `api_prefix` is only for declared hosts and null for GitHub. A built-in host's `backend` must match. A hook's `cmd` is not empty.
+Per-repo overrides hold only `merge_method` in v1: no setting lowers a safety rule, so none can be relaxed per repo. A duration is a positive number or a numeric string, in seconds, or `<number><unit>` with unit `ms`, `s`, `m`, `h` or `d`; `browse.refresh_interval` alone also accepts `0`, which disables the refresh. `api_prefix` is only for declared hosts and null for GitHub. A built-in host's `backend` must match. A hook's `cmd` is not empty.
 
 ### Credentials
 
@@ -770,13 +800,43 @@ forgectl stores no long-lived objects, so it has no labels of its own. Conventio
 
 ## TUI
 
-`browse [--focus <pr>] [--result-file PATH]` needs the extra `forgectl[tui]`; without it, exit 2 with the install command.
+`browse [--focus <pr>] [--result-file PATH] [--interval D]` needs the extra `forgectl[tui]`; without it, exit 2 with the install command.
 
-A list and a detail pane with facts, CI, reviews, comments and diff. The default list is the union of requested-from-you and authored-by-you, as two `prs` calls. Two actions: `m` merge, `o` open in a browser. Posting stays with the tools that own drafts.
+`browse` is read-only: a dashboard of your open PRs and MRs on GitHub and GitLab, a detail pane with facts, CI, reviews, comments and diff, and one action, `o` open in a browser. Posting stays with the tools that own drafts. Merging is a separate follow-up ([Merge from `browse`](#merge-from-browse-follow-up)). Forge text renders with Textual markup disabled. GitLab rows rely on the GitLab path being verified against a self-managed instance (#35).
 
-`m` runs the merge in process, with `--actor human:<me.name>`, and `--expected-head`, `--expected-base` from that read. `m`'s dialog is [Merge order](#merge-order) step 5's, plus a choice of `merge_methods_allowed`, preselecting the configured method, when the method is unresolved. A blocked PR gets no merge: the status line shows `not_ready` and the CLI command. Audit: `actor_source: tty`. A veto, an escalation or any refusal shows in the status line. `o` opens only the built `url`; a check's `url` is shown, opened only when `http` or `https`. Forge text renders with Textual markup disabled.
+### List
 
-`--result-file` writes `{"intent": "open"|"back", "selected": [...], "merged": [...]}` on exit (`schemas/cli/browse-result.json`). `selected` holds zero or one `pr`; `merged` lists the PRs merged with `m`. `enter` opens the detail pane and `intent` stays `back` on exit; `intent: open` means `o` was used. Keys: `q` quit, `?` help, `/` filter, `enter` open, `r` refresh.
+The default list is the union of requested-from-you and authored-by-you, as two `prs` calls. Columns:
+
+| Column | Source |
+|---|---|
+| repo and number, title | the `prs` item |
+| badge | state, draft and the first blocker |
+| CI glyph | `ci.state` |
+| approvals | `approvals`; on GitLab over `approvals` plus the `approvals_left` of the approval rule forgectl already reads, such as `1/2`; on GitHub, which reports no required count in the model, the bare count |
+| comments | `activity`: `comments_total`, `unresolved_threads`, `others_since_push` (new since push) and `awaiting_my_reply` |
+| age | since `head.pushed_at` (blank when it is null) and since `updated_at` |
+
+- **Grouping and order.** Rows group by repo. A "needs attention first" order puts rows with failing CI, new comments from others since the push, a thread awaiting my reply or changes requested first, then the rest; a key switches between it and the default order. Authors in `activity.ignore_authors` never move a row.
+- **Filters.** Authored by me or review-requested from me; CI failing; has new comments. Filters combine as an intersection, and the status bar names the active ones. `/` filters by text.
+- **Loading.** One `prs` call per query builds the rows, then `snapshot` runs per PR with bounded concurrency (configurable, a small default), visible rows first. Rows render as each snapshot arrives, with a per-row loading state and a progress count in the status bar. The names and defaults of the tunables here and in Refresh (concurrency, the full pass every Nth cycle, the rate-limit threshold) are fixed with their schema entries when the implementation lands. A failed snapshot marks its row with the error and does not block the others.
+
+### Refresh
+
+- **Manual.** `r` refreshes the selected PR (its `snapshot`); `R` refreshes all (`prs`, then snapshots). A refresh in flight is never started twice: `R` during a cycle is ignored, with a status note.
+- **Automatic.** Every `browse.refresh_interval` seconds, default 120, `0` disables it; `--interval` takes a duration like the config value, or `0`, wins over the config, and an invalid value exits 2. Each cycle re-runs `prs`, re-snapshots only PRs whose `updated_at` or head sha changed and PRs with pending CI, and re-snapshots all every Nth cycle (configurable, default 5), because `updated_at` is not a reliable change signal and can miss CI and approval changes.
+- **Place and change.** Selection and scroll position survive any refresh. Rows whose data changed are highlighted until the next cycle or a keypress. A failed refresh keeps the row's last good data and marks it stale.
+- **Status bar.** Last refresh time, `rate_limit.remaining` per host, the active filters, loading progress, and partial errors (`complete` false, `errors`).
+- **Cost control.** When `rate_limit.remaining` for a host drops below a threshold, the interval for that host lengthens and the status bar says so; the normal interval resumes after `rate_limit.reset_at`. Polling stays within [Reliability](#reliability); an ETag pass-through may later lower its cost.
+- **State.** Nothing is stored between runs (D-4); change tracking lives in memory only.
+
+### Result file
+
+`--result-file` writes `{"intent": "open"|"back", "selected": [...], "merged": [...]}` on exit (`schemas/cli/browse-result.json`). `selected` holds zero or one `pr`; `merged` lists the PRs merged from `browse`, and stays empty until the merge follow-up. `enter` opens the detail pane and `intent` stays `back` on exit; `intent: open` means `o` was used. `o` opens only the built `url`; a check's `url` is shown, opened only when `http` or `https`. Keys: `q` quit, `?` help, `/` filter, `enter` open, `r` refresh selected, `R` refresh all, `o` open in a browser; the keys for sort order and filters are listed in `?`.
+
+### Merge from `browse` (follow-up)
+
+`m` is not part of the read-only `browse`; it follows as its own step. It runs the merge in process, with `--actor human:<me.name>`, and `--expected-head`, `--expected-base` from that read. `m`'s dialog is [Merge order](#merge-order) step 5's, plus a choice of `merge_methods_allowed`, preselecting the configured method, when the method is unresolved. A blocked PR gets no merge and no override: the status line shows `not_ready` and the CLI command. Audit: `actor_source: tty`. A veto, an escalation or any refusal shows in the status line, and merged PRs are listed in `merged` in the result file.
 
 ## Files
 
