@@ -15,7 +15,7 @@ Normalized access to pull and merge requests on GitHub and GitLab: reading, post
 
 The adapters are internal to forgectl. Other forges are not pluggable by users in v1.
 
-Python dependencies: `pyyaml` and `pydantic` (config, design guide section 3). `textual` only in the extra `forgectl[tui]`, so cron and shared use do not pull it in. No HTTP library: all network access goes through `gh` and `glab`.
+Python dependencies: `pyyaml` and `pydantic` (config, design guide section 3). `textual` only in the extra `forgectl[tui]`, so cron and shared use do not pull it in. No HTTP library: all network access goes through `gh` and `glab`. Test-only: `jsonschema` and `referencing` validate every `--json` output against `schemas/` (a `referencing` registry keyed by `$id`), so a schema and the code cannot drift; neither is installed for users.
 
 ## Decisions
 
