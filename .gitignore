@@ -7,3 +7,10 @@ __pycache__/
 .ruff_cache/
 dist/
 build/
+
+# Fake forge state, if a developer launcher is ever pointed here
+tests/fakebin/calls.jsonl
+tests/fakebin/state.json
+tests/fakebin/state.lock
+tests/fakebin/script.json
+tests/fakebin/script.json.tmp
