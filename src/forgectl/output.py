@@ -39,6 +39,17 @@ def error_text(err: ForgectlError) -> str:
     return f"forgectl: error: {label}: {sanitize_line(err.message)}"
 
 
+def warning_text(message: str) -> str:
+    """The one stderr line for a warning, in the form of the error line."""
+    return f"forgectl: warning: {sanitize_line(message)}"
+
+
+def emit_warning(message: str) -> None:
+    """Write a warning line to stderr; a failed stream never raises."""
+    # TODO(#9): also write a `warn` line to the log (jsonlog.py)
+    write_line(sys.stderr, warning_text(message))
+
+
 def would_refuse_result(command: str, args: Namespace, err: ForgectlError) -> dict[str, Any]:
     """The `--dry-run` result for an exit 20: the command's output with `would_refuse` set.
 

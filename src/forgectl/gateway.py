@@ -48,6 +48,7 @@ import time
 import urllib.parse
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
 
 from .config import LoadedConfig
@@ -908,6 +909,36 @@ class Response:
 
 
 @dataclass(frozen=True)
+class RateReading:
+    """The rate-limit headers of one answer: ``x-ratelimit-remaining`` and
+    ``x-ratelimit-reset`` (GitHub), or ``ratelimit-remaining`` and ``ratelimit-reset`` (GitLab),
+    the reset as an RFC 3339 UTC time (null when absent or unusable)."""
+
+    host: str
+    remaining: int
+    reset_at: str | None
+
+
+_RATE_NUMBER = re.compile(r"[0-9]{1,12}", re.ASCII)
+
+
+def rate_reading(host: str, headers: Mapping[str, str]) -> RateReading | None:
+    """The reading of one answer's headers; None when it has no usable ``remaining``."""
+    remaining = headers.get("x-ratelimit-remaining", headers.get("ratelimit-remaining"))
+    if remaining is None or not _RATE_NUMBER.fullmatch(remaining.strip()):
+        return None
+    reset = headers.get("x-ratelimit-reset", headers.get("ratelimit-reset"))
+    reset_at = None
+    if reset is not None and _RATE_NUMBER.fullmatch(reset.strip()):
+        try:
+            moment = datetime.fromtimestamp(int(reset.strip()), UTC)
+            reset_at = f"{moment.year:04d}-{moment:%m-%dT%H:%M:%S}Z"
+        except (OverflowError, OSError, ValueError):
+            reset_at = None
+    return RateReading(host=host, remaining=int(remaining.strip()), reset_at=reset_at)
+
+
+@dataclass(frozen=True)
 class GraphQLResult:
     data: Mapping[str, Any]
     errors: tuple[Any, ...]  # empty unless ``allow_errors`` accepted a partial answer
@@ -1110,6 +1141,14 @@ class Gateway:
         self._on_spawn = on_spawn
         self._max_stdout = max_stdout
         self._max_stderr = max_stderr
+        #: The rate-limit headers of every answer this command received, success or failure.
+        self.rate_readings: list[RateReading] = []
+
+    def lowest_rate(self, host: str | None = None) -> RateReading | None:
+        """The reading with the lowest ``remaining`` (of ``host``, or of every host); the
+        first seen wins a tie. None when no answer carried one."""
+        readings = [r for r in self.rate_readings if host is None or r.host == host]
+        return min(readings, key=lambda r: r.remaining) if readings else None
 
     @property
     def environ(self) -> Mapping[str, str]:
@@ -1365,6 +1404,9 @@ class Gateway:
                 + (f": {note}" if note else ""),
             )
         status, headers, raw = parsed
+        reading = rate_reading(target.host, headers)
+        if reading is not None:
+            self.rate_readings.append(reading)
         if status < 200:  # an informational status is never the answer
             raise failure("upstream_error", f"{where}: only an informational status {status}")
         if status in passthrough:

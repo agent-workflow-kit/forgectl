@@ -6,8 +6,10 @@ string is built by ``build_search`` only from parts that fit a strict grammar: a
 not fit is refused (``usage``), never escaped, because a space, colon or quote in a search string
 adds a qualifier. GitHub caps a search at 1000 results and ``issueCount`` says how many matched,
 so a list that stops at the cap, or holds fewer items than ``issueCount``, is ``complete: false``.
-The host's answer is checked against the filters it was asked for: an item that does not match is
-``upstream_error``, never silently dropped or kept.
+The host's answer is checked against the filters it was asked for. The search index lags the live
+``state`` and ``isDraft``, so an item whose state or draft flag no longer matches (merged, closed,
+reopened or marked ready seconds earlier) is dropped and the list is ``complete: false``; an item
+older than the ``updated_since`` floor is ``upstream_error``, never silently kept.
 
 ``access`` reads the repository, then ``collaborators/U/permission``. Only a clear answer is a
 yes or a no: a 403 (the account may not read it) is null with ``no_permission_to_read``, and an
@@ -47,7 +49,6 @@ from .github import (
     _req_sha,
     _req_ts,
     _str,
-    _ts,
     malformed,
     parse_actor,
 )
@@ -61,7 +62,6 @@ MAX_SEARCH_PAGES = SEARCH_CAP // PAGE_SIZE
 PRS_QUERY = (
     """
 query ForgectlPrs($q: String!, $first: Int!, $after: String) {
-  rateLimit { remaining resetAt }
   search(query: $q, type: ISSUE, first: $first, after: $after) {
     issueCount
     pageInfo { hasNextPage endCursor }
@@ -165,7 +165,8 @@ def build_search(query: m.PrQuery) -> str:
             datetime.fromisoformat(since)
         except ValueError:
             raise _refuse("the time is not a real time") from None
-        words.append(f"updated:>={since}")
+        # GitHub documents the offset form only: `...T00:00:00+00:00`, not `...Z`
+        words.append(f"updated:>={since[:-1]}+00:00")
     words.append("sort:updated-desc")
     return " ".join(words)
 
@@ -197,25 +198,18 @@ def _page_info(search: dict[str, Any]) -> tuple[bool, str | None]:
     return True, cursor
 
 
-def _rate(data: dict[str, Any]) -> tuple[int | None, str | None]:
-    raw = data.get("rateLimit")
-    if raw is None:
-        return None, None
-    info = _obj(raw, "the rate limit")
-    left = info.get("remaining")
-    remaining = left if isinstance(left, int) and not isinstance(left, bool) and left >= 0 else None
-    return remaining, _ts(info.get("resetAt"))
-
-
-def _keep(item: m.PrListItem, query: m.PrQuery, floor: datetime | None) -> None:
-    """The host's item must match the filters it was asked for; one that does not is not the
-    documented behavior and ends the read."""
-    if query.state != "all" and item.state != query.state:
-        raise Malformed("an item that does not match the state asked for")
-    if query.draft is not None and item.draft != query.draft:
-        raise Malformed("an item that does not match the draft filter")
+def _check_floor(item: m.PrListItem, floor: datetime | None) -> None:
+    """An item older than the time asked for is not the documented behavior: it ends the read."""
     if floor is not None and instant(item.updated_at) < floor:
         raise Malformed("an item older than the time asked for")
+
+
+def _matches(item: m.PrListItem, query: m.PrQuery) -> bool:
+    """Whether the item's live state and draft flag match the filters. The search runs on an
+    index that lags them, so a mismatch is a PR that changed since: dropped, list incomplete."""
+    if query.state != "all" and item.state != query.state:
+        return False
+    return query.draft is None or item.draft == query.draft
 
 
 def _item(env: ReadEnv, target: Target, node: dict[str, Any], *, more: bool) -> m.PrListItem:
@@ -274,7 +268,7 @@ def list_prs(env: ReadEnv, query: m.PrQuery) -> m.PrPage:
     floor = None if query.updated_since is None else instant(query.updated_since)
     need = min(query.limit + 1, SEARCH_CAP)  # one more than asked tells `complete`
     try:
-        items, dropped, more, total, rate = _read_pages(env, target, query, search, need, floor)
+        items, dropped, more, total = _read_pages(env, target, query, search, need, floor)
     except Malformed as bad:
         raise malformed(f"{bad}") from None
     except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
@@ -282,10 +276,15 @@ def list_prs(env: ReadEnv, query: m.PrQuery) -> m.PrPage:
     items = sort_items(items)
     cut = len(items) > query.limit
     complete = not (cut or dropped or more or total > len(items))
+    rate = env.gateway.lowest_rate(target.host)  # from the response headers (interface: prs)
     return m.PrPage(
         items=tuple(items[: query.limit]),
         complete=complete,
-        rate_limit=m.RateLimit(host=target.host, remaining=rate[0], reset_at=rate[1]),
+        rate_limit=m.RateLimit(
+            host=target.host,
+            remaining=None if rate is None else rate.remaining,
+            reset_at=None if rate is None else rate.reset_at,
+        ),
     )
 
 
@@ -326,12 +325,11 @@ def _search_page(
     from .github import GitHubBackend  # the retried, checked GraphQL call of `show`
 
     def check(data: dict[str, Any]) -> dict[str, Any]:
-        _rate(data)
         block = _obj(data.get("search"), "the search")
         _count(block)
         for node in _results(block, first):
             if node is not None:
-                _keep(_item(env, target, node, more=False), query, floor)
+                _check_floor(_item(env, target, node, more=False), floor)
         _page_info(block)
         return data
 
@@ -346,20 +344,16 @@ def _read_pages(
     search: str,
     need: int,
     floor: datetime | None,
-) -> tuple[list[m.PrListItem], bool, bool, int, tuple[int | None, str | None]]:
+) -> tuple[list[m.PrListItem], bool, bool, int]:
     items: list[m.PrListItem] = []
     seen: set[str] = set()
     dropped = False  # something the host listed could not be kept: the list is not whole
     after: str | None = None
     more = False
     total = 0
-    rate: tuple[int | None, str | None] = (None, None)
     for _page in range(MAX_SEARCH_PAGES):
         first = min(PAGE_SIZE, need - len(items))
         data = _search_page(env, target, query, floor, search, first, after)
-        found = _rate(data)
-        if found[0] is not None and (rate[0] is None or found[0] < rate[0]):
-            rate = found
         block = _obj(data.get("search"), "the search")
         total = _count(block)
         for node in _results(block, first):
@@ -371,12 +365,15 @@ def _read_pages(
                 dropped = True  # the list moved between pages: something may be missing
                 continue
             seen.add(item.pr_id)
-            _keep(item, query, floor)
+            _check_floor(item, floor)
+            if not _matches(item, query):
+                dropped = True  # changed since the index was written: not listed, not whole
+                continue
             items.append(item)
         more, after = _page_info(block)
         if not more or len(items) >= need:
             break
-    return items, dropped, more, total, rate
+    return items, dropped, more, total
 
 
 # -- access ------------------------------------------------------------------------------------
@@ -451,16 +448,15 @@ def _permission(where: str, user: str, answer: dict[str, Any]) -> m.AccessResult
     permission = answer.get("permission")
     if not isinstance(permission, str) or permission not in _LEVELS:
         raise Malformed("the permission")
-    shown = user
-    if "user" in answer:
-        who = _obj(answer.get("user"), "the user")
-        login = _str(who.get("login"), "the user's login")
-        if m.ascii_lower(login) != m.ascii_lower(user):
-            raise Malformed("an answer for another user")
-        try:
-            shown = bind_login(login, "github")
-        except ForgectlError:
-            raise Malformed("the user's login") from None
+    # the answer must name the user it is for: one with no user could be anyone's
+    who = _obj(answer.get("user"), "the user")
+    login = _str(who.get("login"), "the user's login")
+    if m.ascii_lower(login) != m.ascii_lower(user):
+        raise Malformed("an answer for another user")
+    try:
+        shown = bind_login(login, "github")
+    except ForgectlError:
+        raise Malformed("the user's login") from None
     role = answer.get("role_name")
     level: Level = permission  # type: ignore[assignment]
     if isinstance(role, str) and role in _LEVELS[permission]:

@@ -43,7 +43,14 @@ PERSON_PARENTS = {
     "merge_user",
 }
 NAMESPACE_KEY = "namespace"  # GitLab: name, path and full_path name a user or a group
-OWNER_PATH_KEYS = {"full_name", "path_with_namespace", "full_path"}  # leading segments are owners
+# leading segments are owners (``nameWithOwner``: GitHub GraphQL's ``owner/name``)
+OWNER_PATH_KEYS = {"full_name", "path_with_namespace", "full_path", "nameWithOwner"}
+# A github.com URL in these keys names its owner in the first path segment (``/owner/repo/...``,
+# ``/login``), except under GitHub's own routes; ``/orgs/<owner>`` and ``/users/<login>`` name it
+# second. Other hosts' URL layouts are not known well enough to check.
+OWNER_URL_KEYS = {"url", "html_url"}
+GITHUB_ROUTES = {"apps", "settings", "marketplace", "sponsors", "features", "enterprises"}
+GITHUB_OWNER_ROUTES = {"orgs", "users"}
 REDACT_KEYS = {"authorization", "private-token", "cookie", "set-cookie"}
 REDACTED = "REDACTED"
 SERVICE_LOGINS = {"github", "ghost"}
@@ -115,6 +122,19 @@ def _is_group(node: dict[str, Any]) -> bool:
 
 def _login_ok(value: str) -> bool:
     return bool(PLACEHOLDER_LOGIN.fullmatch(value)) or is_service_login(value)
+
+
+def github_url_owner(value: str) -> str | None:
+    """The owner segment of a ``https://github.com/...`` URL, or None when it names none."""
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme not in ("http", "https") or (parsed.hostname or "").lower() != "github.com":
+        return None
+    segments = [s for s in parsed.path.split("/") if s]
+    if not segments or segments[0].lower() in GITHUB_ROUTES:
+        return None
+    if segments[0].lower() in GITHUB_OWNER_ROUTES:
+        return segments[1] if len(segments) > 1 else None
+    return segments[0]
 
 
 def _never_rewrite(key: str) -> bool:
@@ -348,6 +368,11 @@ def _identity_findings(node: Any, path: str, out: list[Finding], parent: str | N
                         and key in OWNER_PATH_KEYS
                         and "/" in value
                         and not all(_login_ok(s) for s in value.split("/")[:-1])
+                    )
+                    or (
+                        key in OWNER_URL_KEYS
+                        and (owner := github_url_owner(value)) is not None
+                        and not _login_ok(owner)
                     )
                 )
                 if bad:

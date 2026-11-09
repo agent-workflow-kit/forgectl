@@ -11,7 +11,9 @@ The contract a backend meets:
   ``ForgectlError`` for a failed read; it never returns a partial list as complete.
 - This module asks hosts one after the other (one budget, one credential selection), keeps each
   host's failure as ``{host, code, message}`` (message redacted of tokens, one line), merges the
-  items (``updated_at`` descending, then ``pr``), cuts to ``limit`` and sets ``complete``.
+  items (``updated_at`` descending, then ``pr``), cuts to ``limit`` and sets ``complete`` (false
+  when any host failed). ``rate_limit`` is the lowest ``remaining`` in the headers of every answer
+  the command received (``Gateway.rate_readings``), whatever the call and whether it failed.
 - A failure with several hosts asked is ``ForgectlError("partial_results", output=...)``: the
   normal output plus ``errors``, printed by ``output.emit_error`` with exit 12. With one target
   (``--repo``, ``--host``, or a single host asked) the host's own error is raised instead.
@@ -20,7 +22,7 @@ The contract a backend meets:
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -60,13 +62,27 @@ def sort_items(items: Iterable[m.PrListItem]) -> list[m.PrListItem]:
 
 
 def resolve_since(value: str, now: datetime | None = None) -> str:
-    """``--updated-since`` as an absolute UTC time to the second: an RFC 3339 time is converted,
-    a duration is subtracted from ``now``."""
-    if _RFC3339.fullmatch(value):
-        moment = datetime.fromisoformat(value.upper())
-    else:
-        moment = (now or datetime.now(UTC)) - timedelta(seconds=duration(value))
-    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    """``--updated-since`` as an absolute UTC time to the second, the year zero-padded: an RFC
+    3339 time is converted, a duration is subtracted from ``now``. A time that falls outside the
+    years 1 to 9999 once in UTC is ``usage``."""
+    try:
+        if _RFC3339.fullmatch(value):
+            moment = datetime.fromisoformat(value.upper())
+        else:
+            moment = (now or datetime.now(UTC)) - timedelta(seconds=duration(value))
+        moment = moment.astimezone(UTC)
+    except (OverflowError, ValueError):
+        raise ForgectlError(
+            "usage", f"--updated-since is outside the years 1 to 9999 in UTC: {value!r}"
+        ) from None
+    return f"{moment.year:04d}-{moment:%m-%dT%H:%M:%S}Z"
+
+
+def check_me_spelling(value: str | None, what: str) -> None:
+    """``me`` is reserved; a login equal to it in another case is refused (logins are
+    case-insensitive on both hosts), so ``ME`` never searches an account named ``me``."""
+    if value is not None and value != "me" and value.lower() == "me":
+        raise ForgectlError("usage", f"{what}: `me` is reserved; write it as `me`")
 
 
 def candidate_hosts(config: Config) -> list[str]:
@@ -85,13 +101,15 @@ def host_error(host: str, error: ForgectlError) -> dict[str, str]:
 
 def resolve_me(env: ReadEnv, host: str, known: Identity | None = None) -> str:
     """What ``me`` is on ``host``: the configured ``me``, else the authenticated login (from
-    ``known`` when an identity read was already made). Checked under the host backend's grammar."""
+    ``known`` when an identity read was already made, else one retried read). Checked under the
+    host backend's grammar."""
     backend = env.hosts.backend(host)
     value = env.hosts.me(host)
     if value is None and known is not None:
         value = known.login
     if value is None:
-        value = env.hosts.authenticated_user(env.hosts.target(host)).login
+        target = env.hosts.target(host)
+        value = env.call(lambda: env.hosts.authenticated_user(target)).login
     return bind_login(value, backend)
 
 
@@ -103,13 +121,21 @@ def _login_for(env: ReadEnv, host: str, value: str | None, known: Identity | Non
     return bind_login(value, env.hosts.backend(host))
 
 
-def lowest_rate_limit(pages: Sequence[tuple[str, m.RateLimit]], single: str | None) -> m.RateLimit:
-    """The lowest ``remaining`` among the hosts called. With none known: that host's nulls when
-    one host was called, else null for every field."""
-    known = [(rl.remaining, rl) for _, rl in pages if rl.remaining is not None]
-    if known:
-        return min(known, key=lambda pair: pair[0])[1]
-    return m.RateLimit(host=single, remaining=None, reset_at=None)
+def lowest_rate_limit(env: ReadEnv, single: str | None) -> m.RateLimit:
+    """The lowest ``remaining`` in the headers of every answer this command received, on any
+    host, success or failure. With none known: that host's nulls when one host was asked, else
+    null for every field."""
+    reading = env.gateway.lowest_rate()
+    if reading is None:
+        return m.RateLimit(host=single, remaining=None, reset_at=None)
+    return m.RateLimit(host=reading.host, remaining=reading.remaining, reset_at=reading.reset_at)
+
+
+def _check_logins(env: ReadEnv, host: str, args: PrsArgs) -> None:
+    backend = env.hosts.backend(host)
+    for value in (args.author, args.review_requested_from):
+        if value is not None and value != "me":
+            bind_login(value, backend)
 
 
 @dataclass(frozen=True)
@@ -127,6 +153,8 @@ class PrsArgs:
 def run_prs(env: ReadEnv, args: PrsArgs, *, now: datetime | None = None) -> dict[str, Any]:
     """``prs`` over the hosts in scope (see the module doc for the failure rules)."""
     config = env.gateway.config.config
+    check_me_spelling(args.author, "--author")
+    check_me_spelling(args.review_requested_from, "--review-requested-from")
     if args.repo is not None:
         hosts = [args.repo.host]
     elif args.host is not None:
@@ -134,25 +162,32 @@ def run_prs(env: ReadEnv, args: PrsArgs, *, now: datetime | None = None) -> dict
     else:
         hosts = candidate_hosts(config)
     single_target = args.repo is not None or args.host is not None
-    # A login that does not fit a host's backend is refused up front (exit 2), before any call.
+
+    def probed(host: str) -> bool:
+        return not single_target and host in BUILT_IN_HOSTS and host not in config.hosts
+
+    # A login that does not fit a declared or named host's backend is refused (exit 2) before
+    # any call; an undeclared built-in is checked only once its probe puts it in scope.
     for host in hosts:
-        backend = env.hosts.backend(host)
-        for value in (args.author, args.review_requested_from):
-            if value is not None and value != "me":
-                bind_login(value, backend)
+        if not probed(host):
+            _check_logins(env, host, args)
     since = None if args.updated_since is None else resolve_since(args.updated_since, now)
 
-    queried: list[str] = []
-    failures: list[tuple[str, ForgectlError]] = []
-    pages: list[tuple[str, m.PrPage]] = []
+    # Scope first: an undeclared built-in is asked only when the account can be told to exist.
+    scope: list[tuple[str, Identity | None]] = []
     for host in hosts:
         known: Identity | None = None
-        if not single_target and host in BUILT_IN_HOSTS and host not in config.hosts:
-            # an undeclared built-in is asked only when the account can be told to exist
-            known = env.hosts.identity(host)
+        if probed(host):
+            known = env.hosts.identity(host, call=env.call)
             if known.error is None and known.token_source == "none":
                 continue
-        queried.append(host)
+            _check_logins(env, host, args)
+        scope.append((host, known))
+
+    queried = [host for host, _ in scope]
+    failures: list[tuple[str, ForgectlError]] = []
+    pages: list[tuple[str, m.PrPage]] = []
+    for host, known in scope:
         try:
             if known is not None and known.error is not None:
                 raise ForgectlError(known.error["code"], known.error["message"])
@@ -176,13 +211,11 @@ def run_prs(env: ReadEnv, args: PrsArgs, *, now: datetime | None = None) -> dict
     cut = len(merged) > args.limit
     output = {
         "items": [item.to_dict() for item in merged[: args.limit]],
-        "complete": all(page.complete for _, page in pages) and not cut,
+        # a failed host's items are missing, so the list is never complete then
+        "complete": not failures and all(page.complete for _, page in pages) and not cut,
         "errors": [host_error(host, error) for host, error in failures],
         "hosts_queried": queried,
-        "rate_limit": lowest_rate_limit(
-            [(host, page.rate_limit) for host, page in pages],
-            queried[0] if len(queried) == 1 else None,
-        ).to_dict(),
+        "rate_limit": lowest_rate_limit(env, queried[0] if len(queried) == 1 else None).to_dict(),
     }
     if failures:
         shown = ", ".join(f"{host} ({error.code})" for host, error in failures)

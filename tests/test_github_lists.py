@@ -35,8 +35,18 @@ from .test_github_show import Script, Slept, http
 
 RECORDINGS = Path(__file__).parent / "recordings" / "github" / "lists"
 TOKEN = "tok-lists-0001-zzzz"
-REPO = RepoRef(host="github.com", backend="github", path="example-org/example-repo")
+REPO = RepoRef(host="github.com", backend="github", path="user-7/example-repo")
 ACCESS_REPO = RepoRef(host="github.com", backend="github", path="user-5/example-repo")
+
+
+#: GitHub's rate-limit headers: 4987 left, reset at 2026-10-02T09:00:00Z.
+RATE = {"x-ratelimit-remaining": "4987", "x-ratelimit-reset": "1790931600"}
+
+
+def rated(doc: Any, remaining: int = 4987, reset: int = 1790931600) -> bytes:
+    """``doc`` as a 200 answer carrying the rate-limit headers."""
+    headers = {"x-ratelimit-remaining": str(remaining), "x-ratelimit-reset": str(reset)}
+    return http(200, doc, headers=headers)
 
 
 def recording(name: str = "search-open") -> dict[str, Any]:
@@ -110,7 +120,7 @@ def failure(harness: Harness, call: Callable[[Harness], Any]) -> ForgectlError:
 
 def test_the_search_for_a_repo_with_defaults() -> None:
     q = build_search(PrQuery(repo=REPO, host="github.com"))
-    assert q == "is:pr is:open repo:example-org/example-repo sort:updated-desc"
+    assert q == "is:pr is:open repo:user-7/example-repo sort:updated-desc"
 
 
 def test_every_filter_has_one_qualifier() -> None:
@@ -130,7 +140,7 @@ def test_every_filter_has_one_qualifier() -> None:
         "author:user-1",
         "user-review-requested:user-2",
         "draft:false",
-        "updated:>=2026-10-01T00:00:00Z",
+        "updated:>=2026-10-01T00:00:00+00:00",  # the form GitHub documents
         "sort:updated-desc",
     ]
 
@@ -161,7 +171,7 @@ def test_a_bot_author_is_searched_by_its_app_form() -> None:
 
 
 HOSTILE_LOGINS = [
-    "user-1 repo:example-org/private",  # a space adds a qualifier
+    "user-1 repo:user-7/private",  # a space adds a qualifier
     "user-1\nrepo:other/x",
     "user-1:admin",
     'user-1"',
@@ -195,12 +205,12 @@ def test_a_login_outside_the_grammar_is_refused_never_escaped(value: str, field:
 @pytest.mark.parametrize(
     "path",
     [
-        "example-org/example-repo repo:other/x",
-        "example-org/example-repo\n",
-        "example-org/",
+        "user-7/example-repo repo:other/x",
+        "user-7/example-repo\n",
+        "user-7/",
         "/example-repo",
-        "example-org/a/b",
-        "example-org",
+        "user-7/a/b",
+        "user-7",
         "../x",
         "o/..",
         "o/.",
@@ -253,14 +263,14 @@ def test_a_query_without_repo_or_person_is_refused() -> None:
 def test_the_graphql_text_is_constant_with_variables_only() -> None:
     assert "$q" in PRS_QUERY and "search(query: $q" in PRS_QUERY
     assert "example" not in PRS_QUERY
-    assert "rateLimit" in PRS_QUERY
+    assert "rateLimit" not in PRS_QUERY  # the rate limit comes from the response headers
 
 
 # -- listing -----------------------------------------------------------------------------------
 
 
 def test_golden_search_page(make: Callable[..., Harness]) -> None:
-    harness = make(recording())
+    harness = make(rated(recording()))
     page = harness.prs(repo=REPO)
     out = {
         "items": [item.to_dict() for item in page.items],
@@ -273,15 +283,15 @@ def test_golden_search_page(make: Callable[..., Harness]) -> None:
 
 
 def test_the_items_are_normalized_and_ordered(make: Callable[..., Harness]) -> None:
-    page = make(recording()).prs(repo=REPO)
+    page = make(rated(recording())).prs(repo=REPO)
     assert [i.pr for i in page.items] == [
-        "github.com/example-org/example-repo#31",
-        "github.com/example-org/example-repo#29",
-        "github.com/example-org/other-repo#12",
+        "github.com/user-7/example-repo#31",
+        "github.com/user-7/example-repo#29",
+        "github.com/user-7/other-repo#12",
     ]
     first, bot, ghost = page.items
     assert first.labels == ("needs review", "bug")
-    assert first.head.repo == "github.com/example-org/example-repo"
+    assert first.head.repo == "github.com/user-7/example-repo"
     assert first.head.is_fork is False
     assert bot.author.login == "user-2[bot]" and bot.author.is_bot is True
     assert bot.draft is True
@@ -300,7 +310,7 @@ def test_the_items_are_sorted_by_updated_at_then_pr_whatever_the_host_order(
     nodes_of(doc).reverse()
     same = copy.deepcopy(nodes_of(doc)[2])
     same["number"], same["id"] = 5, "PR_kwDOexample5"
-    same["url"] = "https://github.com/example-org/example-repo/pull/5"
+    same["url"] = "https://github.com/user-7/example-repo/pull/5"
     same["updatedAt"] = "2026-10-01T14:00:00+02:00"  # the same instant as #29's 12:00:00Z
     nodes_of(doc).append(same)
     search_of(doc)["issueCount"] = 4
@@ -350,7 +360,7 @@ def page_of(
         node = copy.deepcopy(template)
         node["number"] = 100_000 - index  # newest first: higher numbers, later times
         node["id"] = f"PR_kwDOexample{index}"
-        node["url"] = f"https://github.com/example-org/example-repo/pull/{100_000 - index}"
+        node["url"] = f"https://github.com/user-7/example-repo/pull/{100_000 - index}"
         node["updatedAt"] = f"2026-10-02T08:{(59 - index // 60) % 60:02d}:{59 - index % 60:02d}Z"
         nodes.append(node)
     doc["data"]["search"] = {
@@ -410,27 +420,65 @@ def test_an_empty_result_is_complete(make: Callable[..., Harness]) -> None:
     assert page.items == () and page.complete is True
 
 
-def test_a_rate_limit_without_numbers_is_null(make: Callable[..., Harness]) -> None:
-    doc = recording()
-    doc["data"]["rateLimit"] = {"remaining": "many", "resetAt": "soon"}
-    page = make(doc).prs(repo=REPO)
+def test_rate_limit_headers_without_numbers_are_null(make: Callable[..., Harness]) -> None:
+    answer = http(
+        200, recording(), headers={"x-ratelimit-remaining": "many", "x-ratelimit-reset": "1"}
+    )
+    page = make(answer).prs(repo=REPO)
     assert page.rate_limit.to_dict() == {"host": "github.com", "remaining": None, "reset_at": None}
 
 
-def test_a_missing_rate_limit_is_null(make: Callable[..., Harness]) -> None:
+def test_a_reset_that_is_not_a_number_is_null_with_the_remaining_kept(
+    make: Callable[..., Harness],
+) -> None:
+    answer = http(
+        200, recording(), headers={"x-ratelimit-remaining": "7", "x-ratelimit-reset": "soon"}
+    )
+    page = make(answer).prs(repo=REPO)
+    assert page.rate_limit.to_dict() == {"host": "github.com", "remaining": 7, "reset_at": None}
+
+
+def test_missing_rate_limit_headers_are_null(make: Callable[..., Harness]) -> None:
+    page = make(recording()).prs(repo=REPO)
+    assert page.rate_limit.remaining is None
+
+
+def test_a_rate_limit_in_the_body_is_not_read(make: Callable[..., Harness]) -> None:
     doc = recording()
-    del doc["data"]["rateLimit"]
+    doc["data"]["rateLimit"] = {"remaining": 1, "resetAt": "2026-10-02T09:00:00Z"}
     page = make(doc).prs(repo=REPO)
     assert page.rate_limit.remaining is None
 
 
 def test_the_lowest_remaining_of_the_pages_is_reported(make: Callable[..., Harness]) -> None:
-    first = page_of(0, 100, more=True, total=130)
-    first["data"]["rateLimit"] = {"remaining": 10, "resetAt": "2026-10-02T09:00:00Z"}
-    second = page_of(100, 30, more=False, total=130)
-    second["data"]["rateLimit"] = {"remaining": 8, "resetAt": "2026-10-02T09:01:00Z"}
+    first = rated(page_of(0, 100, more=True, total=130), remaining=10)
+    second = rated(page_of(100, 30, more=False, total=130), remaining=8, reset=1790931660)
     page = make(first, second).prs(repo=REPO, limit=130)
-    assert page.rate_limit.remaining == 8
+    assert page.rate_limit.to_dict() == {
+        "host": "github.com",
+        "remaining": 8,
+        "reset_at": "2026-10-02T09:01:00Z",
+    }
+
+
+def test_a_label_page_and_a_failed_answer_count_for_the_rate_limit(
+    make: Callable[..., Harness],
+) -> None:
+    doc = recording()
+    node = nodes_of(doc)[0]
+    node["labels"]["pageInfo"] = {"hasNextPage": True, "endCursor": "bGFiZWxz"}
+    more = {
+        "data": {
+            "node": {
+                "number": node["number"],
+                "url": node["url"],
+                "labels": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []},
+            }
+        }
+    }
+    failed = http(502, {"message": "bad"}, headers={"x-ratelimit-remaining": "3"})
+    page = make(rated(doc, remaining=50), failed, rated(more, remaining=4)).prs(repo=REPO)
+    assert page.rate_limit.remaining == 3  # the 502 of the retried label page
 
 
 def test_more_than_100_labels_are_read_to_the_end(make: Callable[..., Harness]) -> None:
@@ -486,7 +534,7 @@ def test_text_from_the_forge_is_sanitized_per_field(make: Callable[..., Harness]
 
 def test_a_node_from_another_host_is_wrong_host_response(make: Callable[..., Harness]) -> None:
     doc = recording()
-    nodes_of(doc)[0]["url"] = "https://evil.example.test/example-org/example-repo/pull/31"
+    nodes_of(doc)[0]["url"] = "https://evil.example.test/user-7/example-repo/pull/31"
     error = failure(make(doc), lambda h: h.prs(repo=REPO))
     assert error.code == "wrong_host_response"
     assert TOKEN not in json.dumps(error.envelope())
@@ -496,7 +544,7 @@ def test_a_node_whose_url_names_another_project_is_wrong_host_response(
     make: Callable[..., Harness],
 ) -> None:
     doc = recording()
-    nodes_of(doc)[0]["url"] = "https://github.com/example-org/elsewhere/pull/31"
+    nodes_of(doc)[0]["url"] = "https://github.com/user-7/elsewhere/pull/31"
     assert failure(make(doc), lambda h: h.prs(repo=REPO)).code == "wrong_host_response"
 
 
@@ -553,7 +601,6 @@ def test_a_node_that_is_not_the_documented_shape_is_upstream_error(
         lambda d: d["data"]["search"]["pageInfo"].update(hasNextPage="no"),
         lambda d: d["data"]["search"]["pageInfo"].update(hasNextPage=True, endCursor=None),
         lambda d: d["data"]["search"]["pageInfo"].update(hasNextPage=True, endCursor="a b"),
-        lambda d: d["data"].update(rateLimit="low"),
     ],
 )
 def test_a_search_that_is_not_the_documented_shape_is_upstream_error(
@@ -574,20 +621,49 @@ def test_a_node_that_is_not_a_pull_request_is_dropped_and_the_page_is_incomplete
     assert page.complete is False
 
 
-def test_a_host_that_ignores_the_state_filter_is_upstream_error(
+def test_a_null_node_is_dropped_and_the_page_is_incomplete(make: Callable[..., Harness]) -> None:
+    doc = recording()
+    nodes: list[Any] = nodes_of(doc)
+    nodes.insert(1, None)
+    page = make(doc).prs(repo=REPO)
+    assert len(page.items) == 3
+    assert page.complete is False
+
+
+def test_a_node_seen_on_an_earlier_page_is_dropped_and_the_list_is_incomplete(
     make: Callable[..., Harness],
 ) -> None:
+    first = page_of(0, 100, more=True, total=130)
+    second = page_of(100, 30, more=False, total=130)
+    nodes_of(second)[0] = copy.deepcopy(nodes_of(first)[99])  # the list moved between pages
+    page = make(first, second).prs(repo=REPO, limit=1000)
+    assert len(page.items) == 129
+    assert len({i.pr_id for i in page.items}) == 129
+    assert page.complete is False
+
+
+def test_an_item_whose_live_state_no_longer_matches_is_dropped_and_incomplete(
+    make: Callable[..., Harness],
+) -> None:
+    # the search index lags: a PR merged seconds ago still matches `is:open`
     doc = recording()
     nodes_of(doc)[0]["state"] = "MERGED"
-    assert failure(make(doc), lambda h: h.prs(repo=REPO)).code == "upstream_error"
+    harness = make(doc)
+    page = harness.prs(repo=REPO)
+    assert [i.number for i in page.items] == [29, 12]
+    assert page.complete is False
+    assert len(harness.script.requests) == 1  # not retried
 
 
-def test_a_host_that_ignores_the_draft_filter_is_upstream_error(
+def test_an_item_whose_live_draft_flag_no_longer_matches_is_dropped_and_incomplete(
     make: Callable[..., Harness],
 ) -> None:
-    assert failure(make(recording()), lambda h: h.prs(repo=REPO, draft=False)).code == (
-        "upstream_error"
-    )
+    harness = make(recording())
+    page = harness.prs(repo=REPO, draft=False)
+    assert all(i.draft is False for i in page.items)
+    assert len(page.items) == 2
+    assert page.complete is False
+    assert len(harness.script.requests) == 1
 
 
 def test_a_host_that_ignores_the_updated_filter_is_upstream_error(
@@ -712,6 +788,22 @@ def test_a_role_that_claims_more_than_the_permission_does_not_grant_write(
     assert result.write_access is False
 
 
+def test_an_author_association_never_decides_access(make: Callable[..., Harness]) -> None:
+    # `author_association` misses people with write access and is never read (interface)
+    doc = permission("read", "read")
+    doc["author_association"] = "OWNER"
+    doc["user"]["author_association"] = "MEMBER"
+    result = make(repo_doc(), doc).access()
+    assert (result.write_access, result.level) == (False, "read")
+
+
+def test_an_answer_with_no_user_is_retried_never_write(make: Callable[..., Harness]) -> None:
+    harness = make(repo_doc(), {"permission": "admin"}, permission("read", "read"))
+    result = harness.access()
+    assert result.write_access is False
+    assert len(harness.script.requests) == 3
+
+
 def test_a_403_is_unknown_never_write(make: Callable[..., Harness]) -> None:
     result = make(repo_doc(), http(403, {"message": "Must have push access"})).access()
     assert result.write_access is None
@@ -776,6 +868,9 @@ def test_a_renamed_repo_uses_the_canonical_path(make: Callable[..., Harness]) ->
         {"permission": "write", "user": {"login": "someone-else"}},
         {"permission": "write", "user": "user-1"},
         {"permission": "write", "user": {"login": 5}},
+        {"permission": "admin"},  # no user: it could be anyone's answer
+        {"permission": "write", "user": {}},
+        {"permission": "write", "user": None},
         [],
         "write",
     ],

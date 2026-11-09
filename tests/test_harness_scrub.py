@@ -115,6 +115,45 @@ def test_gitlab_shapes_are_scrubbed() -> None:
     assert scrub.Scrubber().scrub(out) == out
 
 
+@pytest.mark.parametrize(
+    "leak",
+    [
+        {"repository": {"nameWithOwner": "org-sample/tools"}},
+        {"headRepository": {"nameWithOwner": "jdoe-real/widgets"}},
+        {"url": "https://github.com/org-sample/tools/pull/3"},
+        {"html_url": "https://github.com/jdoe-real"},
+        {"html_url": "https://github.com/orgs/org-sample/teams/x"},
+    ],
+)
+def test_the_check_flags_a_github_owner_that_is_not_a_placeholder(leak: dict[str, object]) -> None:
+    assert scrub.find_unscrubbed(json.dumps(leak)), leak
+
+
+@pytest.mark.parametrize(
+    "fine",
+    [
+        {"repository": {"nameWithOwner": "user-7/tools"}},
+        {"url": "https://github.com/user-7/tools/pull/3"},
+        {"url": "https://github.com/apps/some-app"},
+        {"url": "https://api.github.com/repos/user-1/r"},
+        {"url": "https://ghe.example.test/whatever/r/pull/1"},
+    ],
+)
+def test_a_placeholder_owner_or_an_unchecked_url_passes(fine: dict[str, object]) -> None:
+    assert scrub.find_unscrubbed(json.dumps(fine)) == [], fine
+
+
+def test_a_graphql_owner_is_scrubbed_in_name_with_owner_and_in_the_url() -> None:
+    doc = {
+        "repository": {"nameWithOwner": "org-sample/tools"},
+        "url": "https://github.com/org-sample/tools/pull/3",
+    }
+    out = scrub.Scrubber().scrub(doc)
+    assert "org-sample" not in json.dumps(out)
+    assert out["repository"]["nameWithOwner"].endswith("/tools")
+    assert scrub.find_unscrubbed(json.dumps(out)) == []
+
+
 def test_web_flow_committer_recording_keeps_html_url_and_url_hosts() -> None:
     doc = {
         "commit": {

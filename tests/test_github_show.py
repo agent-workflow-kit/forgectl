@@ -34,10 +34,10 @@ from .harness.forges import FakeForges
 RECORDINGS = Path(__file__).parent / "recordings" / "github" / "show"
 HEAD = "3f8a1c0d5e7b9a2c4d6e8f0a1b3c5d7e9f0a1b2c"
 OTHER = "5555555555555555555555555555555555555555"
-REF = PrRef(host="github.com", backend="github", project="example-org/example-repo", number=7)
+REF = PrRef(host="github.com", backend="github", project="user-7/example-repo", number=7)
 TOKEN = "tok-show-0001-zzzz"
-PR_URL = "https://github.com/example-org/example-repo/pull/7"
-REPO_URL = "https://github.com/example-org/example-repo"
+PR_URL = "https://github.com/user-7/example-repo/pull/7"
+REPO_URL = "https://github.com/user-7/example-repo"
 
 
 def recording(name: str = "open-clean") -> dict[str, Any]:
@@ -184,7 +184,7 @@ def test_show_costs_one_request_with_a_constant_query_and_variables_only(
     (request,) = harness.script.requests
     assert request["query"] == SHOW_QUERY
     assert request["variables"] == {
-        "owner": "example-org",
+        "owner": "user-7",
         "name": "example-repo",
         "number": 7,
         "after": None,
@@ -439,7 +439,7 @@ def checks_page(
     return {
         "data": {
             "repository": {
-                "nameWithOwner": "example-org/example-repo",
+                "nameWithOwner": "user-7/example-repo",
                 "url": REPO_URL,
                 "object": {
                     "oid": commit,
@@ -1200,7 +1200,7 @@ def test_no_token_appears_in_any_error_message(make: Callable[..., Harness]) -> 
 
 def test_an_answer_from_another_host_is_wrong_host_response(make: Callable[..., Harness]) -> None:
     def change(pr: dict[str, Any], _: dict[str, Any]) -> None:
-        pr["url"] = "https://elsewhere.example.test/example-org/example-repo/pull/7"
+        pr["url"] = "https://elsewhere.example.test/user-7/example-repo/pull/7"
 
     error = failure(make, mutated(change))
     assert error.code == "wrong_host_response"
@@ -1220,12 +1220,12 @@ def test_a_renamed_repository_on_the_same_host_is_accepted_with_its_canonical_pa
     make: Callable[..., Harness],
 ) -> None:
     def change(pr: dict[str, Any], repo: dict[str, Any]) -> None:
-        repo["nameWithOwner"] = "example-org/renamed-repo"
-        pr["url"] = "https://github.com/example-org/renamed-repo/pull/7"
+        repo["nameWithOwner"] = "user-7/renamed-repo"
+        pr["url"] = "https://github.com/user-7/renamed-repo/pull/7"
 
     pr = run(make, mutated(change)).pr
-    assert pr.pr == "github.com/example-org/renamed-repo#7"
-    assert pr.url == "https://github.com/example-org/renamed-repo/pull/7"
+    assert pr.pr == "github.com/user-7/renamed-repo#7"
+    assert pr.url == "https://github.com/user-7/renamed-repo/pull/7"
     assert pr.pr_id == "PR_kwDOexample0007"
 
 
@@ -1240,9 +1240,7 @@ def test_a_number_beyond_graphql_int_is_not_found_without_a_call(
     make: Callable[..., Harness],
 ) -> None:
     harness = make(recording())
-    big = PrRef(
-        host="github.com", backend="github", project="example-org/example-repo", number=2**31
-    )
+    big = PrRef(host="github.com", backend="github", project="user-7/example-repo", number=2**31)
     with pytest.raises(ForgectlError) as caught:
         harness.show(big)
     assert caught.value.code == "not_found"
@@ -1567,7 +1565,7 @@ def test_a_malformed_follow_up_page_is_retried(make: Callable[..., Harness]) -> 
 
 def test_a_wrong_host_response_is_not_retried(make: Callable[..., Harness]) -> None:
     def change(pr: dict[str, Any], _: dict[str, Any]) -> None:
-        pr["url"] = "https://elsewhere.example.test/example-org/example-repo/pull/7"
+        pr["url"] = "https://elsewhere.example.test/user-7/example-repo/pull/7"
 
     harness = make(mutated(change))
     with pytest.raises(ForgectlError) as caught:
@@ -1582,13 +1580,13 @@ def test_a_wrong_host_response_is_not_retried(make: Callable[..., Harness]) -> N
 @pytest.mark.parametrize(
     "url",
     [
-        "https://github.com/example-org/example-repo/../../evil/x/pull/7",
-        "https://github.com/example-org/example-repo%2F..%2F/pull/7",
-        "https://github.com/example-org/example-repo/pull/%37",
-        "https://github.com/example-org/example-repo",
-        "https://github.com/example-org/example-repo/issues/7",
-        "https://github.com/example-org/example-repo/pull/999",
-        "https://github.com/example-org/example-repo/pull/7/files",
+        "https://github.com/user-7/example-repo/../../evil/x/pull/7",
+        "https://github.com/user-7/example-repo%2F..%2F/pull/7",
+        "https://github.com/user-7/example-repo/pull/%37",
+        "https://github.com/user-7/example-repo",
+        "https://github.com/user-7/example-repo/issues/7",
+        "https://github.com/user-7/example-repo/pull/999",
+        "https://github.com/user-7/example-repo/pull/7/files",
     ],
 )
 def test_a_pr_url_that_is_not_exactly_the_prs_path_is_upstream_error(
@@ -1618,7 +1616,7 @@ def labels_next_page(node: dict[str, Any]) -> dict[str, Any]:
         {"number": 8, "url": PR_URL},
         {"url": PR_URL},
         {"number": 7, "url": "https://github.com/other-org/other-repo/pull/7"},
-        {"number": 7, "url": "https://github.com/example-org/example-repo/pull/8"},
+        {"number": 7, "url": "https://github.com/user-7/example-repo/pull/8"},
         {"number": 7},
     ],
 )
@@ -1640,7 +1638,7 @@ def test_a_reviews_page_for_another_pr_fails_the_read(make: Callable[..., Harnes
         "data": {
             "node": {
                 "number": 8,
-                "url": "https://github.com/example-org/example-repo/pull/8",
+                "url": "https://github.com/user-7/example-repo/pull/8",
                 "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": []},
             }
         }
@@ -1652,8 +1650,8 @@ def test_a_reviews_page_for_another_pr_fails_the_read(make: Callable[..., Harnes
     ("path", "url"),
     [
         ("other-org/other-repo", REPO_URL),
-        ("example-org/example-repo", "https://github.com/other-org/other-repo"),
-        ("example-org/example-repo", REPO_URL + "/pull/7"),
+        ("user-7/example-repo", "https://github.com/other-org/other-repo"),
+        ("user-7/example-repo", REPO_URL + "/pull/7"),
     ],
 )
 def test_a_checks_read_for_another_repository_fails_the_read(
