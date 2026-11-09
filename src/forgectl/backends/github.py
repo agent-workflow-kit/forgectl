@@ -17,8 +17,8 @@ Logins are the REST form (interface: Logins): GraphQL names a bot ``name``, REST
 and ``gh`` ``app/name``; ``rest_login`` maps by the actor's ``__typename``.
 
 Parsing helpers (``parse_actor``, ``latest_by_reviewer``, ``read_checks``) are module-level so
-``snapshot``, ``reviews`` and ``ci`` (TODO(#12)) reuse them instead of reading these fields a
-second way.
+``snapshot``, ``reviews`` and ``ci`` (``github_snapshot.py``) reuse them instead of reading these
+fields a second way.
 """
 
 from __future__ import annotations
@@ -843,7 +843,9 @@ class GitHubBackend:
         raise not_implemented("prs")  # TODO(#14): GraphQL search, partial results across hosts
 
     def snapshot(self, ref: PrRef) -> m.Snapshot:
-        raise not_implemented("snapshot")  # TODO(#12): reuse SHOW_QUERY, parse_actor, read_checks
+        from . import github_snapshot  # (#12) lazy: that module imports this one
+
+        return github_snapshot.snapshot(self._env, ref, self.get_pr)
 
     def diff(self, ref: PrRef) -> m.DiffResult:
         raise not_implemented("diff")  # TODO(#13)
@@ -855,13 +857,19 @@ class GitHubBackend:
         raise not_implemented("files")  # TODO(#13)
 
     def comments(self, ref: PrRef) -> m.CommentsResult:
-        raise not_implemented("comments")  # TODO(#12)
+        from . import github_snapshot  # (#12)
+
+        return github_snapshot.comments(self._env, ref)
 
     def reviews(self, ref: PrRef) -> m.ReviewsResult:
-        raise not_implemented("reviews")  # TODO(#12): reuse latest_by_reviewer
+        from . import github_snapshot  # (#12)
+
+        return github_snapshot.reviews(self._env, ref, self.get_pr)
 
     def ci(self, ref: PrRef) -> m.CiResult:
-        raise not_implemented("ci")  # TODO(#12): reuse read_checks and the CHECKS_QUERY paging
+        from . import github_snapshot  # (#12)
+
+        return github_snapshot.ci(ref, self.get_pr)
 
     def access(self, repo: RepoRef, user: str) -> m.AccessResult:
         raise not_implemented("access")  # TODO(#14)

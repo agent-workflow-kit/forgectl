@@ -946,7 +946,7 @@ class Snapshot:
     #: `ci.complete` and is added by `to_dict`, never by the caller.
     incomplete: tuple[str, ...] = ()
     #: `snapshot` only; ``None`` serializes as null/null (unknown).
-    #: TODO(#12): fill `Snapshot.head_push` from the host (GitHub: the PR timeline).
+    #: GitHub: `backends/github_snapshot.read_head_push` (the PR timeline, #12).
     #: TODO(#16): fill `Snapshot.head_push` from the host (GitLab: the MR versions).
     head_push: PushTime | None = None
 
