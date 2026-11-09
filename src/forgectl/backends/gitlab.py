@@ -1102,7 +1102,9 @@ class GitLabBackend:
         raise _not_yet("prs", 19)  # TODO(#19): GitLab prs
 
     def snapshot(self, ref: PrRef) -> m.Snapshot:
-        raise _not_yet("snapshot", 16)  # TODO(#16): GitLab snapshot
+        from . import gitlab_snapshot  # (#16) lazy: that module imports this one
+
+        return gitlab_snapshot.snapshot(self, ref)
 
     def diff(self, ref: PrRef) -> m.DiffResult:
         raise _not_yet("diff", 18)  # TODO(#18): GitLab diff
@@ -1114,10 +1116,14 @@ class GitLabBackend:
         raise _not_yet("files", 18)  # TODO(#18): GitLab files
 
     def comments(self, ref: PrRef) -> m.CommentsResult:
-        raise _not_yet("comments", 16)  # TODO(#16): GitLab comments
+        from . import gitlab_snapshot  # (#16)
+
+        return gitlab_snapshot.comments(self, ref)
 
     def reviews(self, ref: PrRef) -> m.ReviewsResult:
-        raise _not_yet("reviews", 16)  # TODO(#16): GitLab reviews
+        from . import gitlab_snapshot  # (#16)
+
+        return gitlab_snapshot.reviews(self, ref)
 
     def ci(self, ref: PrRef) -> m.CiResult:
         raise _not_yet("ci", 17)  # TODO(#17): GitLab ci; `_ci` above is the shared read
