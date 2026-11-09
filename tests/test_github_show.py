@@ -36,6 +36,8 @@ HEAD = "3f8a1c0d5e7b9a2c4d6e8f0a1b3c5d7e9f0a1b2c"
 OTHER = "5555555555555555555555555555555555555555"
 REF = PrRef(host="github.com", backend="github", project="example-org/example-repo", number=7)
 TOKEN = "tok-show-0001-zzzz"
+PR_URL = "https://github.com/example-org/example-repo/pull/7"
+REPO_URL = "https://github.com/example-org/example-repo"
 
 
 def recording(name: str = "open-clean") -> dict[str, Any]:
@@ -437,6 +439,8 @@ def checks_page(
     return {
         "data": {
             "repository": {
+                "nameWithOwner": "example-org/example-repo",
+                "url": REPO_URL,
                 "object": {
                     "oid": commit,
                     "statusCheckRollup": {
@@ -445,7 +449,7 @@ def checks_page(
                             "nodes": nodes,
                         }
                     },
-                }
+                },
             }
         }
     }
@@ -630,9 +634,13 @@ def test_skipped_only_head_has_ci_none_and_clean_is_not_passing(
         ("User", "../etc", None),
         ("User", 7, None),
         ("User", None, None),
+        ("User", "app/user-2", None),  # only a Bot is spelled like a bot
+        ("User", "user-2[bot]", None),
+        ("Mannequin", "app/x", None),
+        (None, "y[bot]", None),
     ],
 )
-def test_login_mapping(typename: str, login: Any, mapped: str | None) -> None:
+def test_login_mapping(typename: str | None, login: Any, mapped: str | None) -> None:
     assert github.rest_login(typename, login) == mapped
 
 
@@ -831,6 +839,8 @@ def test_earlier_reviews_are_paged_oldest_first(make: Callable[..., Harness]) ->
     older = {
         "data": {
             "node": {
+                "number": 7,
+                "url": PR_URL,
                 "reviews": {
                     "pageInfo": {"hasPreviousPage": False, "startCursor": None},
                     "nodes": [
@@ -842,7 +852,7 @@ def test_earlier_reviews_are_paged_oldest_first(make: Callable[..., Harness]) ->
                             "commit": {"oid": HEAD},
                         }
                     ],
-                }
+                },
             }
         }
     }
@@ -998,10 +1008,12 @@ def test_labels_are_paged_and_a_label_is_one_line(make: Callable[..., Harness]) 
     page = {
         "data": {
             "node": {
+                "number": 7,
+                "url": PR_URL,
                 "labels": {
                     "pageInfo": {"hasNextPage": False, "endCursor": None},
                     "nodes": [{"name": "\u202eevil"}],
-                }
+                },
             }
         }
     }
@@ -1085,19 +1097,31 @@ def test_a_null_pull_request_or_repository_is_not_found(make: Callable[..., Harn
         (http(404, {"message": "Not Found"}), "not_found"),
         (http(307, {}), "host_rejected"),
         (http(422, {"message": "no"}), "host_rejected"),
-        (b"", "network_error"),
+        (ProcessResult(pid=1, pgid=1, returncode=4, stdout=b"", stderr=b""), "auth_required"),
     ],
 )
 def test_read_answers_that_are_not_retried(
-    make: Callable[..., Harness], answer: bytes, code: str
+    make: Callable[..., Harness], answer: Any, code: str
 ) -> None:
     harness = make(answer)
     with pytest.raises(ForgectlError) as caught:
         harness.show()
-    assert caught.value.code == code or code == "network_error"
-    if code != "network_error":
-        assert len(harness.script.requests) == 1
-        assert harness.slept.waits == []
+    assert caught.value.code == code
+    assert len(harness.script.requests) == 1
+    assert harness.slept.waits == []
+
+
+def test_rate_limited_every_time_is_rate_limited_with_retry_after(
+    make: Callable[..., Harness],
+) -> None:
+    limited = http(429, {"message": "slow down"}, headers={"retry-after": "1"})
+    harness = make(*[limited] * 4)
+    with pytest.raises(ForgectlError) as caught:
+        harness.show()
+    assert caught.value.code == "rate_limited"
+    assert caught.value.retry_after == 1.0
+    assert len(harness.script.requests) == 4
+    assert harness.slept.waits == [1.0, 2.0, 4.0]
 
 
 def test_a_5xx_is_retried_with_backoff_then_upstream_error(make: Callable[..., Harness]) -> None:
@@ -1106,7 +1130,7 @@ def test_a_5xx_is_retried_with_backoff_then_upstream_error(make: Callable[..., H
         harness.show()
     assert caught.value.code == "upstream_error"
     assert len(harness.script.requests) == 4
-    assert harness.slept.waits == [0.5, 1.0, 2.0]
+    assert harness.slept.waits == [1.0, 2.0, 4.0]
 
 
 def test_a_5xx_then_success_returns_the_pr(make: Callable[..., Harness]) -> None:
@@ -1348,3 +1372,317 @@ def test_every_x_one_line_string_of_the_output_is_one_line(make: Callable[..., H
     lines = [out["title"], out["head"]["ref"], out["base"]["ref"], *out["labels"]]
     lines += [b["detail"] for b in out["blocked_by"] if "detail" in b]
     assert lines and all("\t" not in v and "\n" not in v for v in lines)
+
+
+# -- review round 1: fail-closed gating ----------------
+
+
+@pytest.mark.parametrize("status", [7, True, ["CLEAN"], {"CLEAN": 1}])
+def test_a_merge_state_of_the_wrong_type_is_mergeability_unknown(
+    make: Callable[..., Harness], status: Any
+) -> None:
+    harness = make(with_status(status))
+    read = harness.show()
+    assert len(harness.script.requests) == 3  # read again, like UNKNOWN
+    assert ("mergeability_unknown", None) in codes(read)
+    assert read.pr.is_mergeable is False
+
+
+@pytest.mark.parametrize("mergeable", ["WEIRD", "mergeable", "", 7, None, "missing"])
+def test_an_unmapped_mergeable_is_mergeability_unknown(
+    make: Callable[..., Harness], mergeable: Any
+) -> None:
+    doc = with_status("CLEAN", mergeable)
+    if mergeable == "missing":
+        del pr_of(doc)["mergeable"]
+    harness = make(doc)
+    read = harness.show()
+    assert len(harness.script.requests) == 3
+    assert codes(read) == [("mergeability_unknown", None)]
+    assert read.pr.mergeable is None
+    assert read.pr.is_mergeable is False
+
+
+def review_node(
+    state: str,
+    author: dict[str, Any] | None,
+    *,
+    can_push: bool | None = True,
+    at: str = "2026-10-02T11:00:00Z",
+) -> dict[str, Any]:
+    return {
+        "state": state,
+        "submittedAt": at,
+        "authorCanPushToRepository": can_push,
+        "author": author,
+        "commit": {"oid": HEAD},
+    }
+
+
+@pytest.mark.parametrize("word", ["CHANGES_REQUESTED_V2", "approved", ""])
+def test_a_newer_review_of_an_unknown_state_replaces_the_approval(
+    make: Callable[..., Harness], word: str
+) -> None:
+    def change(pr: dict[str, Any], _: dict[str, Any]) -> None:
+        author = {"__typename": "User", "login": "user-2", "databaseId": 1002}
+        pr["reviews"]["nodes"].append(review_node(word, author))
+
+    read = run(make, mutated(change))
+    assert (read.pr.approvals, read.pr.approvals_at_head) == (0, 0)
+    assert ("changes_requested", None) not in codes(read)
+
+
+def test_a_null_review_state_is_still_upstream_error(make: Callable[..., Harness]) -> None:
+    def change(pr: dict[str, Any], _: dict[str, Any]) -> None:
+        pr["reviews"]["nodes"][0]["state"] = None
+
+    assert failure(make, mutated(change)).code == "upstream_error"
+
+
+def test_a_null_rollup_on_a_later_checks_page_is_upstream_error(
+    make: Callable[..., Harness],
+) -> None:
+    def change(pr: dict[str, Any], _: dict[str, Any]) -> None:
+        ctx = pr["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]
+        ctx["pageInfo"] = {"hasNextPage": True, "endCursor": "cur-1"}
+
+    page = checks_page(HEAD, [])
+    page["data"]["repository"]["object"]["statusCheckRollup"] = None
+    harness = make(mutated(change), page)
+    with pytest.raises(ForgectlError) as caught:
+        harness.show()
+    assert caught.value.code == "upstream_error"
+    assert len(harness.script.requests) == 5  # the show read, then the page and 3 retries
+
+
+@pytest.mark.parametrize("draft", [None, "missing", "true", 1])
+def test_a_draft_flag_that_is_not_a_boolean_is_upstream_error(
+    make: Callable[..., Harness], draft: Any
+) -> None:
+    def change(pr: dict[str, Any], _: dict[str, Any]) -> None:
+        if draft == "missing":
+            del pr["isDraft"]
+        else:
+            pr["isDraft"] = draft
+
+    assert failure(make, mutated(change)).code == "upstream_error"
+
+
+@pytest.mark.parametrize("login", ["missing", None, 7, "no good"])
+def test_a_present_reviewer_without_a_usable_login_still_blocks(
+    make: Callable[..., Harness], login: Any
+) -> None:
+    def change(pr: dict[str, Any], _: dict[str, Any]) -> None:
+        author: dict[str, Any] = {"__typename": "User", "databaseId": 4}
+        if login != "missing":
+            author["login"] = login
+        pr["reviews"]["nodes"].append(review_node("CHANGES_REQUESTED", author))
+
+    assert ("changes_requested", None) in codes(run(make, mutated(change)))
+
+
+def test_an_unnamed_non_writers_changes_request_does_not_block() -> None:
+    author = {"__typename": "User", "login": "no good", "databaseId": 4}
+    table = github.latest_by_reviewer([review_node("CHANGES_REQUESTED", author, can_push=False)])
+    assert table.unnamed_changes_requested is False
+
+
+@pytest.mark.parametrize("later", ["APPROVED", "DISMISSED"])
+def test_an_unnamed_reviewers_later_review_by_the_same_id_clears_its_changes_request(
+    later: str,
+) -> None:
+    author = {"__typename": "User", "login": "no good", "databaseId": 4}
+    table = github.latest_by_reviewer(
+        [
+            review_node("CHANGES_REQUESTED", author, at="2026-10-02T11:00:00Z"),
+            review_node(later, author, at="2026-10-02T12:00:00Z"),
+        ]
+    )
+    assert table.unnamed_changes_requested is False
+
+
+def test_an_unnamed_reviewer_without_an_id_keeps_its_changes_request() -> None:
+    author = {"__typename": "User", "login": "no good"}
+    table = github.latest_by_reviewer(
+        [
+            review_node("CHANGES_REQUESTED", author, at="2026-10-02T11:00:00Z"),
+            review_node("APPROVED", author, at="2026-10-02T12:00:00Z"),
+        ]
+    )
+    assert table.unnamed_changes_requested is True
+
+
+# -- review round 1: retries of malformed answers ----------------
+
+
+def test_one_malformed_answer_then_a_good_one_succeeds(make: Callable[..., Harness]) -> None:
+    def change(pr: dict[str, Any], _: dict[str, Any]) -> None:
+        pr["state"] = 123
+
+    harness = make(mutated(change), recording())
+    assert harness.show().pr.number == 7
+    assert len(harness.script.requests) == 2
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "state",
+        {"data": {"repository": []}},
+    ],
+)
+def test_an_always_malformed_answer_is_upstream_error_after_four_calls(
+    make: Callable[..., Harness], body: Any
+) -> None:
+    if body == "state":
+
+        def change(pr: dict[str, Any], _: dict[str, Any]) -> None:
+            pr["state"] = 123
+
+        body = mutated(change)
+    harness = make(body)
+    with pytest.raises(ForgectlError) as caught:
+        harness.show()
+    assert caught.value.code == "upstream_error"
+    assert len(harness.script.requests) == 4
+
+
+def test_a_malformed_follow_up_page_is_retried(make: Callable[..., Harness]) -> None:
+    def change(pr: dict[str, Any], _: dict[str, Any]) -> None:
+        pr["labels"] = {"pageInfo": {"hasNextPage": True, "endCursor": "lc-1"}, "nodes": []}
+
+    good = {
+        "data": {
+            "node": {
+                "number": 7,
+                "url": PR_URL,
+                "labels": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []},
+            }
+        }
+    }
+    harness = make(mutated(change), {"data": {"node": None}}, good)
+    assert harness.show().pr.labels == ()
+    assert len(harness.script.requests) == 3
+
+
+def test_a_wrong_host_response_is_not_retried(make: Callable[..., Harness]) -> None:
+    def change(pr: dict[str, Any], _: dict[str, Any]) -> None:
+        pr["url"] = "https://elsewhere.example.test/example-org/example-repo/pull/7"
+
+    harness = make(mutated(change))
+    with pytest.raises(ForgectlError) as caught:
+        harness.show()
+    assert caught.value.code == "wrong_host_response"
+    assert len(harness.script.requests) == 1
+
+
+# -- review round 1: untrusted data and routing ----------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/example-org/example-repo/../../evil/x/pull/7",
+        "https://github.com/example-org/example-repo%2F..%2F/pull/7",
+        "https://github.com/example-org/example-repo/pull/%37",
+        "https://github.com/example-org/example-repo",
+        "https://github.com/example-org/example-repo/issues/7",
+        "https://github.com/example-org/example-repo/pull/999",
+        "https://github.com/example-org/example-repo/pull/7/files",
+    ],
+)
+def test_a_pr_url_that_is_not_exactly_the_prs_path_is_upstream_error(
+    make: Callable[..., Harness], url: str
+) -> None:
+    def change(pr: dict[str, Any], _: dict[str, Any]) -> None:
+        pr["url"] = url
+
+    assert failure(make, mutated(change)).code == "upstream_error"
+
+
+def test_a_pr_url_with_one_trailing_slash_is_accepted(make: Callable[..., Harness]) -> None:
+    def change(pr: dict[str, Any], _: dict[str, Any]) -> None:
+        pr["url"] = PR_URL + "/"
+
+    assert run(make, mutated(change)).pr.url == PR_URL
+
+
+def labels_next_page(node: dict[str, Any]) -> dict[str, Any]:
+    node.setdefault("labels", {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []})
+    return {"data": {"node": node}}
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        {"number": 8, "url": PR_URL},
+        {"url": PR_URL},
+        {"number": 7, "url": "https://github.com/other-org/other-repo/pull/7"},
+        {"number": 7, "url": "https://github.com/example-org/example-repo/pull/8"},
+        {"number": 7},
+    ],
+)
+def test_a_follow_up_node_page_for_another_pr_fails_the_read(
+    make: Callable[..., Harness], node: dict[str, Any]
+) -> None:
+    def change(pr: dict[str, Any], _: dict[str, Any]) -> None:
+        pr["labels"]["pageInfo"] = {"hasNextPage": True, "endCursor": "lc-1"}
+
+    error = failure(make, mutated(change), labels_next_page(node))
+    assert error.code in ("upstream_error", "wrong_host_response")
+
+
+def test_a_reviews_page_for_another_pr_fails_the_read(make: Callable[..., Harness]) -> None:
+    def change(pr: dict[str, Any], _: dict[str, Any]) -> None:
+        pr["reviews"]["pageInfo"] = {"hasPreviousPage": True, "startCursor": "rc-1"}
+
+    other = {
+        "data": {
+            "node": {
+                "number": 8,
+                "url": "https://github.com/example-org/example-repo/pull/8",
+                "reviews": {"pageInfo": {"hasPreviousPage": False}, "nodes": []},
+            }
+        }
+    }
+    assert failure(make, mutated(change), other).code == "upstream_error"
+
+
+@pytest.mark.parametrize(
+    ("path", "url"),
+    [
+        ("other-org/other-repo", REPO_URL),
+        ("example-org/example-repo", "https://github.com/other-org/other-repo"),
+        ("example-org/example-repo", REPO_URL + "/pull/7"),
+    ],
+)
+def test_a_checks_read_for_another_repository_fails_the_read(
+    make: Callable[..., Harness], path: str, url: str
+) -> None:
+    def change(pr: dict[str, Any], _: dict[str, Any]) -> None:
+        pr["commits"]["nodes"][0]["commit"]["oid"] = OTHER
+
+    page = checks_page(HEAD, [run_node("x")])
+    page["data"]["repository"]["nameWithOwner"] = path
+    page["data"]["repository"]["url"] = url
+    error = failure(make, mutated(change), page)
+    assert error.code in ("upstream_error", "wrong_host_response")
+
+
+def test_a_cut_detail_never_ends_in_a_broken_marker(make: Callable[..., Harness]) -> None:
+    status = "x" * 97 + "‮" + "y" * 50  # the marker starts at code point 97
+    ((_, detail),) = codes(run(make, with_status(status)))
+    assert detail == "x" * 97
+
+
+def test_a_closed_pr_with_a_stale_auto_merge_request_is_not_armed(
+    make: Callable[..., Harness],
+) -> None:
+    def change(pr: dict[str, Any], _: dict[str, Any]) -> None:
+        pr["state"] = "CLOSED"
+        pr["closedAt"] = "2026-10-03T00:00:00Z"
+        pr["autoMergeRequest"] = {
+            "enabledBy": {"__typename": "User", "login": "user-2", "databaseId": 1002}
+        }
+
+    assert run(make, mutated(change)).pr.auto_merge.to_dict() == {"enabled": False, "by": None}
