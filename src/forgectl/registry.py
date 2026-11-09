@@ -45,7 +45,7 @@ Handler = Callable[[Invocation], dict[str, Any]]
 HANDLERS: dict[str, Handler] = {}
 
 # Modules that register handlers, as dotted names. Each command's issue adds its own line.
-HANDLER_MODULES: tuple[str, ...] = ("forgectl.reads",)
+HANDLER_MODULES: tuple[str, ...] = ("forgectl.reads", "forgectl.listing")
 
 _loaded = False
 
