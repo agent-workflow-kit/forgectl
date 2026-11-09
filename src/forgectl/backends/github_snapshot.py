@@ -50,11 +50,13 @@ from .github import (
     _opt_obj,
     _opt_str,
     _project,
+    _req_sha,
     _req_ts,
     _sha,
     _split,
     _str,
     _ts,
+    _url_path,
     latest_by_reviewer,
     malformed,
     parse_actor,
@@ -182,7 +184,7 @@ REVIEWS_PAGE_QUERY = (
 query ForgectlReviewsPage($id: ID!, $after: String) {{
   {_RATE}
   node(id: $id) {{
-    ... on PullRequest {{ reviews(first: 100, after: $after) {{ ...ReviewsPage }} }}
+    ... on PullRequest {{ number url reviews(first: 100, after: $after) {{ ...ReviewsPage }} }}
   }}
 }}
 """
@@ -195,7 +197,11 @@ THREADS_PAGE_QUERY = (
 query ForgectlThreadsPage($id: ID!, $after: String) {{
   {_RATE}
   node(id: $id) {{
-    ... on PullRequest {{ reviewThreads(first: 100, after: $after) {{ ...ThreadsPage }} }}
+    ... on PullRequest {{
+      number
+      url
+      reviewThreads(first: 100, after: $after) {{ ...ThreadsPage }}
+    }}
   }}
 }}
 """
@@ -209,7 +215,9 @@ THREAD_COMMENTS_PAGE_QUERY = (
 query ForgectlThreadCommentsPage($id: ID!, $after: String) {{
   {_RATE}
   node(id: $id) {{
-    ... on PullRequestReviewThread {{ comments(first: 50, after: $after) {{ ...ThreadComments }} }}
+    ... on PullRequestReviewThread {{
+      pullRequest {{ number url }}
+      comments(first: 50, after: $after) {{ ...ThreadComments }} }}
   }}
 }}
 """
@@ -222,7 +230,11 @@ ISSUE_COMMENTS_PAGE_QUERY = (
 query ForgectlIssueCommentsPage($id: ID!, $after: String) {{
   {_RATE}
   node(id: $id) {{
-    ... on PullRequest {{ comments(first: 100, after: $after) {{ ...IssueCommentsPage }} }}
+    ... on PullRequest {{
+      number
+      url
+      comments(first: 100, after: $after) {{ ...IssueCommentsPage }}
+    }}
   }}
 }}
 """
@@ -239,6 +251,8 @@ query ForgectlRequests($owner: String!, $name: String!, $number: Int!) {{
   repository(owner: $owner, name: $name) {{
     pullRequest(number: $number) {{
       id
+      number
+      url
       headRefOid
       reviewRequests(first: 100) {{
         pageInfo {{ hasNextPage }}
@@ -268,6 +282,8 @@ query ForgectlRequestEvents($id: ID!, $before: String) {{
   {_RATE}
   node(id: $id) {{
     ... on PullRequest {{
+      number
+      url
       timelineItems(last: 100, before: $before, itemTypes: [REVIEW_REQUESTED_EVENT]) {{
         pageInfo {{ hasPreviousPage startCursor }}
         nodes {{
@@ -309,6 +325,8 @@ query ForgectlPush($owner: String!, $name: String!, $number: Int!, $head: GitObj
     object(oid: $head) {{ __typename ... on Commit {{ oid committedDate }} }}
     pullRequest(number: $number) {{
       id
+      number
+      url
       headRefOid
       timelineItems(
         last: 100
@@ -324,6 +342,8 @@ query ForgectlPushPage($id: ID!, $before: String) {{
   {_RATE}
   node(id: $id) {{
     ... on PullRequest {{
+      number
+      url
       timelineItems(
         last: 100
         before: $before
@@ -449,19 +469,59 @@ class _Reader:
     team_fallback: bool = False
     warnings: list[str] = field(default_factory=list)
 
-    def gql(self, query: str, variables: Mapping[str, Any]) -> dict[str, Any]:
+    #: the canonical `owner/repo` of the answers, once one has been verified
+    project: str | None = None
+
+    def gql(
+        self,
+        query: str,
+        variables: Mapping[str, Any],
+        check: Callable[[dict[str, Any]], object] | None = None,
+    ) -> dict[str, Any]:
+        """One query, retried. ``check`` validates the answer inside the retried call, so an
+        answer that is not the documented shape is retried like a 5xx (interface: Reliability)."""
         gateway = self.env.gateway
-        data = dict(self.env.call(lambda: gateway.graphql(self.target, query, variables)).data)
+
+        def once() -> dict[str, Any]:
+            try:
+                data = dict(gateway.graphql(self.target, query, variables).data)
+                if check is not None:
+                    check(data)
+                return data
+            except Malformed as bad:
+                raise malformed(f"{bad}") from None
+            except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+                raise malformed("data") from None
+
+        data = self.env.call(once)
         self.limits.note_graphql(data)
         return data
 
+    def verify_pr(self, holder: object) -> dict[str, Any]:
+        """The ``number url`` of a pull request object: this PR, on this host and project."""
+        pr = _obj(holder, "the pull request")
+        number = pr.get("number")
+        if isinstance(number, bool) or number != self.ref.number or self.project is None:
+            raise Malformed("the pull request number")
+        verify_identity(
+            pr.get("url"), host=self.target.host, project=self.project, secret=self.target.token
+        )
+        _url_path(pr.get("url"), self.project, f"/pull/{self.ref.number}")
+        return pr
+
     def page(
-        self, query: str, variables: Mapping[str, Any], node_type: str, connection: str
+        self, query: str, variables: Mapping[str, Any], connection: str, *, nested: bool = False
     ) -> dict[str, Any]:
-        """One page of a connection of a node read by id: the connection object."""
-        data = self.gql(query, variables)
-        holder = _obj(data.get("node"), node_type)
-        return _obj(holder.get(connection), f"the {connection}")
+        """One page of a connection of a node read by id: the connection object. The node (or,
+        for a review thread, its pull request) is checked to be this PR."""
+
+        def check(data: dict[str, Any]) -> dict[str, Any]:
+            node = _obj(data.get("node"), "the node")
+            self.verify_pr(node.get("pullRequest") if nested else node)
+            return _obj(node.get(connection), f"the {connection}")
+
+        result = self.gql(query, variables, check)
+        return check(result)
 
 
 def _drain(
@@ -528,9 +588,7 @@ def _reviews_from(reader: _Reader, first: dict[str, Any], pr_id: str) -> Reviews
     complete = _drain(
         reader,
         first,
-        lambda cursor: reader.page(
-            REVIEWS_PAGE_QUERY, {"id": pr_id, "after": cursor}, "the pull request", "reviews"
-        ),
+        lambda cursor: reader.page(REVIEWS_PAGE_QUERY, {"id": pr_id, "after": cursor}, "reviews"),
         "reviews",
         nodes.append,
     )
@@ -580,8 +638,8 @@ def _thread(reader: _Reader, raw: object) -> tuple[m.Thread | None, bool]:
         lambda cursor: reader.page(
             THREAD_COMMENTS_PAGE_QUERY,
             {"id": node.get("id"), "after": cursor},
-            "the thread",
             "comments",
+            nested=True,
         ),
         "comments",
         raw_nodes.append,
@@ -677,7 +735,6 @@ def _threads_from(
             lambda cursor: reader.page(
                 THREADS_PAGE_QUERY,
                 {"id": pr_id, "after": cursor},
-                "the pull request",
                 "reviewThreads",
             ),
             "threads",
@@ -691,7 +748,6 @@ def _threads_from(
         lambda cursor: reader.page(
             ISSUE_COMMENTS_PAGE_QUERY,
             {"id": pr_id, "after": cursor},
-            "the pull request",
             "comments",
         ),
         "comments",
@@ -712,27 +768,33 @@ class Parts:
 
 
 def read_parts(reader: _Reader) -> Parts:
+    def check(data: dict[str, Any]) -> dict[str, Any]:
+        repo = _opt_obj(data.get("repository"), "the repository")
+        if repo is None:
+            raise ForgectlError("not_found", "no such repository, or no access to it")
+        pr = _opt_obj(repo.get("pullRequest"), "the pull request")
+        if pr is None:
+            raise ForgectlError("not_found", "no such pull request")
+        reader.project = _project(repo.get("nameWithOwner"), "the repository path")
+        reader.verify_pr(pr)
+        pr_id = _str(pr.get("id"), "the id")
+        if not _ACCOUNT.fullmatch(pr_id):
+            raise Malformed("the id")
+        if _sha(pr.get("headRefOid")) is None:
+            raise Malformed("the head sha")
+        for part in ("reviews", "reviewThreads", "comments"):
+            _obj(pr.get(part), f"the {part}")
+        return pr
+
     data = reader.gql(
-        PARTS_QUERY, {"owner": reader.owner, "name": reader.name, "number": reader.ref.number}
+        PARTS_QUERY,
+        {"owner": reader.owner, "name": reader.name, "number": reader.ref.number},
+        check,
     )
-    repo = _opt_obj(data.get("repository"), "the repository")
-    if repo is None:
-        raise ForgectlError("not_found", "no such repository, or no access to it")
-    pr = _opt_obj(repo.get("pullRequest"), "the pull request")
-    if pr is None:
-        raise ForgectlError("not_found", "no such pull request")
-    project = _project(repo.get("nameWithOwner"), "the repository path")
-    if pr.get("number") != reader.ref.number or isinstance(pr.get("number"), bool):
-        raise Malformed("the pull request number")
-    verify_identity(
-        pr.get("url"), host=reader.target.host, project=project, secret=reader.target.token
-    )
+    pr = check(data)
+    project = reader.project or ""
     pr_id = _str(pr.get("id"), "the id")
-    if not _ACCOUNT.fullmatch(pr_id):
-        raise Malformed("the id")
-    head = _sha(pr.get("headRefOid"))
-    if head is None:
-        raise Malformed("the head sha")
+    head = _req_sha(pr.get("headRefOid"), "the head sha")
     reviews = _reviews_from(reader, _obj(pr.get("reviews"), "the reviews"), pr_id)
     threads = _threads_from(
         reader,
@@ -859,7 +921,7 @@ def read_requests(reader: _Reader, head: str) -> RequestsRead:
     data = dict(result.data)
     reader.limits.note_graphql(data)
     repo = _obj(data.get("repository"), "the repository")
-    pr = _obj(repo.get("pullRequest"), "the pull request")
+    pr = reader.verify_pr(repo.get("pullRequest"))
     if _sha(pr.get("headRefOid")) != head:
         raise _Moved
     pr_id = _str(pr.get("id"), "the id")
@@ -915,7 +977,6 @@ def read_requests(reader: _Reader, head: str) -> RequestsRead:
         connection = reader.page(
             REQUEST_EVENTS_QUERY_NO_TEAMS if reader.team_fallback else REQUEST_EVENTS_QUERY,
             {"id": pr_id, "before": cursor},
-            "the pull request",
             "timelineItems",
         )
     else:
@@ -987,9 +1048,15 @@ def _rest_requested(reader: _Reader) -> tuple[list[_Who], bool, int, bool]:
 def read_head_push(reader: _Reader, head: str) -> m.PushTime | None:
     """When the head was pushed: the newest push event of this head sha on the timeline
     (``push_event``), else the head commit's date (``commit_date``), else None."""
+
+    def check(data: dict[str, Any]) -> None:
+        repo = _obj(data.get("repository"), "the repository")
+        reader.verify_pr(repo.get("pullRequest"))
+
     data = reader.gql(
         PUSH_QUERY,
         {"owner": reader.owner, "name": reader.name, "number": reader.ref.number, "head": head},
+        check,
     )
     repo = _obj(data.get("repository"), "the repository")
     pr = _obj(repo.get("pullRequest"), "the pull request")
@@ -1012,9 +1079,7 @@ def read_head_push(reader: _Reader, head: str) -> m.PushTime | None:
         cursor = _cursor(info.get("startCursor"))
         if info.get("hasPreviousPage") is not True or cursor is None:
             break
-        connection = reader.page(
-            PUSH_PAGE_QUERY, {"id": pr_id, "before": cursor}, "the pull request", "timelineItems"
-        )
+        connection = reader.page(PUSH_PAGE_QUERY, {"id": pr_id, "before": cursor}, "timelineItems")
     if best is not None:
         return m.PushTime(at=best[1], source="push_event")
     commit = _opt_obj(repo.get("object"), "the head commit")
@@ -1149,9 +1214,8 @@ def reviews(env: ReadEnv, ref: PrRef, get_pr: Callable[[PrRef], m.PrRead]) -> m.
 
 def _reviews_once(reader: _Reader, read: m.PrRead) -> m.ReviewsResult:
     pr = read.pr
-    first = reader.page(
-        REVIEWS_PAGE_QUERY, {"id": pr.pr_id, "after": None}, "the pull request", "reviews"
-    )
+    reader.project = pr.repo.partition("/")[2]  # `host/owner/repo`, canonical from show
+    first = reader.page(REVIEWS_PAGE_QUERY, {"id": pr.pr_id, "after": None}, "reviews")
     got = _reviews_from(reader, first, pr.pr_id)
     if got.complete and m.count_approvals(got.latest, pr.author) != pr.approvals:
         raise _Moved

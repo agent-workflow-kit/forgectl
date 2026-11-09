@@ -54,6 +54,29 @@ def pr_of(doc: dict[str, Any]) -> dict[str, Any]:
     return doc["data"]["repository"]["pullRequest"]
 
 
+REPO_IDENTITY = {
+    "nameWithOwner": "example-org/example-repo",
+    "url": "https://github.com/example-org/example-repo",
+}
+IDENTITY = {"number": 7, "url": "https://github.com/example-org/example-repo/pull/7"}
+
+
+def with_identity(doc: Any, op: str = "") -> Any:
+    """A node answer names the PR it is about, as the queries ask it to (`number url`; a review
+    thread names its pull request)."""
+    node = doc.get("data", {}).get("node") if isinstance(doc, dict) else None
+    if not isinstance(node, dict):
+        return doc
+    out = copy.deepcopy(doc)
+    target = out["data"]["node"]
+    if op == "ForgectlThreadCommentsPage":
+        target.setdefault("pullRequest", dict(IDENTITY))
+    else:
+        for key, value in IDENTITY.items():
+            target.setdefault(key, value)
+    return out
+
+
 def operation(request: Mapping[str, Any]) -> str:
     match = re.search(r"query\s+(\w+)", request.get("query", ""))
     return match.group(1) if match else "?"
@@ -81,6 +104,7 @@ class Router:
         answer = queue.pop(0) if len(queue) > 1 else queue[0]
         if callable(answer):
             answer = answer(request)
+        answer = with_identity(answer, op)
         if isinstance(answer, ProcessResult):
             return answer
         raw: bytes = answer if isinstance(answer, bytes) else http(200, answer)
@@ -1256,6 +1280,7 @@ def test_ci_reads_the_head_by_oid_when_the_last_listed_commit_is_not_the_head(
     by_oid = {
         "data": {
             "repository": {
+                **REPO_IDENTITY,
                 "object": {
                     "oid": HEAD,
                     "statusCheckRollup": {
@@ -1273,7 +1298,7 @@ def test_ci_reads_the_head_by_oid_when_the_last_listed_commit_is_not_the_head(
                             ],
                         }
                     },
-                }
+                },
             }
         }
     }
@@ -1292,7 +1317,11 @@ def test_a_check_list_cut_off_is_incomplete_so_never_passing(make: Callable[...,
     forever = {
         "data": {
             "repository": {
-                "object": {"oid": HEAD, "statusCheckRollup": copy.deepcopy(rollup(pr_of(show_doc)))}
+                **REPO_IDENTITY,
+                "object": {
+                    "oid": HEAD,
+                    "statusCheckRollup": copy.deepcopy(rollup(pr_of(show_doc))),
+                },
             }
         }
     }
@@ -1353,3 +1382,71 @@ def test_the_lists_have_a_fixed_order(make: Callable[..., Rig]) -> None:
         "user-7",
         "user-8",
     ]
+
+
+# -- identity of every answer ---------------------------------------------------------------
+
+OTHER_URLS = [
+    "https://evil.example.test/example-org/example-repo/pull/7",
+    "https://github.com/example-org/other-repo/pull/7",
+    "https://github.com/example-org/example-repo/pull/8",
+    "https://github.com/example-org/example-repo/pull/7/../8",
+    "https://github.com/example-org/example-repo/pull/%37",
+]
+
+
+@pytest.mark.parametrize("url", OTHER_URLS)
+def test_a_node_page_of_another_pull_request_is_refused(make: Callable[..., Rig], url: str) -> None:
+    doc = rec("parts")
+    pr_of(doc)["reviews"]["pageInfo"] = {"hasNextPage": True, "endCursor": "Y3Vyc29yOjI="}
+    page = {"data": {"node": {"reviews": pr_of(rec("parts"))["reviews"], "number": 7, "url": url}}}
+    assert failure(make, ForgectlParts=doc, ForgectlReviewsPage=page).code in (
+        "upstream_error",
+        "wrong_host_response",
+    )
+
+
+def test_a_node_page_of_another_number_is_refused(make: Callable[..., Rig]) -> None:
+    doc = rec("parts")
+    pr_of(doc)["reviews"]["pageInfo"] = {"hasNextPage": True, "endCursor": "Y3Vyc29yOjI="}
+    page = {"data": {"node": {"reviews": pr_of(rec("parts"))["reviews"], "number": 9}}}
+    assert failure(make, ForgectlParts=doc, ForgectlReviewsPage=page).code == "upstream_error"
+
+
+def test_a_thread_comments_page_of_another_pull_request_is_refused(
+    make: Callable[..., Rig],
+) -> None:
+    doc = rec("parts")
+    pr_of(doc)["reviewThreads"]["nodes"][0]["comments"]["pageInfo"] = {
+        "hasNextPage": True,
+        "endCursor": "Y3Vyc29yOjQ=",
+    }
+    page = {
+        "data": {
+            "node": {
+                "comments": pr_of(rec("parts"))["reviewThreads"]["nodes"][0]["comments"],
+                "pullRequest": {"number": 8, "url": OTHER_URLS[2]},
+            }
+        }
+    }
+    assert failure(make, ForgectlParts=doc, ForgectlThreadCommentsPage=page).code == (
+        "upstream_error"
+    )
+
+
+@pytest.mark.parametrize("query", ["ForgectlRequests", "ForgectlPush"])
+@pytest.mark.parametrize("url", OTHER_URLS)
+def test_the_requests_and_push_reads_check_their_pull_request(
+    make: Callable[..., Rig], query: str, url: str
+) -> None:
+    doc = rec("requests" if query == "ForgectlRequests" else "push")
+    pr_of(doc)["url"] = url
+    assert failure(make, **{query: doc}).code in ("upstream_error", "wrong_host_response")
+
+
+def test_a_malformed_answer_is_retried_like_a_5xx(make: Callable[..., Rig]) -> None:
+    bad = rec("parts")
+    pr_of(bad)["url"] = OTHER_URLS[2]
+    rig = make(standard(ForgectlParts=[bad, rec("parts")]), retries=1)
+    assert rig.snapshot()["complete"] is True
+    assert rig.router.ops.count("ForgectlParts") == 2

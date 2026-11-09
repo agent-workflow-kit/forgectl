@@ -15,7 +15,7 @@ from .harness import schemas
 from .harness.forges import FakeForges
 from .harness.safety import assert_call_safe
 from .test_github_show import HEAD, TOKEN, recording
-from .test_github_snapshot import SCOPES, pr_of, rec
+from .test_github_snapshot import SCOPES, pr_of, rec, with_identity
 
 PR = "github.com/example-org/example-repo#7"
 
@@ -33,7 +33,9 @@ def script(forges: FakeForges) -> None:
         "ForgectlParts": rec("parts"),
         "ForgectlRequests": rec("requests"),
         "ForgectlPush": rec("push"),
-        "ForgectlReviewsPage": {"data": {"node": {"reviews": pr_of(rec("parts"))["reviews"]}}},
+        "ForgectlReviewsPage": with_identity(
+            {"data": {"node": {"reviews": pr_of(rec("parts"))["reviews"]}}}
+        ),
     }.items():
         forges.answer("gh", "graphql", method="POST", stdin_re=f"query {op}\\b", body=doc)
     forges.answer(
