@@ -182,6 +182,13 @@ def _inside(path: str, root: Path) -> bool:
     return real == base or real.startswith(base + os.sep)
 
 
+def clear_other_xdg(monkeypatch: pytest.MonkeyPatch, *, keep: Mapping[str, Any]) -> None:
+    """Delete every ``XDG_*`` variable not in ``keep`` (``XDG_DATA_DIRS``, ``XDG_SESSION_*``...):
+    nothing of the real session reaches a test."""
+    for name in [n for n in os.environ if n.startswith("XDG_") and n not in keep]:
+        monkeypatch.delenv(name)
+
+
 @pytest.fixture(autouse=True)
 def isolation(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
@@ -210,6 +217,9 @@ def isolation(
         monkeypatch.setenv(name, str(path))
     for name in CLEARED:
         monkeypatch.delenv(name, raising=False)
+    clear_other_xdg(monkeypatch, keep=dirs)
+    for name in [n for n in os.environ if n.startswith("FORGECTL_")]:
+        monkeypatch.delenv(name)  # #4 clears every FORGECTL_* variable, not only the listed ones
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.setattr(tempfile, "tempdir", str(dirs["TMPDIR"]))

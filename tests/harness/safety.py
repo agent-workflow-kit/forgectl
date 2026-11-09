@@ -33,7 +33,7 @@ FIXED_SETTINGS = {
     "GLAB_SEND_TELEMETRY": "false",
     "GLAB_CHECK_UPDATE": "false",
     "GLAB_SHOW_WHATS_NEW": "false",
-    "NO_PROMPT": "1",
+    "GLAB_NO_PROMPT": "1",
 }
 NEVER_PASSED = ("GH_FORCE_TTY", "CLICOLOR_FORCE", "GH_REPO", "GH_HOST")
 BASE_ALLOWED = {
@@ -56,6 +56,10 @@ BASE_ALLOWED = {
     *FIXED_SETTINGS,
 }
 BUS_VARS = {"DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"}
+# Where the bus must stay unused (token mode; stored mode with the caller's own config dir) the
+# child gets this fixed unusable address: gh 2.87.3 dials /run/user/<uid>/bus when no bus
+# variable is set at all, so leaving the variables out is not enough.
+NO_BUS_ADDRESS = "unix:path=/nonexistent/forgectl-no-bus"
 STORED_ONLY = {"GH_CONFIG_DIR", "GLAB_CONFIG_DIR", "XDG_CONFIG_HOME", *BUS_VARS}
 
 Mode = Literal["token", "stored"]
@@ -101,7 +105,8 @@ def assert_call_safe(
     environment value may contain any of their values. ``gitlab_host`` is the expected
     ``GITLAB_HOST`` for a GitLab host other than gitlab.com (default: ``host``), in the form
     ``<host>[:port]<api_prefix>``. ``caller_config_dir`` says the caller set this backend's config
-    dir, so stored-login mode must pass no session bus variable.
+    dir, so stored-login mode must make the session bus unreachable, as token mode does: no
+    ``XDG_RUNTIME_DIR`` and ``DBUS_SESSION_BUS_ADDRESS`` set to ``NO_BUS_ADDRESS``.
     """
     env = call.env
     where = f"{call.backend} {' '.join(call.argv)}"
@@ -133,13 +138,17 @@ def assert_call_safe(
     for name, value in FIXED_SETTINGS.items():
         assert env.get(name) == value, f"{where}: {name}={env.get(name)!r}, want {value!r}"
 
-    allowed = set(BASE_ALLOWED) | set(present)
+    allowed = set(BASE_ALLOWED) | set(present) | {"DBUS_SESSION_BUS_ADDRESS"}
     if mode == "stored":
         allowed |= STORED_ONLY
-        if caller_config_dir:
-            allowed -= BUS_VARS
     else:
         allowed |= {"GH_CONFIG_DIR" if call.backend == "gh" else "GLAB_CONFIG_DIR"}
+    if mode == "token" or caller_config_dir:
+        assert "XDG_RUNTIME_DIR" not in env, f"{where}: XDG_RUNTIME_DIR passed; the bus is unused"
+        bus = env.get("DBUS_SESSION_BUS_ADDRESS")
+        assert bus == NO_BUS_ADDRESS, (
+            f"{where}: DBUS_SESSION_BUS_ADDRESS={bus!r}, want the unusable {NO_BUS_ADDRESS!r}"
+        )
     if call.backend == "glab" and host != "gitlab.com":
         allowed.add("GITLAB_HOST")
     stray = sorted(set(env) - allowed)
@@ -261,4 +270,5 @@ def reference_env(
         config.mkdir(mode=0o700)
         config.chmod(0o700)
         env["GH_CONFIG_DIR" if backend == "gh" else "GLAB_CONFIG_DIR"] = str(config)
+        env["DBUS_SESSION_BUS_ADDRESS"] = NO_BUS_ADDRESS
     return env, cwd

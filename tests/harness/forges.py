@@ -87,6 +87,7 @@ class FakeForges:
         self._rules: list[dict[str, Any]] = []
         self._keyring: dict[str, str] = {}
         self._default: dict[str, Any] | None = None
+        self._options: dict[str, Any] = {"default_bus_socket": str(self.bin_dir / "default-bus")}
         for backend in ("gh", "glab"):
             self._install(backend)
         self._write_script()
@@ -109,7 +110,7 @@ class FakeForges:
     # script ------------------------------------------------------------------------------
 
     def _write_script(self) -> None:
-        script: dict[str, Any] = {"rules": self._rules, "keyring": self._keyring}
+        script: dict[str, Any] = {"rules": self._rules, "keyring": self._keyring, **self._options}
         if self._default is not None:
             script["default"] = self._default
         tmp = self.bin_dir / "script.json.tmp"
@@ -142,9 +143,10 @@ class FakeForges:
         """Script an answer. Rules are tried in order; the first match with uses left wins.
 
         ``redirect`` is a ``Location`` (absolute or relative): the fake follows it as the real
-        programs do (``status`` 301, 302 or 303 turns a POST into a GET without a body, 307 and
-        308 keep both; default 302) and the followed request is matched against the rules again,
-        with ``endpoint`` the new URL's path without its leading slash.
+        programs do (``status`` 301, 302 or 303 turns any method into a GET without a body, 307
+        and 308 keep both, but with a body from stdin are shown, not followed; default 302) and
+        the followed request is matched against the rules again, with ``endpoint`` the new URL's
+        path without its leading slash.
         """
         if redirect is not None and status == 200:
             status = 302
@@ -187,6 +189,21 @@ class FakeForges:
     def keyring_login(self, backend: str, host: str, token: str) -> None:
         """A keyring login: reached only with a session bus variable, and never by ``gh api``."""
         self._keyring[f"{backend}:{host}"] = token
+        self._write_script()
+
+    def default_bus_socket(self, *, present: bool) -> None:
+        """The per-user bus socket the programs dial with no bus variable at all (the fake's
+        stand-in for ``/run/user/<uid>/bus``, private to this test): created or removed."""
+        path = Path(self._options["default_bus_socket"])
+        if present:
+            path.touch()
+        else:
+            path.unlink(missing_ok=True)
+
+    def glab_unauthenticated_without_credential(self) -> None:
+        """glab 1.89.0: with no credential at all it prints a boxed ``Unauthenticated.``, exits
+        1 with nothing on stdout and sends nothing (1.127 sends an anonymous request)."""
+        self._options["glab_1_89_no_credential"] = True
         self._write_script()
 
     @staticmethod

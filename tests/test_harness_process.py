@@ -699,3 +699,16 @@ def test_the_live_gate_hook_marks_only_live_items(monkeypatch: pytest.MonkeyPatc
         fixtures.live_skip_reason(True, {"GITHUB_ACTIONS": "true"}) == "live tests never run in CI"
     )
     assert fixtures.live_skip_reason(True, {}) is None
+
+
+def test_isolation_leaves_only_its_own_xdg_variables(monkeypatch: pytest.MonkeyPatch) -> None:
+    from .harness.fixtures import clear_other_xdg
+
+    private = {"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
+               "XDG_RUNTIME_DIR"}  # fmt: skip
+    assert {n for n in os.environ if n.startswith("XDG_")} <= private
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+    monkeypatch.setenv("XDG_DATA_DIRS", "/usr/share")
+    clear_other_xdg(monkeypatch, keep=dict.fromkeys(private))
+    assert {n for n in os.environ if n.startswith("XDG_")} <= private
+    assert "XDG_CONFIG_HOME" in os.environ
