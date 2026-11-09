@@ -1005,6 +1005,7 @@ def _retry_after(headers: Mapping[str, str]) -> float | None:
 
 def _redact(text: str, secret: str | None) -> str:
     """``text`` with the token and its percent-encoded forms replaced by ``[redacted]``."""
+    # TODO(#7): match lowercase percent-encoded hex too (as hosts.redact_secrets does)
     if not secret or not text:
         return text
     forms = {
@@ -1016,12 +1017,6 @@ def _redact(text: str, secret: str | None) -> str:
     for form in sorted(forms, key=len, reverse=True):
         text = text.replace(form, "[redacted]")
     return text
-
-
-def redact(text: str, secret: str | None) -> str:
-    """The public name of ``_redact``: ``text`` with ``secret`` and its percent-encoded forms
-    as ``[redacted]``."""
-    return _redact(text, secret)
 
 
 def shown_text(text: str, secret: str | None, limit: int = MAX_MESSAGE) -> str:
