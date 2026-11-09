@@ -501,7 +501,7 @@ class GitLabBackend:
             approvals=approvals,
             approvals_at_head=at_head,
         )
-        return m.PrRead(pr=pr, ci=ci)
+        return m.PrRead(pr=pr, ci=ci, latest_by_reviewer=entries)
 
     # -- identity ------------------------------------------------------------------------------
 

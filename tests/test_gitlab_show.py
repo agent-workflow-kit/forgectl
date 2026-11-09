@@ -485,7 +485,7 @@ def test_approvals_left_gives_review_required(fake: FakeGitLab, tmp_path: Path) 
     approvals.update(approvals_left=1, approved=False)
     pr = show(fake, tmp_path, approvals=approvals).pr
     assert pr.review_decision == "review_required" and pr.approvals == 1
-    assert "reviews_required" not in codes(PrRead(pr, show(FakeGitLab(), tmp_path / "b").ci))
+    assert "reviews_required" not in codes(PrRead(pr, show(FakeGitLab(), tmp_path / "b").ci, ()))
 
 
 def test_a_null_approvals_left_reads_none_unless_a_change_was_requested(
