@@ -11,27 +11,35 @@ flags, headers) is marked ``UNVERIFIED``; the live suites (#31, #35) settle it.
   ``MAX_FILE_PAGES`` and reports the list incomplete if it did not end.
 - A file is *cut* when ``too_large`` or ``collapsed`` is true, when it is generated with no
   fragment, when it is ``modified`` with an empty fragment and no path or mode change (what a
-  binary file looks like, UNVERIFIED), or when its last hunk ends before its header's line counts
-  (a fragment cut mid-hunk). ``files`` lists a cut file with null counts; ``diff`` and ``compare``
+  binary file may look like, UNVERIFIED), when it has a ``Binary files ... differ`` notice and is
+  neither added nor deleted, or when its last hunk ends before its header's line counts (a
+  fragment cut mid-hunk). ``files`` lists a cut file with null counts; ``diff`` and ``compare``
   refuse (``too_large``): a partial diff would mislead a reviewer.
 - ``diff`` assembles the text from the fragments, with the header lines forgectl writes (see
   ``render_file``): ``diff --git``, then ``new file mode`` or ``deleted file mode`` or ``old mode``
   and ``new mode``, then ``rename from`` and ``rename to``, then ``---`` and ``+++`` (``/dev/null``
-  for the missing side) when the file has a fragment, then the fragment. There is no ``index``
-  line (no blob shas), no ``similarity index`` (unknown) and no ``Binary files differ`` line (a
-  binary file is not told apart from an empty one). Paths are quoted as git quotes them
+  for the missing side, and a TAB after a path with a space, as git writes it) when the file has
+  a fragment, then the fragment. There is no ``index`` line (no blob shas), no ``similarity
+  index`` (unknown) and no ``Binary files differ`` line (an added or deleted file's binary notice
+  is written as headers only). Paths are quoted as git quotes them
   (``core.quotePath`` on): a path with a quote, backslash, control character or non-ASCII byte is
   in double quotes with C escapes and octal bytes, so a path can never forge a header line.
-- Every fragment is checked hunk by hunk against its header's line counts: a line that is not a
-  hunk header, ``' '``, ``+``, ``-`` or ``\\`` is malformed (``upstream_error``), so fragment text
-  can never open a file section of its own.
+- Every fragment is checked hunk by hunk against its header's line counts and git's hunk grammar
+  (no empty hunk, hunks in order and apart, an added file's old range ``-0,0`` and a deleted
+  file's new range ``+0,0``, only ``\\ No newline at end of file``, once a side, after a line): any
+  other line is malformed (``upstream_error``), so fragment text can never open a file section of
+  its own. A path appears once, except a type change (file to symlink and back): one deleted
+  entry and one added entry, written deleted first.
 - The MR is read before and after (``_stable``): project, head, ``diff_refs`` base, head and start
   must not move, and ``diff_refs.head_sha`` must be the MR's head; one more try, then
   ``upstream_error``.
-- ``compare`` reads the MR first (``not_found``, the canonical path), then ``/repository/compare``
+- ``compare`` reads the MR's identity first (``not_found``, the canonical path; not its
+  ``diff_refs``), then ``/repository/compare``
   in the target project with ``straight=false``, both ways. Commits only forward is ``ahead``,
   only backward ``behind``, both ``diverged``; ``identical`` is equal shas or both answers' own
-  ``compare_same_ref``; anything else is ``unavailable``. ``compare_timeout`` is ``too_large``.
+  ``compare_same_ref``; anything else is ``unavailable``. ``compare_timeout`` is ``too_large``. An
+  answer past forgectl's read cap one way decides from the other: a cut backward answer is
+  ``diverged`` or ``behind``; a cut forward one is ``diverged`` or ``too_large``.
 
 Every answer is checked inside the call ``ReadEnv.call`` retries, so a malformed one is retried
 like a 5xx. Diff text is sanitized with ``sanitize_bytes(..., diff=True)``, which keeps the line
@@ -73,7 +81,12 @@ COMPARE_FILE_CAP = 1000
 #: `/diffs` first shipped in this GitLab version.
 DIFFS_VERSION = (15, 7)
 
-_MODE = re.compile(r"^[0-7]{1,7}\Z")
+#: git's modes; "0", "" or null is a side that does not exist.
+_MODES = frozenset({"100644", "100755", "120000", "160000"})
+_NO_NEWLINE = "\\ No newline at end of file"
+_SIDE = r'(?:/dev/null|"{0}/(?:[^"\\\n]|\\.)*"|{0}/[^\n]*)'
+#: GitLab's text for a binary file (UNVERIFIED): git's one notice line, names as git writes them.
+_BINARY = re.compile(rf"^Binary files {_SIDE.format('a')} and {_SIDE.format('b')} differ\n?\Z")
 _HUNK = re.compile(r"^@@ -([0-9]{1,9})(?:,([0-9]{1,9}))? \+([0-9]{1,9})(?:,([0-9]{1,9}))? @@")
 _COUNT = re.compile(r"^[0-9]{1,9}\Z")
 _OVERFLOW = re.compile(r"^[0-9]{1,9}\+\Z")
@@ -81,6 +94,11 @@ _OVERFLOW = re.compile(r"^[0-9]{1,9}\+\Z")
 
 class _Moved(Exception):
     """The MR's diff shifted under the read: read it all once more."""
+
+
+class _Cut(Exception):
+    """An answer past forgectl's read cap, for a caller that decides what it means (never
+    retried: it is not a ``ForgectlError``)."""
 
 
 # -- the data other issues reuse ---------------------------------------------------------------
@@ -104,7 +122,10 @@ class GitLabFile:
 
     def raw(self) -> RawFile:
         """The shape position validation (TODO(#25)) reads: ``patch`` is None with no usable
-        fragment (binary, cut, rename only), which that rule treats as invalid."""
+        fragment (binary, cut, rename only), which that rule treats as invalid. A ``Binary files
+        ... differ`` notice is no fragment: its ``patch`` is None too, even for an added or
+        deleted file that ``diff`` writes whole (headers only). A type change gives two entries
+        with one ``path`` (deleted, then added)."""
         return RawFile(
             path=self.path,
             previous_path=self.previous_path,
@@ -154,11 +175,12 @@ def _read[T](
     query: tuple[tuple[str, str], ...] = (),
     shape: Any = "object",
     passthrough: frozenset[int] = frozenset(),
-    cut: str | None = None,
+    cut: str | bool | None = None,
 ) -> T:
     """One GET, retried through the backend's ``retry`` (``env.call``). ``check`` validates the
     answer inside the retried call, so a malformed answer is retried like a 5xx. With ``cut`` (a
-    diff), an answer past forgectl's read cap is ``too_large``, never retried."""
+    diff), an answer past forgectl's read cap is ``too_large``, never retried; with ``cut=True``
+    it raises ``_Cut`` for the caller. Without it, it is ``upstream_error`` like any read."""
 
     checked: list[T] = []
 
@@ -170,6 +192,8 @@ def _read[T](
         except AnswerCut:
             if cut is None:
                 raise
+            if cut is True:
+                raise _Cut from None
             raise _too_large(f"{cut} is larger than forgectl's read cap") from None
         checked.append(check(response))  # raises inside the retried call
         return response
@@ -210,6 +234,34 @@ def _changes(raw: Any) -> tuple[int | None, bool]:
     raise _bad("changes_count")
 
 
+def _identity(
+    gl: GitLabBackend, target: Target, number: int, mr: dict[str, Any]
+) -> tuple[int, str]:
+    """``(project_id, canonical)`` of an MR answer: its own web_url, iid and project id."""
+    canonical = gl._canonical_path(mr.get("web_url"), target, number)
+    if _int_id(mr.get("iid"), "iid") != number:
+        raise gl._wrong_host(target, "another merge request number", mr.get("web_url"))
+    project_id = _int_id(mr.get("project_id"), "project_id")
+    if mr.get("target_project_id") is not None and mr["target_project_id"] != project_id:
+        raise _bad("target_project_id")
+    return project_id, canonical
+
+
+def read_mr_identity(gl: GitLabBackend, target: Target, ref: PrRef) -> tuple[int, str]:
+    """The MR's ``(project_id, canonical)`` with the identity chain of ``show`` and the project
+    read, and nothing a diff read needs (``compare`` uses no ``diff_refs``)."""
+    number = int(path_int(ref.number))
+    segments = ["projects", ref.project, "merge_requests", str(number)]
+    project_id, canonical = _read(
+        gl,
+        target,
+        segments,
+        lambda response: _identity(gl, target, number, _obj(response.data, "merge request")),
+    )
+    gl._project(target, project_id, canonical, gl._prefixed(target, canonical))
+    return project_id, canonical
+
+
 def read_mr(gl: GitLabBackend, target: Target, ref: PrRef, *, project_check: bool = True) -> MrPin:
     """The MR with the identity chain of ``show`` (its own web_url, iid and project id; the
     project read when ``project_check``) and its ``diff_refs``, which a diff read needs."""
@@ -218,12 +270,7 @@ def read_mr(gl: GitLabBackend, target: Target, ref: PrRef, *, project_check: boo
 
     def check(response: Response) -> MrPin:
         mr = _obj(response.data, "merge request")
-        canonical = gl._canonical_path(mr.get("web_url"), target, number)
-        if _int_id(mr.get("iid"), "iid") != number:
-            raise gl._wrong_host(target, "another merge request number", mr.get("web_url"))
-        project_id = _int_id(mr.get("project_id"), "project_id")
-        if mr.get("target_project_id") is not None and mr["target_project_id"] != project_id:
-            raise _bad("target_project_id")
+        project_id, canonical = _identity(gl, target, number, mr)
         refs = _obj(mr.get("diff_refs"), "diff_refs")  # null while the host computes the diff
         start = refs.get("start_sha")
         changes, overflow = _changes(mr.get("changes_count"))
@@ -286,11 +333,12 @@ def _path(value: object, what: str) -> str:
 
 
 def _mode(value: object, what: str) -> str | None:
-    if value is None or value == "":
+    """One of git's modes, or None for a side that does not exist ("0", "" or null)."""
+    if value is None or value in ("", "0"):
         return None
-    if not isinstance(value, str) or not _MODE.match(value):
+    if not isinstance(value, str) or value not in _MODES:
         raise _bad(what)
-    return None if int(value, 8) == 0 else value
+    return value
 
 
 def _optional_flag(entry: dict[str, Any], key: str) -> bool:
@@ -299,26 +347,52 @@ def _optional_flag(entry: dict[str, Any], key: str) -> bool:
     return _flag(entry[key], key)
 
 
-def _fragment(text: str) -> tuple[int, int, bool]:
+def _end(start: int, count: int) -> int:
+    """The first line a later hunk may start at: past this one's lines, or past the line an empty
+    range sits after."""
+    return start + (count if count else 1)
+
+
+def _fragment(text: str, status: m.FileStatus) -> tuple[int, int, bool]:
     """``(additions, deletions, whole)`` of a fragment, checked hunk by hunk against its headers'
-    line counts. ``whole`` is False when the text ends inside a hunk (a fragment the host cut). A
-    line that belongs to no hunk is malformed. Lines end at LF only."""
+    line counts and git's grammar: no hunk empty on both sides, each hunk past the one before on
+    both sides, an added file's old range ``-0,0`` and a deleted file's new range ``+0,0``, and
+    only ``\\ No newline at end of file``, at most once a side, right after a line. ``whole`` is
+    False when the text ends inside a hunk (a fragment the host cut). A line that belongs to no
+    hunk is malformed. Lines end at LF only."""
     lines = text.split("\n")
     if lines and lines[-1] == "":
         lines.pop()
     additions = deletions = 0
     old_left = new_left = 0
-    after_line = False
+    old_next = new_next = 0  # the first line the next hunk may start at
+    last = ""  # the marker of the line before, "" after a header or a no-newline line
+    marked: set[str] = set()  # the sides a no-newline line already closed
     for line in lines:
+        if line.startswith("\\"):
+            sides = {" ": {"-", "+"}, "-": {"-"}, "+": {"+"}}.get(last)
+            if line != _NO_NEWLINE or sides is None or sides & marked:
+                raise _bad("diff fragment")
+            marked |= sides
+            last = ""
+            continue
         if old_left == 0 and new_left == 0:
-            if line.startswith("\\") and after_line:
-                continue  # `\ No newline at end of file`
             header = _HUNK.match(line)
             if header is None:
                 raise _bad("diff fragment")
+            old_start, new_start = int(header.group(1)), int(header.group(3))
             old_left = 1 if header.group(2) is None else int(header.group(2))
             new_left = 1 if header.group(4) is None else int(header.group(4))
-            after_line = False
+            if old_left == 0 and new_left == 0:
+                raise _bad("diff fragment")
+            if old_start < old_next or new_start < new_next:
+                raise _bad("diff fragment")
+            if status == "added" and (old_start, header.group(2)) != (0, "0"):
+                raise _bad("diff fragment")
+            if status == "deleted" and (new_start, header.group(4)) != (0, "0"):
+                raise _bad("diff fragment")
+            old_next, new_next = _end(old_start, old_left), _end(new_start, new_left)
+            last = ""
             continue
         marker = line[:1]
         if marker == " ":
@@ -330,15 +404,11 @@ def _fragment(text: str) -> tuple[int, int, bool]:
         elif marker == "+":
             new_left -= 1
             additions += 1
-        elif marker == "\\":
-            if not after_line:
-                raise _bad("diff fragment")
-            continue
         else:
             raise _bad("diff fragment")
         if old_left < 0 or new_left < 0:
             raise _bad("diff fragment")
-        after_line = True
+        last = marker
     return additions, deletions, old_left == 0 and new_left == 0
 
 
@@ -365,19 +435,24 @@ def parse_file(item: object) -> GitLabFile:
         raise _bad("diff") from None
     old_mode = _mode(entry.get("a_mode"), "a_mode")
     new_mode = _mode(entry.get("b_mode"), "b_mode")
+    if (old_mode is None) != added or (new_mode is None) != deleted:
+        raise _bad("file modes")
     host_cut = _optional_flag(entry, "too_large") or _optional_flag(entry, "collapsed")
     additions: int | None = None
     deletions: int | None = None
     whole = True
-    if text and not host_cut:
-        additions, deletions, whole = _fragment(text)
-    fragment = "" if host_cut or not whole else text
+    binary = bool(text) and not host_cut and _BINARY.match(text) is not None
+    if text and not host_cut and not binary:
+        additions, deletions, whole = _fragment(text, status)
+    fragment = "" if host_cut or binary or not whole else text
     if not whole:
         additions = deletions = None
     changed = renamed or (old_mode is not None and new_mode is not None and old_mode != new_mode)
     cut = (
         host_cut
         or not whole
+        # a binary notice proves the content changed; only an added or deleted file is whole
+        or (binary and status not in ("added", "deleted"))
         or (not fragment and _optional_flag(entry, "generated_file"))
         or (not fragment and status == "modified" and not changed)
     )
@@ -394,12 +469,27 @@ def parse_file(item: object) -> GitLabFile:
     )
 
 
+def _repeat(files: list[GitLabFile], found: GitLabFile) -> bool:
+    """Add ``found`` to ``files``; True when its path is already there in a way git never lists.
+    A path is listed once, or twice as a type change (file to symlink and back): one deleted and
+    one added entry, kept together with the deleted one first, as git writes it."""
+    same = [i for i, f in enumerate(files) if f.path == found.path]
+    if not same:
+        files.append(found)
+        return False
+    if len(same) > 1 or {files[same[0]].status, found.status} != {"deleted", "added"}:
+        return True
+    files.insert(same[0] + (found.status == "added"), found)
+    return False
+
+
 def parse_files(items: list[Any], what: str, *, limit: int) -> list[GitLabFile]:
     if len(items) > limit:
         raise _bad(what)
-    files = [parse_file(item) for item in items]
-    if len({f.path for f in files}) != len(files):
-        raise _bad("a list that names a file twice")
+    files: list[GitLabFile] = []
+    for item in items:
+        if _repeat(files, parse_file(item)):
+            raise _bad("a list that names a file twice")
     return files
 
 
@@ -426,11 +516,16 @@ def quote_path(path: str) -> str:
     return "".join(out)
 
 
+def _tab(path: str) -> str:
+    return "\t" if " " in path else ""
+
+
 def render_file(f: GitLabFile) -> str:
     """One file's section of the assembled diff. Order, as git writes it: ``diff --git``; then
     ``new file mode`` (added), ``deleted file mode`` (deleted) or ``old mode`` and ``new mode``
     (a mode change); then ``rename from`` and ``rename to``; then, only with a fragment, ``---``
-    and ``+++`` (``/dev/null`` for the side that does not exist), then the fragment."""
+    and ``+++`` (``/dev/null`` for the side that does not exist; a TAB after a path that has a
+    space), then the fragment."""
     old = f.previous_path if f.previous_path is not None else f.path
     a, b = quote_path(f"a/{old}"), quote_path(f"b/{f.path}")
     lines = [f"diff --git {a} {b}"]
@@ -445,8 +540,9 @@ def render_file(f: GitLabFile) -> str:
     if f.status == "renamed":
         lines += [f"rename from {quote_path(old)}", f"rename to {quote_path(f.path)}"]
     if f.fragment:
-        lines.append(f"--- {'/dev/null' if f.status == 'added' else a}")
-        lines.append(f"+++ {'/dev/null' if f.status == 'deleted' else b}")
+        # git ends a name with a space with a TAB (diff.c), never /dev/null
+        lines.append("--- /dev/null" if f.status == "added" else f"--- {a}{_tab(old)}")
+        lines.append("+++ /dev/null" if f.status == "deleted" else f"+++ {b}{_tab(f.path)}")
     text = "\n".join(lines) + "\n"
     if f.fragment:
         text += f.fragment if f.fragment.endswith("\n") else f.fragment + "\n"
@@ -489,12 +585,16 @@ def _unsupported(gl: GitLabBackend, target: Target) -> ForgectlError:
     )
 
 
-def list_files(gl: GitLabBackend, target: Target, ref: PrRef, mr: MrPin) -> Listing:
+def list_files(
+    gl: GitLabBackend, target: Target, ref: PrRef, mr: MrPin, *, diff: bool = False
+) -> Listing:
     """Every file ``/diffs`` lists, 100 a page, up to ``MAX_FILE_PAGES`` pages. A file on two
-    pages is a list that shifted under the read (``_Moved``)."""
+    pages (other than a type change's two entries) is a list that shifted under the read
+    (``_Moved``). With ``diff``, text past forgectl's read cap is ``too_large``; without it (a
+    list of files) there is no size cap, and a page past the gateway's cap is ``upstream_error``,
+    as on GitHub."""
     segments = [*_mr_segments(ref, mr), "diffs"]
     files: list[GitLabFile] = []
-    seen: set[str] = set()
     size = 0
     for page in range(1, MAX_FILE_PAGES + 1):
 
@@ -521,15 +621,13 @@ def list_files(gl: GitLabBackend, target: Target, ref: PrRef, mr: MrPin) -> List
             query=(("per_page", str(PAGE_SIZE)), ("page", str(page))),
             shape="list",
             passthrough=frozenset({404}),
-            cut="the diff list",
+            cut="the diff list" if diff else None,
         )
         for found in batch:
-            if found.path in seen:
+            if _repeat(files, found):
                 raise _Moved
-            seen.add(found.path)
             size += len(found.fragment) + len(found.path)
-            files.append(found)
-        if size > MAX_STDOUT:
+        if diff and size > MAX_STDOUT:
             raise _too_large("the diff is larger than forgectl's read cap")
         if last:
             return Listing(tuple(files), ended=True, reason=None)
@@ -573,7 +671,7 @@ def diff_result(gl: GitLabBackend, ref: PrRef) -> m.DiffResult:
     target = gl._hosts.target(ref.host)
 
     def fetch(pin: MrPin) -> str:
-        listing = list_files(gl, target, ref, pin)
+        listing = list_files(gl, target, ref, pin, diff=True)
         if not listing.ended or pin.overflow:
             raise _too_large("GitLab's list of this merge request's files may be cut")
         if pin.changes != len(listing.files):
@@ -599,13 +697,27 @@ class _Compared:
     commits: int
     same_ref: bool
     timeout: bool
-    diffs: list[Any]
+    files: list[GitLabFile] | None  # parsed (forward only); None at GitLab's file cap
+    capped: bool  # as many `diffs` as GitLab's cap: the list may be cut
+
+
+#: A comparison answer past forgectl's read cap.
+_CUT = "cut"
 
 
 def _compare_one(
-    gl: GitLabBackend, target: Target, mr: MrPin, from_sha: str, to_sha: str
-) -> _Compared | None:
-    """``/repository/compare`` of the target project, ``straight=false``; None on a 404."""
+    gl: GitLabBackend,
+    target: Target,
+    mr: tuple[int, str],
+    from_sha: str,
+    to_sha: str,
+    *,
+    parse: bool,
+) -> _Compared | None | str:
+    """``/repository/compare`` of the target project, ``straight=false``; None on a 404, ``_CUT``
+    past forgectl's read cap. With ``parse``, the ``diffs`` entries are checked inside the
+    retried call."""
+    project_id, canonical = mr
 
     def check(response: Response) -> _Compared | None:
         if response.status == 404:
@@ -616,7 +728,7 @@ def _compare_one(
             verify_identity(
                 web_url,
                 host=target.host,
-                project=gl._prefixed(target, mr.canonical),
+                project=gl._prefixed(target, canonical),
                 secret=target.token,
             )
         commits = _list(data.get("commits"), "commits")
@@ -626,22 +738,31 @@ def _compare_one(
             head = _obj(data.get("commit"), "commit")
             if _sha(head.get("id"), "commit id") != to_sha:
                 raise _bad("commit")
+        diffs = _list(data.get("diffs"), "diffs")
+        capped = len(diffs) >= COMPARE_FILE_CAP
+        files = None
+        if parse and not capped:
+            files = parse_files(diffs, "diffs", limit=COMPARE_FILE_CAP)
         return _Compared(
             commits=len(commits),
             same_ref=_flag(data.get("compare_same_ref"), "compare_same_ref"),
             timeout=_flag(data.get("compare_timeout"), "compare_timeout"),
-            diffs=_list(data.get("diffs"), "diffs"),
+            files=files,
+            capped=capped,
         )
 
-    return _read(
-        gl,
-        target,
-        ["projects", path_int(mr.project_id), "repository", "compare"],
-        check,
-        query=(("from", from_sha), ("to", to_sha), ("straight", "false")),
-        passthrough=frozenset({404}),
-        cut="this comparison",
-    )
+    try:
+        return _read(
+            gl,
+            target,
+            ["projects", path_int(project_id), "repository", "compare"],
+            check,
+            query=(("from", from_sha), ("to", to_sha), ("straight", "false")),
+            passthrough=frozenset({404}),
+            cut=True,
+        )
+    except _Cut:
+        return _CUT
 
 
 def _compare_status(forward: _Compared, backward: _Compared) -> m.CompareStatus:
@@ -660,31 +781,38 @@ def _compare_status(forward: _Compared, backward: _Compared) -> m.CompareStatus:
 
 def compare_result(gl: GitLabBackend, ref: PrRef, from_sha: str, to_sha: str) -> m.CompareResult:
     target = gl._hosts.target(ref.host)
-    mr = read_mr(gl, target, ref)  # a missing MR is not_found; the canonical path
-    pr = _pr_name(ref, mr)
+    mr = read_mr_identity(gl, target, ref)  # a missing MR is not_found; the canonical path
+    pr = f"{ref.host}/{mr[1]}#{ref.number}"
 
     def result(status: m.CompareStatus, diff: str | None) -> m.CompareResult:
         return m.CompareResult(pr=pr, from_sha=from_sha, to_sha=to_sha, status=status, diff=diff)
 
     if from_sha == to_sha:
         return result("identical", "")
-    forward = _compare_one(gl, target, mr, from_sha, to_sha)
+    forward = _compare_one(gl, target, mr, from_sha, to_sha, parse=True)
     if forward is None:
         return result("unavailable", None)
-    backward = _compare_one(gl, target, mr, to_sha, from_sha)
+    backward = _compare_one(gl, target, mr, to_sha, from_sha, parse=False)
     if backward is None:
         return result("unavailable", None)
-    if forward.timeout or backward.timeout:
+    if any(isinstance(c, _Compared) and c.timeout for c in (forward, backward)):
         raise _too_large("GitLab timed out computing this comparison")
+    if isinstance(backward, str):  # cut: its diffs are never used, so the forward answer decides
+        if isinstance(forward, str):
+            raise _too_large("this comparison is larger than forgectl's read cap")
+        return result("diverged" if forward.commits else "behind", None)
+    if isinstance(forward, str):  # cut: no diff to show, which only an ahead status needs
+        if backward.commits:
+            return result("diverged", None)
+        raise _too_large("this comparison is larger than forgectl's read cap")
     status = _compare_status(forward, backward)
     if status == "identical":
         return result(status, "")
     if status != "ahead":  # behind, diverged: no diff, by the interface
         return result(status, None)
-    if len(forward.diffs) >= COMPARE_FILE_CAP:
+    if forward.capped or forward.files is None:
         raise _too_large("this comparison lists as many files as GitLab's cap")
-    files = parse_files(forward.diffs, "diffs", limit=COMPARE_FILE_CAP)
-    return result("ahead", assemble(files, "this comparison"))
+    return result("ahead", assemble(forward.files, "this comparison"))
 
 
 __all__ = [
@@ -701,6 +829,7 @@ __all__ = [
     "parse_file",
     "quote_path",
     "read_mr",
+    "read_mr_identity",
     "read_raw_files",
     "render_file",
 ]

@@ -114,8 +114,8 @@ def test_the_assembled_diff_text(fake: FakeGitLab, tmp_path: Path) -> None:
         "diff --git a/docs/old name.md b/docs/new name.md\n"
         "rename from docs/old name.md\n"
         "rename to docs/new name.md\n"
-        "--- a/docs/old name.md\n"
-        "+++ b/docs/new name.md\n"
+        "--- a/docs/old name.md\t\n"
+        "+++ b/docs/new name.md\t\n"
         "@@ -1 +1,2 @@\n # Title\n+More text.\n"
         "diff --git a/src/gone.py b/src/gone.py\n"
         "deleted file mode 100755\n"
@@ -318,6 +318,42 @@ GOOD = "@@ -1 +1 @@\n-a\n+b\n"
         entry("a", "@@ -1 +1 @@\n\\ stray first\n-a\n+b\n"),
         entry("a", "plain text\n"),
         entry("a", "@@ -1 +1 @@\n-a\n+b\n-c\n"),
+        # binary forms other than the one-line notice
+        entry("a", "GIT binary patch\nliteral 5\nMcmZ?\n\nliteral 0\nHcmV?d00001\n"),
+        entry("a", "Binary files a/a and b/a differ extra\n"),
+        entry("a", "Binary files a/a and b/a differ\n@@ -1 +1 @@\n-a\n+b\n"),
+        entry("a", "Binary files x/a and y/a differ\n"),
+        # modes: git's set only, and consistent with the new and deleted flags
+        entry("a", "@@ -0,0 +1 @@\n+x\n", new_file=True, a_mode="0", b_mode="0"),
+        {
+            k: v
+            for k, v in entry("a", "@@ -1 +0,0 @@\n-x\n", deleted_file=True, b_mode="0").items()
+            if k != "a_mode"
+        },
+        entry("a", "@@ -0,0 +1 @@\n+x\n", new_file=True),  # added, with an old mode
+        entry("a", "@@ -1 +0,0 @@\n-x\n", deleted_file=True),  # deleted, with a new mode
+        entry("a", b_mode="0"),  # modified with no new mode
+        {**entry("a"), "a_mode": "7"},
+        {**entry("a"), "b_mode": "0100644"},
+        {**entry("a"), "b_mode": "100600"},
+        # hunks outside git's grammar
+        entry("a", "@@ -1 +1 @@\n-a\n\\ No newline\n+b\n"),
+        entry(
+            "a",
+            "@@ -1 +1 @@\n-a\n\\ No newline at end of file\n\\ No newline at end of file\n+b\n",
+        ),
+        entry(
+            "a",
+            "@@ -1,2 +1 @@\n-a\n\\ No newline at end of file\n-b\n"
+            "\\ No newline at end of file\n+c\n",
+        ),
+        entry("a", "@@ -1,0 +1,0 @@\n"),
+        entry("a", "@@ -1 +1 @@\n-a\n+b\n", new_file=True, a_mode="0"),
+        entry("a", "@@ -0 +1 @@\n+b\n", new_file=True, a_mode="0"),
+        entry("a", "@@ -1 +1 @@\n-a\n+b\n", deleted_file=True, b_mode="0"),
+        entry("a", "@@ -1,2 +1,2 @@\n a\n-b\n+c\n@@ -2 +2 @@\n-x\n+y\n"),  # overlap
+        entry("a", "@@ -5 +5 @@\n-a\n+b\n@@ -1 +1 @@\n-c\n+d\n"),  # reordered
+        entry("a", "@@ -1 +5 @@\n-a\n+b\n@@ -3 +1 @@\n-c\n+d\n"),  # new side reordered
     ],
 )
 def test_a_hostile_entry_is_upstream_error(fake: FakeGitLab, tmp_path: Path, bad: Any) -> None:
@@ -527,7 +563,6 @@ def test_diff_refs_of_another_head_than_the_mr_is_never_read(
         {"diff_refs": "x"},
         {"diff_refs": {"base_sha": "short", "head_sha": HEAD}},
         {"sha": "not a sha"},
-        {"iid": 8},
         {"project_id": "101"},
         {"target_project_id": 202},
     ],
@@ -536,7 +571,14 @@ def test_an_mr_answer_that_is_not_usable_is_upstream_error(
     fake: FakeGitLab, tmp_path: Path, changes: dict[str, Any]
 ) -> None:
     backend = setup(fake, tmp_path, mr=mr_doc(**changes))
-    assert raises(lambda: backend.diff(ref())).code in ("upstream_error", "wrong_host_response")
+    assert raises(lambda: backend.diff(ref())).code == "upstream_error"
+
+
+def test_an_mr_answer_of_another_number_is_wrong_host_response(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    backend = setup(fake, tmp_path, mr=mr_doc(iid=8))
+    assert raises(lambda: backend.diff(ref())).code == "wrong_host_response"
 
 
 def test_an_mr_of_another_host_is_wrong_host_response(fake: FakeGitLab, tmp_path: Path) -> None:
@@ -852,3 +894,269 @@ def test_the_recorded_compare_answers_parse(fake: FakeGitLab, tmp_path: Path) ->
     ahead["web_url"] = "https://gitlab.com/user-9/proj/-/compare/a...b"
     result = compare(fake, tmp_path, ahead, recording("compare-empty", "diff"))
     assert result.status == "ahead" and result.diff.startswith("diff --git a/src/widget.py")
+
+
+# -- round 1 review ----------------------------------------------------------------------------
+
+
+def test_files_and_raw_files_have_no_size_cap_but_diff_does(
+    fake: FakeGitLab, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(gd, "MAX_STDOUT", 10)
+    backend = setup(fake, tmp_path)
+    assert backend.files(ref()).files_complete is True
+    _, raw = gd.read_raw_files(backend, ref())
+    assert raw.ended is True and len(raw.files) == 3
+    error = raises(lambda: backend.diff(ref()))
+    assert (error.code, error.reason) == ("refused", "too_large")
+
+
+def cut_reads(backend: GitLabBackend, cut: Any) -> list[str]:
+    """Make the gateway raise AnswerCut on the reads ``cut(segments, query)`` picks."""
+    api = backend._gateway.api
+    attempts: list[str] = []
+
+    def cut_api(target: Any, method: str, segments: Any, **kw: Any) -> Any:
+        if cut(segments, dict(kw.get("query", ()))):
+            attempts.append(segments[-1])
+            raise AnswerCut("upstream_error", "the answer went past the read cap")
+        return api(target, method, segments, **kw)
+
+    backend._gateway.api = cut_api  # type: ignore[method-assign]
+    return attempts
+
+
+def test_a_page_past_the_read_cap_is_upstream_error_for_files(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    backend = setup(fake, tmp_path)
+    cut_reads(backend, lambda segments, _q: segments[-1] == "diffs")
+    error = raises(lambda: backend.files(ref()))
+    assert (error.code, error.reason) == ("upstream_error", None)
+    error = raises(lambda: gd.read_raw_files(backend, ref()))
+    assert (error.code, error.reason) == ("upstream_error", None)
+
+
+@pytest.mark.parametrize(
+    "changes", [{"diff_refs": None}, {"changes_count": "garbage"}, {"sha": None}]
+)
+def test_compare_reads_only_the_mr_identity(
+    fake: FakeGitLab, tmp_path: Path, changes: dict[str, Any]
+) -> None:
+    forward = cmp_doc("2", ["2"], [entry("a.txt")])
+    result = compare(fake, tmp_path, forward, cmp_doc("1", []), mr=mr_doc(**changes))
+    assert result.status == "ahead"
+
+
+@pytest.mark.parametrize("path", ["with space.txt", "trail ", 'q"u te'])
+def test_a_path_with_a_space_ends_its_content_headers_with_a_tab(
+    fake: FakeGitLab, tmp_path: Path, path: str
+) -> None:
+    lines = one(fake, tmp_path, [entry(path)]).diff(ref()).diff.split("\n")
+    a, b = gd.quote_path(f"a/{path}"), gd.quote_path(f"b/{path}")
+    assert lines[1:3] == [f"--- {a}\t", f"+++ {b}\t"]
+
+
+def test_a_path_without_a_space_has_no_tab(fake: FakeGitLab, tmp_path: Path) -> None:
+    lines = one(fake, tmp_path, [entry("plain.txt")]).diff(ref()).diff.split("\n")
+    assert lines[1:3] == ["--- a/plain.txt", "+++ b/plain.txt"]
+
+
+def test_dev_null_never_takes_a_tab(fake: FakeGitLab, tmp_path: Path) -> None:
+    new = entry("x y", "@@ -0,0 +1 @@\n+x\n", new_file=True, a_mode="0")
+    gone = entry("p q", "@@ -1 +0,0 @@\n-x\n", deleted_file=True, b_mode="0")
+    text = one(fake, tmp_path, [new, gone]).diff(ref()).diff
+    assert "--- /dev/null\n+++ b/x y\t\n" in text
+    assert "--- a/p q\t\n+++ /dev/null\n" in text
+
+
+def test_a_malformed_compare_entry_is_retried_inside_the_retried_call(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    calls = {"n": 0}
+
+    def handler(q: dict[str, str]) -> Answer:
+        if (q["from"], q["to"]) != (FROM, TO):
+            return Answer(200, cmp_doc("1", []))
+        calls["n"] += 1
+        diffs = [entry("a", "plain text\n")] if calls["n"] == 1 else [entry("a.txt")]
+        return Answer(200, cmp_doc("2", ["2"], diffs))
+
+    def retry(fn: Any) -> Any:
+        try:
+            return fn()
+        except ForgectlError:
+            return fn()
+
+    backend = setup(fake, tmp_path, retry=retry)
+    fake.on_handler(COMPARE, handler)
+    assert backend.compare(ref(), FROM, TO).status == "ahead"
+    assert calls["n"] == 2
+
+
+NOTICE = "Binary files a/img.png and b/img.png differ\n"
+
+
+@pytest.mark.parametrize(
+    "notice",
+    [NOTICE, NOTICE.rstrip("\n"), 'Binary files "a/caf\\303\\251" and "b/caf\\303\\251" differ'],
+)
+def test_a_modified_binary_notice_is_cut(fake: FakeGitLab, tmp_path: Path, notice: str) -> None:
+    path = "café" if "caf" in notice else "img.png"
+    backend = one(fake, tmp_path, [entry("ok.txt"), entry(path, notice)])
+    error = raises(lambda: backend.diff(ref()))
+    assert (error.code, error.reason) == ("refused", "too_large")
+    by = {f.path: f for f in backend.files(ref()).files}
+    assert (by[path].additions, by[path].deletions) == (None, None)
+    _, raw = gd.read_raw_files(backend, ref())
+    assert {f.path: f.patch for f in raw.files}[path] is None
+
+
+def test_an_added_or_deleted_binary_notice_is_headers_only(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    new = entry("n.png", "Binary files /dev/null and b/n.png differ\n", new_file=True, a_mode="0")
+    gone_notice = "Binary files a/g.png and /dev/null differ"
+    gone = entry("g.png", gone_notice, deleted_file=True, b_mode="0")
+    backend = one(fake, tmp_path, [new, gone])
+    assert backend.diff(ref()).diff == (
+        "diff --git a/n.png b/n.png\nnew file mode 100644\n"
+        "diff --git a/g.png b/g.png\ndeleted file mode 100644\n"
+    )
+    counts = [(f.additions, f.deletions) for f in backend.files(ref()).files]
+    assert counts == [(None, None), (None, None)]
+
+
+@pytest.mark.parametrize(
+    "binary",
+    [
+        entry(
+            "new.png",
+            "Binary files a/old.png and b/new.png differ\n",
+            renamed_file=True,
+            old_path="old.png",
+        ),
+        entry("m.png", "Binary files a/m.png and b/m.png differ\n", b_mode="100755"),
+    ],
+)
+def test_a_renamed_or_mode_changed_binary_notice_is_cut(
+    fake: FakeGitLab, tmp_path: Path, binary: Any
+) -> None:
+    error = raises(lambda: one(fake, tmp_path, [binary]).diff(ref()))
+    assert (error.code, error.reason) == ("refused", "too_large")
+
+
+LINK_GONE = entry(
+    "link",
+    "@@ -1 +0,0 @@\n-target\n\\ No newline at end of file\n",
+    deleted_file=True,
+    a_mode="120000",
+    b_mode="0",
+)
+LINK_NEW = entry("link", "@@ -0,0 +1 @@\n+text\n", new_file=True, a_mode="0")
+LINK_TEXT = (
+    "diff --git a/link b/link\ndeleted file mode 120000\n--- a/link\n+++ /dev/null\n"
+    "@@ -1 +0,0 @@\n-target\n\\ No newline at end of file\n"
+    "diff --git a/link b/link\nnew file mode 100644\n--- /dev/null\n+++ b/link\n"
+    "@@ -0,0 +1 @@\n+text\n"
+)
+
+
+@pytest.mark.parametrize("order", [[LINK_GONE, LINK_NEW], [LINK_NEW, LINK_GONE]])
+def test_a_type_change_on_one_page_is_two_sections(
+    fake: FakeGitLab, tmp_path: Path, order: list[Any]
+) -> None:
+    backend = one(fake, tmp_path, order)
+    assert backend.diff(ref()).diff == LINK_TEXT
+    assert [f.status for f in backend.files(ref()).files] == ["deleted", "added"]
+
+
+def test_a_type_change_split_across_pages_is_two_sections(fake: FakeGitLab, tmp_path: Path) -> None:
+    first = [entry(f"f{i}") for i in range(99)] + [LINK_NEW]
+    backend = setup(fake, tmp_path, pages=[first, [LINK_GONE]], mr=mr_doc(changes_count="101"))
+    text = backend.diff(ref()).diff
+    assert text.endswith(LINK_TEXT)
+    files = backend.files(ref()).files
+    assert [(f.path, f.status) for f in files[-2:]] == [("link", "deleted"), ("link", "added")]
+
+
+@pytest.mark.parametrize(
+    "pair",
+    [
+        [entry("a"), entry("a")],
+        [LINK_GONE, LINK_GONE],
+        [LINK_NEW, LINK_NEW],
+        [LINK_GONE, LINK_NEW, LINK_NEW],
+        [LINK_GONE, entry("link")],
+    ],
+)
+def test_any_other_repeat_of_a_path_is_upstream_error(
+    fake: FakeGitLab, tmp_path: Path, pair: list[Any]
+) -> None:
+    backend = one(fake, tmp_path, pair)
+    assert raises(lambda: backend.files(ref())).code == "upstream_error"
+    assert raises(lambda: backend.diff(ref())).code == "upstream_error"
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        "@@ -1 +1 @@\n-a\n\\ No newline at end of file\n+b\n\\ No newline at end of file\n",
+        "@@ -1 +1 @@\n a\n\\ No newline at end of file\n",
+        "@@ -1,2 +1,2 @@\n a\n-b\n+c\n@@ -3 +3 @@\n-x\n+y\n",  # adjacent hunks
+        "@@ -2,0 +3,2 @@\n+x\n+y\n@@ -3 +6 @@\n-z\n+w\n",  # an insertion, then a change
+    ],
+)
+def test_valid_hunks_still_render(fake: FakeGitLab, tmp_path: Path, fragment: str) -> None:
+    text = one(fake, tmp_path, [entry("a.txt", fragment)]).diff(ref()).diff
+    assert text.endswith(fragment)
+
+
+def test_a_generated_added_file_with_no_fragment_is_cut(fake: FakeGitLab, tmp_path: Path) -> None:
+    gen = entry("gen.txt", "", generated_file=True, new_file=True, a_mode="0")
+    error = raises(lambda: one(fake, tmp_path, [gen]).diff(ref()))
+    assert (error.code, error.reason) == ("refused", "too_large")
+
+
+def cut_compare(fake: FakeGitLab, tmp_path: Path, which: str, other: Any) -> Any:
+    """``compare`` with the ``which`` way cut by forgectl's read cap and ``other`` the answer
+    of the other way."""
+    backend = setup(fake, tmp_path)
+    compare_routes(
+        fake, other if which == "backward" else None, other if which == "forward" else None
+    )
+    cut_reads(
+        backend,
+        lambda segments, q: (
+            segments[-1] == "compare" and (q["from"] == FROM) == (which == "forward")
+        ),
+    )
+    return backend.compare(ref(), FROM, TO)
+
+
+def test_a_cut_backward_answer_with_forward_commits_is_diverged(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    result = cut_compare(fake, tmp_path, "backward", cmp_doc("2", ["2"], [entry("a.txt")]))
+    assert (result.status, result.diff) == ("diverged", None)
+
+
+def test_a_cut_backward_answer_with_no_forward_commits_is_behind(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    result = cut_compare(fake, tmp_path, "backward", cmp_doc("2", []))
+    assert (result.status, result.diff) == ("behind", None)
+
+
+def test_a_cut_forward_answer_with_backward_commits_is_diverged(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    result = cut_compare(fake, tmp_path, "forward", cmp_doc("1", ["1"]))
+    assert (result.status, result.diff) == ("diverged", None)
+
+
+def test_a_cut_forward_answer_with_no_backward_commits_is_too_large(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    error = raises(lambda: cut_compare(fake, tmp_path, "forward", cmp_doc("1", [])))
+    assert (error.code, error.reason) == ("refused", "too_large")
