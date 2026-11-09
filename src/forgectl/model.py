@@ -1221,7 +1221,11 @@ class PrPage:
 @dataclass(frozen=True, slots=True)
 class PrRead:
     """`get_pr`'s answer: the PR and the CI of the same read, so a caller never pairs a PR with
-    checks read at another head."""
+    checks read at another head.
+
+    ``latest_by_reviewer`` is the table ``pr``'s review fields were computed from (not part of
+    ``show``'s output), so a later read of the reviews can be checked to agree with it."""
 
     pr: PR
     ci: CI
+    latest_by_reviewer: tuple[LatestByReviewer, ...]

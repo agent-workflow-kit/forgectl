@@ -27,18 +27,18 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from functools import partial
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from .. import model as m
 from ..errors import ForgectlError
-from ..gateway import Target, verify_identity
+from ..gateway import GraphQLResult, Response, Target, verify_identity
 from ..identifiers import PrRef
 from ..reads import ReadEnv
 from ..sanitize import sanitize_line, sanitize_text
 from .github import (
     _ACTOR_FIELDS,
+    _NODE_ID,
     MAX_PAGES,
     MAX_PR_NUMBER,
     Actor,
@@ -184,7 +184,12 @@ REVIEWS_PAGE_QUERY = (
 query ForgectlReviewsPage($id: ID!, $after: String) {{
   {_RATE}
   node(id: $id) {{
-    ... on PullRequest {{ number url reviews(first: 100, after: $after) {{ ...ReviewsPage }} }}
+    ... on PullRequest {{
+      number
+      url
+      headRefOid
+      reviews(first: 100, after: $after) {{ ...ReviewsPage }}
+    }}
   }}
 }}
 """
@@ -200,6 +205,7 @@ query ForgectlThreadsPage($id: ID!, $after: String) {{
     ... on PullRequest {{
       number
       url
+      headRefOid
       reviewThreads(first: 100, after: $after) {{ ...ThreadsPage }}
     }}
   }}
@@ -216,8 +222,10 @@ query ForgectlThreadCommentsPage($id: ID!, $after: String) {{
   {_RATE}
   node(id: $id) {{
     ... on PullRequestReviewThread {{
-      pullRequest {{ number url }}
-      comments(first: 50, after: $after) {{ ...ThreadComments }} }}
+      id
+      pullRequest {{ number url headRefOid }}
+      comments(first: 50, after: $after) {{ ...ThreadComments }}
+    }}
   }}
 }}
 """
@@ -233,6 +241,7 @@ query ForgectlIssueCommentsPage($id: ID!, $after: String) {{
     ... on PullRequest {{
       number
       url
+      headRefOid
       comments(first: 100, after: $after) {{ ...IssueCommentsPage }}
     }}
   }}
@@ -284,6 +293,7 @@ query ForgectlRequestEvents($id: ID!, $before: String) {{
     ... on PullRequest {{
       number
       url
+      headRefOid
       timelineItems(last: 100, before: $before, itemTypes: [REVIEW_REQUESTED_EVENT]) {{
         pageInfo {{ hasPreviousPage startCursor }}
         nodes {{
@@ -344,6 +354,7 @@ query ForgectlPushPage($id: ID!, $before: String) {{
     ... on PullRequest {{
       number
       url
+      headRefOid
       timelineItems(
         last: 100
         before: $before
@@ -471,6 +482,12 @@ class _Reader:
 
     #: the canonical `owner/repo` of the answers, once one has been verified
     project: str | None = None
+    #: the head every answer must name (from `show`, or the first answer of `comments`)
+    head: str | None = None
+    #: the PR's node id every answer must name, and the only one sent as a later `$id`
+    pr_id: str | None = None
+    #: whether the last call made by ``gql`` failed because its answer was not the documented shape
+    last_malformed: bool = False
 
     def gql(
         self,
@@ -478,19 +495,23 @@ class _Reader:
         variables: Mapping[str, Any],
         check: Callable[[dict[str, Any]], object] | None = None,
     ) -> dict[str, Any]:
-        """One query, retried. ``check`` validates the answer inside the retried call, so an
-        answer that is not the documented shape is retried like a 5xx (interface: Reliability)."""
+        """One query, retried. ``check`` validates the whole answer inside the retried call, so
+        an answer that is not the documented shape is retried like a 5xx (interface:
+        Reliability)."""
         gateway = self.env.gateway
 
         def once() -> dict[str, Any]:
+            self.last_malformed = False
             try:
                 data = dict(gateway.graphql(self.target, query, variables).data)
                 if check is not None:
                     check(data)
                 return data
             except Malformed as bad:
+                self.last_malformed = True
                 raise malformed(f"{bad}") from None
             except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+                self.last_malformed = True
                 raise malformed("data") from None
 
         data = self.env.call(once)
@@ -498,7 +519,9 @@ class _Reader:
         return data
 
     def verify_pr(self, holder: object) -> dict[str, Any]:
-        """The ``number url`` of a pull request object: this PR, on this host and project."""
+        """The ``number url headRefOid`` of a pull request object: this PR, on this host and
+        project, at the head the reading started from. An unreadable head is malformed; a valid
+        other head means the PR moved (``_Moved``)."""
         pr = _obj(holder, "the pull request")
         number = pr.get("number")
         if isinstance(number, bool) or number != self.ref.number or self.project is None:
@@ -507,49 +530,100 @@ class _Reader:
             pr.get("url"), host=self.target.host, project=self.project, secret=self.target.token
         )
         _url_path(pr.get("url"), self.project, f"/pull/{self.ref.number}")
+        head = _req_sha(pr.get("headRefOid"), "the head sha")
+        if self.head is not None and head != self.head:
+            raise _Moved
         return pr
 
+    def verify_id(self, pr: Mapping[str, Any]) -> str:
+        """The PR's node id: the id grammar, and the id `show` read when there is one."""
+        pr_id = _str(pr.get("id"), "the id")
+        if not _NODE_ID.fullmatch(pr_id) or (self.pr_id is not None and pr_id != self.pr_id):
+            raise Malformed("the id")
+        return pr_id
+
     def page(
-        self, query: str, variables: Mapping[str, Any], connection: str, *, nested: bool = False
+        self,
+        query: str,
+        variables: Mapping[str, Any],
+        connection: str,
+        what: str,
+        node_check: Callable[[Any], object],
+        *,
+        seen: frozenset[str] = frozenset(),
+        thread_id: str | None = None,
+        backward: bool = False,
     ) -> dict[str, Any]:
-        """One page of a connection of a node read by id: the connection object. The node (or,
-        for a review thread, its pull request) is checked to be this PR."""
+        """One page of a connection of a node read by id: the connection object, checked whole
+        inside the retried call. The node (or, for a review thread, the thread asked for and its
+        pull request) is checked to be this PR at this head."""
 
         def check(data: dict[str, Any]) -> dict[str, Any]:
             node = _obj(data.get("node"), "the node")
-            self.verify_pr(node.get("pullRequest") if nested else node)
-            return _obj(node.get(connection), f"the {connection}")
+            if thread_id is not None:
+                if node.get("id") != thread_id:
+                    raise Malformed("the review thread")
+                self.verify_pr(node.get("pullRequest"))
+            else:
+                self.verify_pr(node)
+            found = _obj(node.get(connection), f"the {connection}")
+            _page_shape(found, what, node_check, seen, backward=backward)
+            return found
 
         result = self.gql(query, variables, check)
         return check(result)
 
 
-def _drain(
-    reader: _Reader,
-    first: dict[str, Any],
-    nxt: Callable[[str], dict[str, Any]],
+def _page_shape(
+    connection: Mapping[str, Any],
     what: str,
+    node_check: Callable[[Any], object],
+    seen: frozenset[str] | set[str],
+    *,
+    backward: bool = False,
+) -> tuple[bool, str | None]:
+    """Check one page of a connection whole: every node, and the page info. Returns whether
+    another page follows and its cursor. A cursor already used in the same walk is malformed:
+    it would read the same entries twice."""
+    for node in _list(connection.get("nodes"), what):
+        node_check(node)
+    info = _obj(connection.get("pageInfo"), f"the {what} page")
+    more = info.get("hasPreviousPage" if backward else "hasNextPage")
+    if not isinstance(more, bool):
+        raise Malformed(f"the {what} page")
+    if not more:
+        return False, None
+    cursor = _cursor(info.get("startCursor" if backward else "endCursor"))
+    if cursor is None or cursor in seen:
+        raise Malformed(f"the {what} page cursor")
+    return True, cursor
+
+
+def _drain(
+    first: dict[str, Any],
+    nxt: Callable[[str, frozenset[str]], dict[str, Any]],
+    what: str,
+    node_check: Callable[[Any], object],
     take: Callable[[Any], None],
 ) -> bool:
     """Feed every node of a forward-paged connection to ``take``; True when the end was reached.
 
-    ``first`` is the first page; ``nxt(cursor)`` reads the next. A page cap reports False, never a
-    prefix as the whole.
+    ``first`` is the first page; ``nxt(cursor, seen)`` reads the next, refusing a cursor in
+    ``seen``. The page budget is checked before a page is read, so ``MAX_PAGES`` pages cost
+    ``MAX_PAGES`` reads; a page cap reports False, never a prefix as the whole.
     """
+    seen: set[str] = set()
     connection = first
-    for _page in range(MAX_PAGES):
+    for index in range(MAX_PAGES):
+        more, cursor = _page_shape(connection, what, node_check, seen)
         for node in _list(connection.get("nodes"), what):
             take(node)
-        info = _obj(connection.get("pageInfo"), f"the {what} page")
-        more = info.get("hasNextPage")
-        if more is False:
+        if not more or cursor is None:
             return True
-        if more is not True:
-            raise Malformed(f"the {what} page")
-        cursor = _cursor(info.get("endCursor"))
-        if cursor is None:
-            raise Malformed(f"the {what} page cursor")
-        connection = nxt(cursor)
+        if index == MAX_PAGES - 1:
+            return False
+        seen.add(cursor)
+        connection = nxt(cursor, frozenset(seen))
     return False
 
 
@@ -560,7 +634,10 @@ def _drain(
 class ReviewsRead:
     reviews: tuple[m.Review, ...]
     latest: tuple[m.LatestByReviewer, ...]
+    #: every review was read and every one could be shown
     complete: bool
+    #: the review list was read to its end (an unknown state does not clear this)
+    drained: bool
 
 
 def _review(raw: object, index: int) -> tuple[m.Review | None, dict[str, Any], bool]:
@@ -583,15 +660,27 @@ def _review(raw: object, index: int) -> tuple[m.Review | None, dict[str, Any], b
     return review, node, False
 
 
-def _reviews_from(reader: _Reader, first: dict[str, Any], pr_id: str) -> ReviewsRead:
+def _check_review(raw: object) -> None:
+    """Everything a review node is read for: the listed review and its table entry."""
+    _review(raw, 0)
+    latest_by_reviewer([raw])
+
+
+def _reviews_from(reader: _Reader, first: dict[str, Any]) -> ReviewsRead:
     nodes: list[Any] = []
-    complete = _drain(
-        reader,
-        first,
-        lambda cursor: reader.page(REVIEWS_PAGE_QUERY, {"id": pr_id, "after": cursor}, "reviews"),
-        "reviews",
-        nodes.append,
-    )
+
+    def nxt(cursor: str, seen: frozenset[str]) -> dict[str, Any]:
+        return reader.page(
+            REVIEWS_PAGE_QUERY,
+            {"id": reader.pr_id, "after": cursor},
+            "reviews",
+            "reviews",
+            _check_review,
+            seen=seen,
+        )
+
+    drained = _drain(first, nxt, "reviews", _check_review, nodes.append)
+    complete = drained
     reviews: list[m.Review] = []
     for index, raw in enumerate(nodes):
         review, _node, unknown = _review(raw, index)
@@ -601,7 +690,20 @@ def _reviews_from(reader: _Reader, first: dict[str, Any], pr_id: str) -> Reviews
         if review is not None:
             reviews.append(review)
     table = latest_by_reviewer(nodes)
-    return ReviewsRead(tuple(reviews), table.entries, complete)
+    return ReviewsRead(tuple(reviews), table.entries, complete, drained)
+
+
+def _table_key(entry: m.LatestByReviewer) -> tuple[object, ...]:
+    return (entry.login, entry.id, entry.state, entry.commit_sha, entry.can_push)
+
+
+def _same_table(
+    ours: tuple[m.LatestByReviewer, ...], shown: tuple[m.LatestByReviewer, ...]
+) -> bool:
+    """Whether two ``latest_by_reviewer`` tables agree on every account, state, commit and
+    push right (the review time is not compared: ``show`` and this read select the same reviews,
+    so a change shows in the other fields)."""
+    return sorted(map(_table_key, ours), key=repr) == sorted(map(_table_key, shown), key=repr)
 
 
 # -- threads and comments ----------------------------------------------------------------------
@@ -626,27 +728,48 @@ def _comment(raw: object, prefix: str) -> tuple[m.Comment, dict[str, Any]]:
     return comment, node
 
 
+def _check_review_comment(raw: object) -> None:
+    node = _comment(raw, "rc")[1]
+    _opt_obj(node.get("originalCommit"), "a commit")
+
+
+def _check_thread(raw: object) -> None:
+    """Everything a thread node of a page is read for, its first page of comments included."""
+    node = _obj(raw, "a thread")
+    _prefixed("rt", node.get("id"), "a thread id")
+    comments = _obj(node.get("comments"), "the thread's comments")
+    _page_shape(comments, "comments", _check_review_comment, frozenset())
+
+
 def _thread(reader: _Reader, raw: object) -> tuple[m.Thread | None, bool]:
     """A review thread, or None when it holds no submitted comment; and whether it is whole."""
     node = _obj(raw, "a thread")
     thread_id = _prefixed("rt", node.get("id"), "a thread id")
+    raw_id = _str(node.get("id"), "a thread id")
     connection = _obj(node.get("comments"), "the thread's comments")
     raw_nodes: list[Any] = []
-    whole = _drain(
-        reader,
-        connection,
-        lambda cursor: reader.page(
+
+    def nxt(cursor: str, seen: frozenset[str]) -> dict[str, Any]:
+        return reader.page(
             THREAD_COMMENTS_PAGE_QUERY,
-            {"id": node.get("id"), "after": cursor},
+            {"id": raw_id, "after": cursor},
             "comments",
-            nested=True,
-        ),
-        "comments",
-        raw_nodes.append,
-    )
-    parsed = [_comment(raw_comment, "rc") for raw_comment in raw_nodes]
-    # a pending review's comments belong to their author and are not listed
-    parsed = [(c, n) for c, n in parsed if n.get("state") != "PENDING"]
+            "comments",
+            _check_review_comment,
+            seen=seen,
+            thread_id=raw_id,
+        )
+
+    whole = _drain(connection, nxt, "comments", _check_review_comment, raw_nodes.append)
+    parsed: list[tuple[m.Comment, dict[str, Any]]] = []
+    for raw_comment in raw_nodes:
+        comment, comment_node = _comment(raw_comment, "rc")
+        state = comment_node.get("state")
+        if state == "SUBMITTED":
+            parsed.append((comment, comment_node))
+        elif state != "PENDING":  # a pending review's comments belong to their author
+            whole = False  # a state this adapter does not know: never shown as posted
+            reader.env.warn("a review comment of an unknown state was left out")
     if not parsed:
         reader.env.warn("a review thread without a submitted comment was left out")
         return None, whole
@@ -716,7 +839,7 @@ class ThreadsRead:
 
 
 def _threads_from(
-    reader: _Reader, first_threads: dict[str, Any], first_general: dict[str, Any], pr_id: str
+    reader: _Reader, first_threads: dict[str, Any], first_general: dict[str, Any]
 ) -> ThreadsRead:
     threads: list[m.Thread] = []
     whole = True
@@ -728,29 +851,32 @@ def _threads_from(
         if thread is not None:
             threads.append(thread)
 
-    whole = (
-        _drain(
-            reader,
-            first_threads,
-            lambda cursor: reader.page(
-                THREADS_PAGE_QUERY,
-                {"id": pr_id, "after": cursor},
-                "reviewThreads",
-            ),
+    def next_threads(cursor: str, seen: frozenset[str]) -> dict[str, Any]:
+        return reader.page(
+            THREADS_PAGE_QUERY,
+            {"id": reader.pr_id, "after": cursor},
+            "reviewThreads",
             "threads",
-            take_thread,
+            _check_thread,
+            seen=seen,
         )
-        and whole
-    )
-    general = _drain(
-        reader,
-        first_general,
-        lambda cursor: reader.page(
+
+    def next_general(cursor: str, seen: frozenset[str]) -> dict[str, Any]:
+        return reader.page(
             ISSUE_COMMENTS_PAGE_QUERY,
-            {"id": pr_id, "after": cursor},
+            {"id": reader.pr_id, "after": cursor},
             "comments",
-        ),
+            "comments",
+            _comment_general,
+            seen=seen,
+        )
+
+    whole = _drain(first_threads, next_threads, "threads", _check_thread, take_thread) and whole
+    general = _drain(
+        first_general,
+        next_general,
         "comments",
+        _comment_general,
         lambda raw: threads.append(_general_thread(raw)),
     )
     return ThreadsRead(tuple(threads), whole and general)
@@ -768,6 +894,10 @@ class Parts:
 
 
 def read_parts(reader: _Reader) -> Parts:
+    """The parts query. With a project, head and id from `show` already on ``reader`` the answer
+    must name the same; without them (``comments``) the answer's own become the reading's."""
+    expected = reader.project
+
     def check(data: dict[str, Any]) -> dict[str, Any]:
         repo = _opt_obj(data.get("repository"), "the repository")
         if repo is None:
@@ -775,15 +905,19 @@ def read_parts(reader: _Reader) -> Parts:
         pr = _opt_obj(repo.get("pullRequest"), "the pull request")
         if pr is None:
             raise ForgectlError("not_found", "no such pull request")
-        reader.project = _project(repo.get("nameWithOwner"), "the repository path")
+        project = _project(repo.get("nameWithOwner"), "the repository path")
+        if expected is not None and project != expected:
+            raise Malformed("the repository path")
+        reader.project = project
         reader.verify_pr(pr)
-        pr_id = _str(pr.get("id"), "the id")
-        if not _ACCOUNT.fullmatch(pr_id):
-            raise Malformed("the id")
-        if _sha(pr.get("headRefOid")) is None:
-            raise Malformed("the head sha")
-        for part in ("reviews", "reviewThreads", "comments"):
-            _obj(pr.get(part), f"the {part}")
+        reader.verify_id(pr)
+        _page_shape(_obj(pr.get("reviews"), "the reviews"), "reviews", _check_review, frozenset())
+        _page_shape(
+            _obj(pr.get("reviewThreads"), "the threads"), "threads", _check_thread, frozenset()
+        )
+        _page_shape(
+            _obj(pr.get("comments"), "the comments"), "comments", _comment_general, frozenset()
+        )
         return pr
 
     data = reader.gql(
@@ -793,14 +927,15 @@ def read_parts(reader: _Reader) -> Parts:
     )
     pr = check(data)
     project = reader.project or ""
-    pr_id = _str(pr.get("id"), "the id")
+    pr_id = reader.verify_id(pr)
     head = _req_sha(pr.get("headRefOid"), "the head sha")
-    reviews = _reviews_from(reader, _obj(pr.get("reviews"), "the reviews"), pr_id)
+    reader.pr_id = pr_id
+    reader.head = head
+    reviews = _reviews_from(reader, _obj(pr.get("reviews"), "the reviews"))
     threads = _threads_from(
         reader,
         _obj(pr.get("reviewThreads"), "the threads"),
         _obj(pr.get("comments"), "the comments"),
-        pr_id,
     )
     return Parts(pr_id, project, head, reviews, threads)
 
@@ -842,6 +977,11 @@ def _team_login(slug: object) -> str | None:
 _HIDDEN = "hidden"
 _UNNAMED = "unnamed"
 
+#: The reviewer types the fragments read; any other (`EnterpriseTeam`, or one GitHub adds later)
+#: cannot be named. A fragment on a type an older GHES does not know would fail every query.
+_NAMED_TYPES = frozenset({"User", "Bot", "Mannequin", "Team"})
+_TYPENAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
+
 
 def _who(raw: object) -> _Who | str:
     if raw is None:
@@ -861,10 +1001,17 @@ def _who(raw: object) -> _Who | str:
     return _Who("user", actor.login, actor.id)
 
 
+def _unnamed_warning(raw: object) -> str:
+    typename = raw.get("__typename") if isinstance(raw, dict) else None
+    if isinstance(typename, str) and typename not in _NAMED_TYPES and _TYPENAME.fullmatch(typename):
+        return f"a review request of a reviewer type forgectl does not read ({typename}) is absent"
+    return "a review request whose reviewer cannot be named is absent"
+
+
 @dataclass(frozen=True, slots=True)
 class _Event:
     who: _Who
-    instance: str | None
+    instance: str
     at: str | None
 
 
@@ -872,12 +1019,13 @@ def _event(raw: object) -> _Event | None:
     node = _obj(raw, "a timeline item")
     if node.get("__typename") != "ReviewRequestedEvent":
         return None
+    ident = node.get("id")
+    if not isinstance(ident, str) or not _INSTANCE.fullmatch(ident):
+        raise Malformed("a review request event id")
     who = _who(node.get("requestedReviewer"))
     if isinstance(who, str):
         return None
-    ident = node.get("id")
-    instance = ident if isinstance(ident, str) and _INSTANCE.fullmatch(ident) else None
-    return _Event(who, instance, _ts(node.get("createdAt")))
+    return _Event(who, ident, _ts(node.get("createdAt")))
 
 
 def _scope_failure(errors: tuple[Any, ...]) -> bool:
@@ -902,35 +1050,59 @@ class RequestsRead:
     complete: bool
 
 
-def read_requests(reader: _Reader, head: str) -> RequestsRead:
+def _check_requests(reader: _Reader, data: Mapping[str, Any]) -> dict[str, Any]:
+    """Everything the requests answer is read for; the pull request object."""
+    repo = _obj(data.get("repository"), "the repository")
+    pr = reader.verify_pr(repo.get("pullRequest"))
+    reader.verify_id(pr)
+    listed = _obj(pr.get("reviewRequests"), "the review requests")
+    _obj(listed.get("pageInfo"), "the requests page")
+    for raw in _list(listed.get("nodes"), "the review requests"):
+        _who(_obj(raw, "a review request").get("requestedReviewer"))
+    _page_shape(
+        _obj(pr.get("timelineItems"), "the request events"),
+        "request events",
+        _event,
+        frozenset(),
+        backward=True,
+    )
+    return pr
+
+
+def read_requests(reader: _Reader) -> RequestsRead:
     variables = {"owner": reader.owner, "name": reader.name, "number": reader.ref.number}
     gateway = reader.env.gateway
+
+    def ask(query: str, *, allow_errors: bool) -> GraphQLResult:
+        def once() -> GraphQLResult:
+            result = gateway.graphql(reader.target, query, variables, allow_errors=allow_errors)
+            if not result.errors:  # a partial answer is never read: it is sent again
+                _guarded(lambda: _check_requests(reader, dict(result.data)))
+            return result
+
+        return reader.env.call(once)
+
     teams = REQUESTS_QUERY
-    result = reader.env.call(
-        lambda: gateway.graphql(reader.target, teams, variables, allow_errors=True)
-    )
+    result = ask(teams, allow_errors=True)
     if result.errors:
         if _scope_failure(result.errors):
             reader.team_fallback = True
             teams = REQUESTS_QUERY_NO_TEAMS
-            result = reader.env.call(
-                lambda: gateway.graphql(reader.target, teams, variables, allow_errors=True)
-            )
+            result = ask(teams, allow_errors=True)
         if result.errors:  # any other failure is a failed read, with its own classification
-            result = reader.env.call(lambda: gateway.graphql(reader.target, teams, variables))
+            result = ask(teams, allow_errors=False)
     data = dict(result.data)
     reader.limits.note_graphql(data)
-    repo = _obj(data.get("repository"), "the repository")
-    pr = reader.verify_pr(repo.get("pullRequest"))
-    if _sha(pr.get("headRefOid")) != head:
-        raise _Moved
-    pr_id = _str(pr.get("id"), "the id")
+    pr = _check_requests(reader, data)
 
     listed = _obj(pr.get("reviewRequests"), "the review requests")
     complete = (
         _opt_bool(_obj(listed.get("pageInfo"), "the requests page").get("hasNextPage")) is False
     )
     visible = not reader.team_fallback
+    # the GraphQL list leaves a reviewer out: who `requested_reviewers` adds may be that one,
+    # whose events cannot name it either, so it does not keep the event walk going
+    gap = False
     people: list[tuple[_Who, bool | None]] = []
     nodes = _list(listed.get("nodes"), "the review requests")
     for raw in nodes:
@@ -938,10 +1110,14 @@ def read_requests(reader: _Reader, head: str) -> RequestsRead:
         who = _who(node.get("requestedReviewer"))
         if who == _HIDDEN:
             visible = False
+            gap = True
         elif who == _UNNAMED:
             complete = False  # a request that cannot be named is absent from the list
+            gap = True
+            reader.env.warn(_unnamed_warning(node.get("requestedReviewer")))
         elif isinstance(who, _Who):
             people.append((who, _opt_bool(node.get("asCodeOwner"))))
+    required = [who for who, _ in people]
 
     # the REST list: the teams the token could not read, and the check on the count
     rest_who, rest_ok, rest_total, rest_full = _rest_requested(reader)
@@ -952,41 +1128,45 @@ def read_requests(reader: _Reader, head: str) -> RequestsRead:
     for who in rest_who:
         if not any(known.same(who) for known, _ in people):
             people.append((who, None))
+            if not gap:
+                required.append(who)
 
     # instances: the newest event of each reviewer, paging back until every one is found
     latest: list[_Event] = []
-    unfound = [who for who, _ in people]
+    everyone = [who for who, _ in people]
+    seen: set[str] = set()
     connection = _obj(pr.get("timelineItems"), "the request events")
-    for _page in range(MAX_PAGES):
+    for index in range(MAX_PAGES):
+        more, cursor = _page_shape(connection, "request events", _event, seen, backward=True)
         for raw in reversed(_list(connection.get("nodes"), "the request events")):
             event = _event(raw)
-            if event is None:
+            if event is None or any(event.who.same(e.who) for e in latest):
                 continue
-            if any(event.who.same(w) for w in unfound):
+            if any(event.who.same(w) for w in everyone):
                 latest.append(event)
-                unfound = [w for w in unfound if not event.who.same(w)]
-        if not unfound:
+        if all(any(e.who.same(w) for e in latest) for w in required):
             break
-        info = _obj(connection.get("pageInfo"), "the events page")
-        more = info.get("hasPreviousPage")
-        if more is False:
+        if not more or cursor is None:
             break
-        cursor = _cursor(info.get("startCursor"))
-        if more is not True or cursor is None:
-            raise Malformed("the events page")
+        if index == MAX_PAGES - 1:
+            complete = False  # cut off before every reviewer was found
+            break
+        seen.add(cursor)
         connection = reader.page(
             REQUEST_EVENTS_QUERY_NO_TEAMS if reader.team_fallback else REQUEST_EVENTS_QUERY,
-            {"id": pr_id, "before": cursor},
+            {"id": reader.pr_id, "before": cursor},
             "timelineItems",
+            "request events",
+            _event,
+            seen=frozenset(seen),
+            backward=True,
         )
-    else:
-        complete = False
     out: list[m.ReviewRequest] = []
-    seen: list[_Who] = []
+    done: list[_Who] = []
     for who, code_owner in people:
-        if any(who.same(s) for s in seen):
+        if any(who.same(s) for s in done):
             continue
-        seen.append(who)
+        done.append(who)
         event = next((e for e in latest if e.who.same(who)), None)
         out.append(
             m.ReviewRequest(
@@ -1000,26 +1180,7 @@ def read_requests(reader: _Reader, head: str) -> RequestsRead:
     return RequestsRead(tuple(out), visible, complete)
 
 
-def _rest_requested(reader: _Reader) -> tuple[list[_Who], bool, int, bool]:
-    """``GET .../requested_reviewers``: who it names, whether it was read and the token reports
-    its scopes, how many it names, and whether the list is whole."""
-    gateway = reader.env.gateway
-    try:
-        response = reader.env.call(
-            lambda: gateway.api(
-                reader.target,
-                "GET",
-                ["repos", reader.owner, reader.name, "pulls", str(reader.ref.number)]
-                + ["requested_reviewers"],
-                query=[("per_page", "100")],
-                shape="object",
-            )
-        )
-    except ForgectlError as error:
-        if error.code in ("permission_denied", "not_found"):
-            return [], False, 0, True
-        raise
-    reader.limits.note_headers(response.headers)
+def _rest_body(response: Response) -> tuple[list[_Who], bool, int, bool]:
     body = _obj(response.data, "the requested reviewers")
     users = _list(body.get("users"), "the requested users")
     teams = _list(body.get("teams"), "the requested teams")
@@ -1042,65 +1203,148 @@ def _rest_requested(reader: _Reader) -> tuple[list[_Who], bool, int, bool]:
     return who, reports_scopes, len(users) + len(teams), full
 
 
+def _rest_requested(reader: _Reader) -> tuple[list[_Who], bool, int, bool]:
+    """``GET .../requested_reviewers``: who it names, whether it was read and the token reports
+    its scopes, how many it names, and whether the list is whole. The body is checked inside the
+    retried call."""
+    gateway = reader.env.gateway
+
+    def once() -> tuple[Response, tuple[list[_Who], bool, int, bool]]:
+        response = gateway.api(
+            reader.target,
+            "GET",
+            ["repos", reader.owner, reader.name, "pulls", str(reader.ref.number)]
+            + ["requested_reviewers"],
+            query=[("per_page", "100")],
+            shape="object",
+        )
+        return response, _guarded(lambda: _rest_body(response))
+
+    try:
+        response, read = reader.env.call(once)
+    except ForgectlError as error:
+        if error.code in ("permission_denied", "not_found"):
+            return [], False, 0, True
+        raise
+    reader.limits.note_headers(response.headers)
+    return read
+
+
 # -- the head's push time ----------------------------------------------------------------------
 
+#: A host time later than the reading by more than this is not trusted (a clock skew allowance).
+FUTURE_SKEW = timedelta(minutes=5)
 
-def read_head_push(reader: _Reader, head: str) -> m.PushTime | None:
-    """When the head was pushed: the newest push event of this head sha on the timeline
-    (``push_event``), else the head commit's date (``commit_date``), else None."""
 
-    def check(data: dict[str, Any]) -> None:
+def read_head_push(reader: _Reader, head: str, now: Now = utc_now) -> m.PushTime | None:
+    """When the head was pushed, else None (with a warning when an answer could not be read).
+
+    A ``HeadRefForcePushedEvent`` to this head sha gives its ``createdAt``, a host time, as
+    ``push_event``; with none, the newest ``PullRequestCommit`` of this sha gives its committer
+    date as ``push_event``; with neither, the head commit's own date is ``commit_date``. A
+    committer date is chosen by whoever made the commit, so it never wins over a host event, and
+    any time later than the reading plus ``FUTURE_SKEW`` is not trusted (interface: Push time).
+
+    Every page is checked inside its retried call; once the retries are spent on an answer that
+    is not the documented shape, the push time is unknown and the snapshot is not failed. A wrong
+    host stays ``wrong_host_response``; another head is ``_Moved``.
+    """
+    try:
+        return _read_head_push(reader, head, now)
+    except ForgectlError as error:
+        if error.code == "upstream_error" and reader.last_malformed:
+            reader.env.warn("the push time of the head could not be read")
+            return None
+        raise
+
+
+def _read_head_push(reader: _Reader, head: str, now: Now) -> m.PushTime | None:
+    def item(raw: object) -> object:
+        return _push_item(raw, head)
+
+    def check(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         repo = _obj(data.get("repository"), "the repository")
-        reader.verify_pr(repo.get("pullRequest"))
+        pr = reader.verify_pr(repo.get("pullRequest"))
+        reader.verify_id(pr)
+        _opt_obj(repo.get("object"), "the head commit")
+        _page_shape(
+            _obj(pr.get("timelineItems"), "the timeline"),
+            "timeline",
+            item,
+            frozenset(),
+            backward=True,
+        )
+        return repo, pr
 
     data = reader.gql(
         PUSH_QUERY,
         {"owner": reader.owner, "name": reader.name, "number": reader.ref.number, "head": head},
         check,
     )
-    repo = _obj(data.get("repository"), "the repository")
-    pr = _obj(repo.get("pullRequest"), "the pull request")
-    if _sha(pr.get("headRefOid")) != head:
-        raise _Moved
-    pr_id = _str(pr.get("id"), "the id")
-    best: tuple[datetime, str] | None = None
+    repo, pr = check(data)
+    forced: tuple[datetime, str] | None = None
+    committed: tuple[datetime, str] | None = None
+    seen: set[str] = set()
     connection = _obj(pr.get("timelineItems"), "the timeline")
-    for _page in range(MAX_PUSH_PAGES):
+    for index in range(MAX_PUSH_PAGES):
+        more, cursor = _page_shape(connection, "timeline", item, seen, backward=True)
         for raw in _list(connection.get("nodes"), "the timeline"):
-            when = _push_item_time(raw, head)
-            if when is None:
+            found = _push_item(raw, head)
+            if found is None:
                 continue
+            kind, when = found
             parsed = _parse_time(when)
-            if parsed is not None and (best is None or parsed > best[0]):
-                best = (parsed, when)
-        if best is not None:
+            if parsed is None:
+                continue
+            if kind == "forced" and (forced is None or parsed > forced[0]):
+                forced = (parsed, when)
+            elif kind == "commit" and (committed is None or parsed > committed[0]):
+                committed = (parsed, when)
+        if forced is not None or committed is not None:
             break
-        info = _obj(connection.get("pageInfo"), "the timeline page")
-        cursor = _cursor(info.get("startCursor"))
-        if info.get("hasPreviousPage") is not True or cursor is None:
+        if not more or cursor is None or index == MAX_PUSH_PAGES - 1:
             break
-        connection = reader.page(PUSH_PAGE_QUERY, {"id": pr_id, "before": cursor}, "timelineItems")
+        seen.add(cursor)
+        connection = reader.page(
+            PUSH_PAGE_QUERY,
+            {"id": reader.pr_id, "before": cursor},
+            "timelineItems",
+            "timeline",
+            item,
+            seen=frozenset(seen),
+            backward=True,
+        )
+    best = forced or committed
+    found_time: m.PushTime | None = None
+    when_parsed: datetime | None = None
     if best is not None:
-        return m.PushTime(at=best[1], source="push_event")
-    commit = _opt_obj(repo.get("object"), "the head commit")
-    if commit is not None and commit.get("oid") == head:
-        date = _ts(commit.get("committedDate"))
-        if date is not None and _parse_time(date) is not None:
-            return m.PushTime(at=date, source="commit_date")
-    return None
+        when_parsed, found_time = best[0], m.PushTime(at=best[1], source="push_event")
+    else:
+        commit = _opt_obj(repo.get("object"), "the head commit")
+        if commit is not None and commit.get("oid") == head:
+            date = _ts(commit.get("committedDate"))
+            parsed = _parse_time(date) if date is not None else None
+            if date is not None and parsed is not None:
+                when_parsed, found_time = parsed, m.PushTime(at=date, source="commit_date")
+    if when_parsed is not None and when_parsed > now() + FUTURE_SKEW:
+        reader.env.warn("the push time of the head lies in the future and is not trusted")
+        return None
+    return found_time
 
 
-def _push_item_time(raw: object, head: str) -> str | None:
+def _push_item(raw: object, head: str) -> tuple[Literal["forced", "commit"], str] | None:
     node = _obj(raw, "a timeline item")
     kind = node.get("__typename")
     if kind == "HeadRefForcePushedEvent":
         after = _opt_obj(node.get("afterCommit"), "a commit")
-        if after is not None and after.get("oid") == head:
-            return _ts(node.get("createdAt"))
+        when = _ts(node.get("createdAt"))
+        if after is not None and after.get("oid") == head and when is not None:
+            return "forced", when
     elif kind == "PullRequestCommit":
         commit = _opt_obj(node.get("commit"), "a commit")
-        if commit is not None and commit.get("oid") == head:
-            return _ts(commit.get("committedDate"))
+        when = _ts(commit.get("committedDate")) if commit is not None else None
+        if commit is not None and commit.get("oid") == head and when is not None:
+            return "commit", when
     return None
 
 
@@ -1136,36 +1380,48 @@ def _moved() -> ForgectlError:
     )
 
 
-def snapshot(
-    env: ReadEnv, ref: PrRef, get_pr: Callable[[PrRef], m.PrRead], now: Now = utc_now
-) -> m.Snapshot:
+def _twice[T](read: Callable[[], T]) -> T:
+    """``read``, repeated once when the PR moved during it, then ``upstream_error``."""
     for attempt in range(2):
-        reader = _reader(env, ref)
-        read = get_pr(ref)
         try:
-            return _guarded(partial(_snapshot_once, reader, read, now))
+            return _guarded(read)
         except _Moved:
             if attempt == 1:
                 raise _moved() from None
     raise _moved()  # unreachable: the second attempt returns or raises
 
 
+def _from_show(reader: _Reader, read: m.PrRead) -> None:
+    """Every later answer must name the project, head and node id `show` read."""
+    reader.project = read.pr.repo.partition("/")[2]  # `host/owner/repo`, canonical from show
+    reader.head = read.pr.head.sha
+    reader.pr_id = read.pr.pr_id
+
+
+def snapshot(
+    env: ReadEnv, ref: PrRef, get_pr: Callable[[PrRef], m.PrRead], now: Now = utc_now
+) -> m.Snapshot:
+    def once() -> m.Snapshot:
+        reader = _reader(env, ref)
+        read = get_pr(ref)
+        return _snapshot_once(reader, read, now)
+
+    return _twice(once)
+
+
 def _snapshot_once(reader: _Reader, read: m.PrRead, now: Now) -> m.Snapshot:
     pr = read.pr
     head = pr.head.sha
+    _from_show(reader, read)
     parts = read_parts(reader)
     if parts.head_sha != head:
         raise _Moved
-    if parts.reviews.complete and (
-        m.count_approvals(parts.reviews.latest, pr.author) != pr.approvals
-    ):
-        raise _Moved  # a review landed between the two reads
-    requests = read_requests(reader, head)
-    try:
-        head_push = read_head_push(reader, head)
-    except Malformed:
-        reader.env.warn("the push time of the head could not be read")
-        head_push = None
+    # a review that landed between the two reads: `show`'s decision, approvals and blocks would
+    # contradict this table. Only a list read to its end can be compared.
+    if parts.reviews.drained and not _same_table(parts.reviews.latest, read.latest_by_reviewer):
+        raise _Moved
+    requests = read_requests(reader)
+    head_push = read_head_push(reader, head, now)
     incomplete: list[str] = []
     if not requests.complete:
         incomplete.append("review_requests")
@@ -1190,34 +1446,36 @@ def _snapshot_once(reader: _Reader, read: m.PrRead, now: Now) -> m.Snapshot:
 
 
 def comments(env: ReadEnv, ref: PrRef) -> m.CommentsResult:
-    reader = _reader(env, ref)
-    parts = _guarded(lambda: read_parts(reader))
-    return m.CommentsResult(
-        pr=f"{ref.host}/{parts.project}#{ref.number}",
-        head_sha=parts.head_sha,
-        threads=parts.threads.threads,
-        complete=parts.threads.complete,
-    )
+    def once() -> m.CommentsResult:
+        reader = _reader(env, ref)
+        parts = read_parts(reader)
+        return m.CommentsResult(
+            pr=f"{ref.host}/{parts.project}#{ref.number}",
+            head_sha=parts.head_sha,
+            threads=parts.threads.threads,
+            complete=parts.threads.complete,
+        )
+
+    return _twice(once)
 
 
 def reviews(env: ReadEnv, ref: PrRef, get_pr: Callable[[PrRef], m.PrRead]) -> m.ReviewsResult:
-    for attempt in range(2):
+    def once() -> m.ReviewsResult:
         reader = _reader(env, ref)
         read = get_pr(ref)
-        try:
-            return _guarded(partial(_reviews_once, reader, read))
-        except _Moved:
-            if attempt == 1:
-                raise _moved() from None
-    raise _moved()
+        return _reviews_once(reader, read)
+
+    return _twice(once)
 
 
 def _reviews_once(reader: _Reader, read: m.PrRead) -> m.ReviewsResult:
     pr = read.pr
-    reader.project = pr.repo.partition("/")[2]  # `host/owner/repo`, canonical from show
-    first = reader.page(REVIEWS_PAGE_QUERY, {"id": pr.pr_id, "after": None}, "reviews")
-    got = _reviews_from(reader, first, pr.pr_id)
-    if got.complete and m.count_approvals(got.latest, pr.author) != pr.approvals:
+    _from_show(reader, read)
+    first = reader.page(
+        REVIEWS_PAGE_QUERY, {"id": pr.pr_id, "after": None}, "reviews", "reviews", _check_review
+    )
+    got = _reviews_from(reader, first)
+    if got.drained and not _same_table(got.latest, read.latest_by_reviewer):
         raise _Moved
     return m.ReviewsResult(
         pr=pr.pr,

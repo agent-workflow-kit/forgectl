@@ -793,7 +793,7 @@ class GitHubBackend:
             approvals=approvals,
             approvals_at_head=approvals_at_head,
         )
-        return m.PrRead(pr=built, ci=ci)
+        return m.PrRead(pr=built, ci=ci, latest_by_reviewer=table.entries)
 
     # -- parts ---------------------------------------------------------------------------------
 
@@ -858,6 +858,9 @@ class GitHubBackend:
             connection = self._node_page(
                 pages, REVIEWS_QUERY, {"id": pages.node_id, "before": cursor}, "reviews"
             )
+        # TODO(#11): past MAX_PAGES reviews `show` fails, so the `reviews` incomplete path of
+        # `snapshot` and `reviews` (github_snapshot.py) can never be reached; decide whether
+        # show reports a cut-off review list instead.
         raise ForgectlError(
             "upstream_error", "the pull request has more reviews than forgectl reads"
         )

@@ -45,4 +45,4 @@ def test_read_methods_list_matches_the_protocol() -> None:
 
 def test_get_pr_returns_the_pr_and_its_ci_from_one_read() -> None:
     assert get_type_hints(Backend.get_pr)["return"] is m.PrRead
-    assert [f for f in m.PrRead.__dataclass_fields__] == ["pr", "ci"]
+    assert [f for f in m.PrRead.__dataclass_fields__] == ["pr", "ci", "latest_by_reviewer"]

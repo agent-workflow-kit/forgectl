@@ -155,7 +155,7 @@
         "remaining",
         "reset_at"
       ],
-      "description": "From the response headers; each is null where absent. The lowest remaining among the APIs and hosts this command called."
+      "description": "From response headers or the GraphQL `rateLimit` field; each is null where absent. The lowest remaining among the APIs and hosts this command called."
     },
     "exit_code": {
       "enum": [

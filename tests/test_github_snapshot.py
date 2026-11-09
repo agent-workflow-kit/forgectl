@@ -58,12 +58,16 @@ REPO_IDENTITY = {
     "nameWithOwner": "example-org/example-repo",
     "url": "https://github.com/example-org/example-repo",
 }
-IDENTITY = {"number": 7, "url": "https://github.com/example-org/example-repo/pull/7"}
+IDENTITY = {
+    "number": 7,
+    "url": "https://github.com/example-org/example-repo/pull/7",
+    "headRefOid": HEAD,
+}
 
 
-def with_identity(doc: Any, op: str = "") -> Any:
-    """A node answer names the PR it is about, as the queries ask it to (`number url`; a review
-    thread names its pull request)."""
+def with_identity(doc: Any, op: str = "", request: Mapping[str, Any] | None = None) -> Any:
+    """A node answer names the PR it is about, as the queries ask it to (`number url
+    headRefOid`; a review thread names itself and its pull request)."""
     node = doc.get("data", {}).get("node") if isinstance(doc, dict) else None
     if not isinstance(node, dict):
         return doc
@@ -71,6 +75,7 @@ def with_identity(doc: Any, op: str = "") -> Any:
     target = out["data"]["node"]
     if op == "ForgectlThreadCommentsPage":
         target.setdefault("pullRequest", dict(IDENTITY))
+        target.setdefault("id", ((request or {}).get("variables") or {}).get("id"))
     else:
         for key, value in IDENTITY.items():
             target.setdefault(key, value)
@@ -104,12 +109,36 @@ class Router:
         answer = queue.pop(0) if len(queue) > 1 else queue[0]
         if callable(answer):
             answer = answer(request)
-        answer = with_identity(answer, op)
+        answer = with_identity(answer, op, request)
         if isinstance(answer, ProcessResult):
             return answer
         raw: bytes = answer if isinstance(answer, bytes) else http(200, answer)
         code = 0 if raw.startswith(b"HTTP/2.0 2") and b'"errors"' not in raw else 1
         return ProcessResult(pid=1, pgid=1, returncode=code, stdout=raw, stderr=b"")
+
+
+def endless(doc: dict[str, Any]) -> Callable[[Mapping[str, Any]], dict[str, Any]]:
+    """An answer that always has one more page, each with a cursor never given before (a
+    repeated cursor is malformed)."""
+    count = iter(range(1_000_000))
+
+    def fresh(value: Any) -> Any:
+        if isinstance(value, dict):
+            out = {k: fresh(v) for k, v in value.items()}
+            info = out.get("pageInfo")
+            if isinstance(info, dict):
+                for more, cursor in (
+                    ("hasNextPage", "endCursor"),
+                    ("hasPreviousPage", "startCursor"),
+                ):
+                    if info.get(more) is True:
+                        info[cursor] = f"Y3Vyc29y{next(count)}"
+            return out
+        if isinstance(value, list):
+            return [fresh(v) for v in value]
+        return value
+
+    return lambda _request: fresh(doc)
 
 
 def rest_answer(doc: Any = None, **headers: str) -> bytes:
@@ -512,10 +541,11 @@ def test_events_that_never_end_make_the_requests_incomplete_not_a_loop(
     older = pr_of(doc)["timelineItems"]
     older["nodes"], older["pageInfo"] = [], {"hasPreviousPage": True, "startCursor": "Y3Vyc29yOjk="}
     page = {"data": {"node": {"timelineItems": copy.deepcopy(older)}}}
-    rig = make(standard(ForgectlRequests=doc, ForgectlRequestEvents=page))
+    rig = make(standard(ForgectlRequests=doc, ForgectlRequestEvents=endless(page)))
     out = rig.snapshot()
     assert out["incomplete"] == ["review_requests"]
-    assert rig.router.ops.count("ForgectlRequestEvents") <= github.MAX_PAGES
+    # the first page came with the requests: the cap counts it, and no page is read and dropped
+    assert rig.router.ops.count("ForgectlRequestEvents") == github.MAX_PAGES - 1
 
 
 def test_a_bot_request_is_named_in_the_rest_form(make: Callable[..., Rig]) -> None:
@@ -578,7 +608,8 @@ def test_an_unknown_review_state_is_reported_incomplete_and_never_dropped_silent
 ) -> None:
     doc = rec("parts")
     pr_of(doc)["reviews"]["nodes"][1]["state"] = "FUTURE_STATE"
-    out = snap(make, ForgectlParts=doc)
+    show_doc = mutated_show(lambda pr: pr["reviews"]["nodes"][1].update(state="FUTURE_STATE"))
+    out = snap(make, ForgectlParts=doc, ForgectlShow=show_doc)
     assert out["incomplete"] == ["reviews"] and out["complete"] is False
     assert [r["id"] for r in out["reviews"]] == ["gh:r:PRR_kwDOexample0001"]
 
@@ -623,7 +654,7 @@ def test_reviews_are_paged_and_a_page_cap_is_incomplete(make: Callable[..., Rig]
     assert out["latest_by_reviewer"][0]["state"] == "changes_requested"
     # never-ending pages stop at the cap
     forever = {"data": {"node": {"reviews": copy.deepcopy(pr_of(doc)["reviews"])}}}
-    capped = snap(make, ForgectlParts=doc, ForgectlReviewsPage=forever)
+    capped = snap(make, ForgectlParts=doc, ForgectlReviewsPage=endless(forever))
     assert capped["incomplete"] == ["reviews"]
 
 
@@ -855,7 +886,7 @@ def test_threads_that_never_end_are_incomplete(make: Callable[..., Rig]) -> None
             }
         }
     }
-    out = snap(make, ForgectlParts=doc, ForgectlThreadsPage=forever)
+    out = snap(make, ForgectlParts=doc, ForgectlThreadsPage=endless(forever))
     assert out["incomplete"] == ["threads"] and out["complete"] is False
 
 
@@ -875,7 +906,7 @@ def test_comments_of_a_thread_that_never_end_are_incomplete(make: Callable[..., 
             }
         }
     }
-    out = snap(make, ForgectlParts=doc, ForgectlThreadCommentsPage=forever)
+    out = snap(make, ForgectlParts=doc, ForgectlThreadCommentsPage=endless(forever))
     assert out["incomplete"] == ["threads"]
 
 
@@ -892,9 +923,9 @@ def test_general_comments_that_never_end_are_incomplete(make: Callable[..., Rig]
             }
         }
     }
-    assert snap(make, ForgectlParts=doc, ForgectlIssueCommentsPage=forever)["incomplete"] == [
-        "threads"
-    ]
+    assert snap(make, ForgectlParts=doc, ForgectlIssueCommentsPage=endless(forever))[
+        "incomplete"
+    ] == ["threads"]
 
 
 # -- untrusted text -------------------------------------------------------------------------
@@ -932,13 +963,17 @@ def test_an_id_that_breaks_the_grammar_is_upstream_error(
     assert failure(make, ForgectlParts=doc).code == "upstream_error"
 
 
-@pytest.mark.parametrize("bad", ["x" * 129, "has space", "a\nb", ""])
-def test_an_event_id_that_breaks_the_grammar_is_a_null_instance(
-    make: Callable[..., Rig], bad: str
+@pytest.mark.parametrize("bad", ["x" * 129, "has space", "a\nb", "", None, 7])
+def test_an_event_id_that_breaks_the_grammar_is_upstream_error(
+    make: Callable[..., Rig], bad: Any
 ) -> None:
     doc = rec("requests")
     pr_of(doc)["timelineItems"]["nodes"][3]["id"] = bad
-    assert requests_by(snap(make, ForgectlRequests=doc))["user-5"]["instance"] is None
+    rig = make(standard(ForgectlRequests=doc), retries=1)
+    with pytest.raises(ForgectlError) as caught:
+        rig.snapshot()
+    assert caught.value.code == "upstream_error"
+    assert rig.router.ops.count("ForgectlRequests") == 2  # retried like a 5xx
 
 
 def test_a_login_that_is_not_a_github_login_is_never_passed_on(make: Callable[..., Rig]) -> None:
@@ -1119,9 +1154,9 @@ def test_the_push_search_is_capped(make: Callable[..., Rig]) -> None:
             }
         }
     }
-    rig = make(standard(ForgectlPush=first, ForgectlPushPage=forever))
+    rig = make(standard(ForgectlPush=first, ForgectlPushPage=endless(forever)))
     assert pushed(rig.snapshot()) == ("2026-10-02T07:30:00Z", "commit_date")
-    assert rig.router.ops.count("ForgectlPushPage") <= github_snapshot.MAX_PUSH_PAGES
+    assert rig.router.ops.count("ForgectlPushPage") == github_snapshot.MAX_PUSH_PAGES - 1
 
 
 # -- comments, reviews and ci commands ------------------------------------------------------
@@ -1140,7 +1175,7 @@ def test_comments_is_incomplete_when_a_thread_list_is_cut(make: Callable[..., Ri
     doc = rec("parts")
     pr_of(doc)["comments"]["pageInfo"] = {"hasNextPage": True, "endCursor": "Y3Vyc29yOjQ="}
     forever = {"data": {"node": {"comments": copy.deepcopy(pr_of(doc)["comments"])}}}
-    rig = make(standard(ForgectlParts=doc, ForgectlIssueCommentsPage=forever))
+    rig = make(standard(ForgectlParts=doc, ForgectlIssueCommentsPage=endless(forever)))
     assert github_snapshot.comments(rig.env, REF).to_dict()["complete"] is False
 
 
@@ -1165,7 +1200,7 @@ def test_reviews_command_is_incomplete_on_a_page_cap(make: Callable[..., Rig]) -
     conn = pr_of(page)["reviews"]
     conn["pageInfo"] = {"hasNextPage": True, "endCursor": "Y3Vyc29yOjI="}
     answer = {"data": {"node": {"reviews": conn}}}
-    rig = make(standard(ForgectlReviewsPage=answer))
+    rig = make(standard(ForgectlReviewsPage=endless(answer)))
     assert rig.backend.reviews(REF).complete is False
 
 
@@ -1441,7 +1476,14 @@ def test_the_requests_and_push_reads_check_their_pull_request(
 ) -> None:
     doc = rec("requests" if query == "ForgectlRequests" else "push")
     pr_of(doc)["url"] = url
-    assert failure(make, **{query: doc}).code in ("upstream_error", "wrong_host_response")
+    rig = make(standard(**{query: doc}))
+    try:
+        out = rig.snapshot()
+    except ForgectlError as error:
+        assert error.code in ("upstream_error", "wrong_host_response")
+    else:
+        # the push time of another PR is never taken: unknown, with a warning
+        assert query == "ForgectlPush" and pushed(out) == (None, None) and rig.warnings
 
 
 def test_a_malformed_answer_is_retried_like_a_5xx(make: Callable[..., Rig]) -> None:
@@ -1450,3 +1492,452 @@ def test_a_malformed_answer_is_retried_like_a_5xx(make: Callable[..., Rig]) -> N
     rig = make(standard(ForgectlParts=[bad, rec("parts")]), retries=1)
     assert rig.snapshot()["complete"] is True
     assert rig.router.ops.count("ForgectlParts") == 2
+
+
+# -- review round 1 ---------------------------------------------------------------------------
+
+
+def reviews_page(nodes: Any, *, more: bool = False, cursor: str = "x") -> dict[str, Any]:
+    return {
+        "data": {
+            "node": {
+                "reviews": {"pageInfo": {"hasNextPage": more, "endCursor": cursor}, "nodes": nodes}
+            }
+        }
+    }
+
+
+def parts_with_more_reviews() -> dict[str, Any]:
+    doc = rec("parts")
+    pr_of(doc)["reviews"]["pageInfo"] = {"hasNextPage": True, "endCursor": "Y3Vyc29yOjI="}
+    return doc
+
+
+def _bad_requests() -> dict[str, Any]:
+    doc = rec("requests")
+    pr_of(doc)["reviewRequests"]["nodes"] = "x"
+    return doc
+
+
+def _bad_review_node() -> dict[str, Any]:
+    doc = rec("parts")
+    pr_of(doc)["reviews"]["nodes"][0]["submittedAt"] = "yesterday"
+    return doc
+
+
+def _bad_comment_node() -> dict[str, Any]:
+    doc = rec("parts")
+    pr_of(doc)["reviewThreads"]["nodes"][0]["comments"]["nodes"][0]["createdAt"] = None
+    return doc
+
+
+#: case -> (the query answered badly, other answers, the bad answer, a good answer)
+MALFORMED_FIRST: dict[str, tuple[str, dict[str, Any], Callable[[], Any], Callable[[], Any]]] = {
+    "requests": ("ForgectlRequests", {}, _bad_requests, lambda: rec("requests")),
+    "rest-body": ("rest", {}, lambda: rest_answer({"users": "x", "teams": []}), rest_answer),
+    "parts-review": ("ForgectlParts", {}, _bad_review_node, lambda: rec("parts")),
+    "parts-comment": ("ForgectlParts", {}, _bad_comment_node, lambda: rec("parts")),
+    "drained-page": (
+        "ForgectlReviewsPage",
+        {"ForgectlParts": parts_with_more_reviews()},
+        lambda: reviews_page("x"),
+        lambda: reviews_page([]),
+    ),
+}
+
+
+def _malformed_answers(case: str, *, recover: bool) -> tuple[str, dict[str, Any]]:
+    key, others, bad, good = MALFORMED_FIRST[case]
+    return key, {**others, key: [bad(), good()] if recover else bad()}
+
+
+@pytest.mark.parametrize("case", sorted(MALFORMED_FIRST))
+def test_r1_1_a_malformed_answer_is_retried_then_recovers(
+    make: Callable[..., Rig], case: str
+) -> None:
+    key, answers = _malformed_answers(case, recover=True)
+    rig = make(standard(**answers), retries=2)
+    assert rig.snapshot()["pr"] == "github.com/example-org/example-repo#7"
+    assert rig.router.ops.count(key) == 2
+
+
+@pytest.mark.parametrize("case", sorted(MALFORMED_FIRST))
+def test_r1_1_a_malformed_answer_every_time_is_upstream_error(
+    make: Callable[..., Rig], case: str
+) -> None:
+    key, answers = _malformed_answers(case, recover=False)
+    rig = make(standard(**answers), retries=2)
+    with pytest.raises(ForgectlError) as caught:
+        rig.snapshot()
+    assert caught.value.code == "upstream_error"
+    assert rig.router.ops.count(key) == 3
+
+
+def _review(
+    author: str, number: int, state: str, oid: str = HEAD, at: str = "2026-10-02T10:00:00Z"
+) -> dict[str, Any]:
+    return {
+        "id": f"PRR_kwDOexample00{number}",
+        "state": state,
+        "submittedAt": at,
+        "body": "",
+        "authorCanPushToRepository": True,
+        "author": {"__typename": "User", "login": author, "databaseId": 1000 + number},
+        "commit": {"oid": oid},
+    }
+
+
+def _moved_twice(make: Callable[..., Rig], **answers: Any) -> None:
+    rig = make(standard(**answers))
+    with pytest.raises(ForgectlError) as caught:
+        rig.snapshot()
+    assert caught.value.code == "upstream_error"
+    assert "changed while it was being read" in caught.value.message
+    assert rig.router.ops.count("ForgectlShow") == 2
+
+
+def test_r1_2_a_change_request_between_the_reads_repeats_then_fails(
+    make: Callable[..., Rig],
+) -> None:
+    doc = rec("parts")
+    pr_of(doc)["reviews"]["nodes"].append(_review("user-3", 30, "CHANGES_REQUESTED"))
+    _moved_twice(make, ForgectlParts=doc)
+
+
+def test_r1_2_a_swap_keeping_the_count_repeats_then_fails(make: Callable[..., Rig]) -> None:
+    doc = rec("parts")
+    pr_of(doc)["reviews"]["nodes"][0]["author"] = {
+        "__typename": "User",
+        "login": "user-9",
+        "databaseId": 1009,
+    }
+    _moved_twice(make, ForgectlParts=doc)
+
+
+def test_r1_2_an_approval_moved_to_the_head_repeats_then_fails(make: Callable[..., Rig]) -> None:
+    show_doc = mutated_show(lambda pr: pr["reviews"]["nodes"][0].update(commit={"oid": OTHER}))
+    _moved_twice(make, ForgectlShow=show_doc)
+
+
+def test_r1_2_an_unknown_state_with_diverging_tables_repeats_then_fails(
+    make: Callable[..., Rig],
+) -> None:
+    doc = rec("parts")
+    pr_of(doc)["reviews"]["nodes"][1]["state"] = "FUTURE_STATE"  # show still says commented
+    _moved_twice(make, ForgectlParts=doc)
+
+
+def test_r1_2_the_reviews_command_compares_the_whole_table(make: Callable[..., Rig]) -> None:
+    doc = rec("parts")
+    nodes = pr_of(doc)["reviews"]["nodes"] + [_review("user-3", 30, "CHANGES_REQUESTED")]
+    rig = make(standard(ForgectlReviewsPage=reviews_page(nodes)))
+    with pytest.raises(ForgectlError) as caught:
+        rig.backend.reviews(REF)
+    assert caught.value.code == "upstream_error"
+    assert rig.router.ops.count("ForgectlShow") == 2
+
+
+def test_r1_2_a_legit_snapshot_with_every_kind_of_review_passes(make: Callable[..., Rig]) -> None:
+    extra = [
+        _review("user-3", 31, "DISMISSED"),
+        _review("user-4", 32, "FUTURE_STATE"),
+        {**_review("user-5", 33, "APPROVED"), "author": None},
+        {
+            **_review("dependabot", 34, "APPROVED"),
+            "author": {"__typename": "Bot", "login": "dependabot", "databaseId": 1034},
+        },
+        {
+            **_review("user-1", 35, "APPROVED"),  # the PR's author
+            "author": {"__typename": "User", "login": "user-1", "databaseId": 1001},
+        },
+    ]
+    doc = rec("parts")
+    pr_of(doc)["reviews"]["nodes"].extend(copy.deepcopy(extra))
+    show_doc = mutated_show(
+        lambda pr: pr["reviews"]["nodes"].extend(
+            [{k: v for k, v in r.items() if k not in ("id", "body")} for r in copy.deepcopy(extra)]
+        )
+    )
+    rig = make(standard(ForgectlParts=doc, ForgectlShow=show_doc))
+    out = rig.snapshot()
+    assert rig.router.ops.count("ForgectlShow") == 1
+    assert out["incomplete"] == ["reviews"]  # the unknown state
+    schemas.validate_cli_output("snapshot", out)
+
+
+def thread_comments_parts() -> dict[str, Any]:
+    doc = rec("parts")
+    pr_of(doc)["reviewThreads"]["nodes"][0]["comments"]["pageInfo"] = {
+        "hasNextPage": True,
+        "endCursor": "Y3Vyc29yOjQ=",
+    }
+    return doc
+
+
+def test_r1_3_a_thread_comments_page_of_another_thread_is_refused(
+    make: Callable[..., Rig],
+) -> None:
+    page = {
+        "data": {
+            "node": {
+                "id": "PRRT_kwDOexample0099",
+                "comments": {"pageInfo": {"hasNextPage": False, "endCursor": "x"}, "nodes": []},
+            }
+        }
+    }
+    rig = make(
+        standard(ForgectlParts=thread_comments_parts(), ForgectlThreadCommentsPage=page), retries=1
+    )
+    with pytest.raises(ForgectlError) as caught:
+        rig.snapshot()
+    assert caught.value.code == "upstream_error"
+    assert rig.router.ops.count("ForgectlThreadCommentsPage") == 2
+
+
+def test_r1_4_parts_of_another_repository_with_consistent_urls_are_refused(
+    make: Callable[..., Rig],
+) -> None:
+    doc = rec("parts")
+    doc["data"]["repository"]["nameWithOwner"] = "example-org/other-repo"
+    pr_of(doc)["url"] = "https://github.com/example-org/other-repo/pull/7"
+    assert failure(make, ForgectlParts=doc).code in ("upstream_error", "wrong_host_response")
+
+
+def test_r1_4_parts_of_another_pull_request_id_are_refused(make: Callable[..., Rig]) -> None:
+    doc = rec("parts")
+    pr_of(doc)["id"] = "PR_kwDOexample0099"
+    assert failure(make, ForgectlParts=doc).code == "upstream_error"
+
+
+@pytest.mark.parametrize("query", ["ForgectlRequests", "ForgectlPush"])
+def test_r1_4_an_id_that_is_not_shows_never_reaches_a_later_query(
+    make: Callable[..., Rig], query: str
+) -> None:
+    long_id = "P" * 5000
+    doc = rec("requests" if query == "ForgectlRequests" else "push")
+    pr_of(doc)["id"] = long_id
+    pr_of(doc)["timelineItems"]["pageInfo"] = {
+        "hasPreviousPage": True,
+        "startCursor": "Y3Vyc29yOjk=",
+    }
+    page = {
+        "data": {
+            "node": {
+                "timelineItems": {
+                    "pageInfo": {"hasPreviousPage": False, "startCursor": "x"},
+                    "nodes": [],
+                }
+            }
+        }
+    }
+    rig = make(standard(**{query: doc}, ForgectlRequestEvents=page, ForgectlPushPage=page))
+    try:
+        out = rig.snapshot()
+    except ForgectlError as error:
+        assert query == "ForgectlRequests" and error.code == "upstream_error"
+    else:
+        assert query == "ForgectlPush" and pushed(out) == (None, None) and rig.warnings
+    assert all(long_id not in json.dumps(r.get("variables", {})) for r in rig.router.requests)
+
+
+def test_r1_4_comments_checks_the_pull_request_id_grammar(make: Callable[..., Rig]) -> None:
+    doc = rec("parts")
+    pr_of(doc)["id"] = "P" * 5000
+    rig = make(standard(ForgectlParts=doc))
+    with pytest.raises(ForgectlError) as caught:
+        github_snapshot.comments(rig.env, REF)
+    assert caught.value.code == "upstream_error"
+
+
+def test_r1_6_a_force_push_wins_over_a_newer_dated_head_commit(make: Callable[..., Rig]) -> None:
+    docs = push_doc(force("2026-10-02T08:30:00Z"), commit("2026-10-02T09:15:00Z"))
+    assert pushed(snap(make, ForgectlPush=docs)) == ("2026-10-02T08:30:00Z", "push_event")
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        lambda: push_doc(commit("2099-01-01T00:00:00Z")),
+        lambda: push_doc(force("2099-01-01T00:00:00Z")),
+        lambda: push_doc(commit_date="2099-01-01T00:00:00Z"),
+        lambda: push_doc(commit("2026-10-02T12:05:06Z")),  # just past the five minutes
+    ],
+)
+def test_r1_6_a_push_time_in_the_future_is_not_trusted(
+    make: Callable[..., Rig], doc: Callable[[], dict[str, Any]]
+) -> None:
+    rig = make(standard(ForgectlPush=doc()))
+    out = rig.snapshot()
+    assert pushed(out) == (None, None)
+    assert any("future" in w for w in rig.warnings)
+
+
+def test_r1_6_a_push_time_within_five_minutes_of_the_reading_is_kept(
+    make: Callable[..., Rig],
+) -> None:
+    out = snap(make, ForgectlPush=push_doc(commit("2026-10-02T12:05:05Z")))
+    assert pushed(out) == ("2026-10-02T12:05:05Z", "push_event")
+
+
+def test_r1_7_a_malformed_push_page_one_then_a_good_one_recovers(make: Callable[..., Rig]) -> None:
+    bad = rec("push")
+    pr_of(bad)["timelineItems"] = "x"
+    rig = make(standard(ForgectlPush=[bad, rec("push")]), retries=1)
+    assert pushed(rig.snapshot()) == ("2026-10-02T08:30:00Z", "push_event")
+    assert rig.router.ops.count("ForgectlPush") == 2
+
+
+def test_r1_7_a_malformed_push_page_two_every_time_is_unknown(make: Callable[..., Rig]) -> None:
+    first = push_doc(commit("2026-10-01T09:00:00Z", OTHER))
+    pr_of(first)["timelineItems"]["pageInfo"] = {
+        "hasPreviousPage": True,
+        "startCursor": "Y3Vyc29yOjk=",
+    }
+    page = {"data": {"node": {"timelineItems": {"pageInfo": "x", "nodes": []}}}}
+    rig = make(standard(ForgectlPush=first, ForgectlPushPage=page), retries=1)
+    out = rig.snapshot()
+    assert pushed(out) == (None, None) and rig.warnings
+    assert rig.router.ops.count("ForgectlPushPage") == 2
+
+
+@pytest.mark.parametrize("query", ["ForgectlRequests", "ForgectlPush"])
+def test_r1_7_a_null_head_in_requests_or_push_is_malformed_not_moved(
+    make: Callable[..., Rig], query: str
+) -> None:
+    doc = rec("requests" if query == "ForgectlRequests" else "push")
+    pr_of(doc)["headRefOid"] = None
+    rig = make(standard(**{query: doc}), retries=1)
+    if query == "ForgectlRequests":
+        with pytest.raises(ForgectlError) as caught:
+            rig.snapshot()
+        assert caught.value.code == "upstream_error"
+        assert "changed while it was being read" not in caught.value.message
+    else:
+        assert pushed(rig.snapshot()) == (None, None) and rig.warnings
+    assert rig.router.ops.count(query) == 2
+    assert rig.router.ops.count("ForgectlShow") == 1
+
+
+def test_r1_8_a_capped_drain_reads_no_page_it_drops(make: Callable[..., Rig]) -> None:
+    forever = endless(reviews_page([], more=True))
+    rig = make(standard(ForgectlParts=parts_with_more_reviews(), ForgectlReviewsPage=forever))
+    assert rig.snapshot()["incomplete"] == ["reviews"]
+    # the parts query gave the first page: MAX_PAGES pages cost MAX_PAGES reads
+    assert rig.router.ops.count("ForgectlReviewsPage") == github.MAX_PAGES - 1
+
+
+def test_r1_9_a_repeated_cursor_is_malformed(make: Callable[..., Rig]) -> None:
+    again = reviews_page(pr_of(rec("parts"))["reviews"]["nodes"], more=True, cursor="Y3Vyc29yOjI=")
+    rig = make(
+        standard(ForgectlParts=parts_with_more_reviews(), ForgectlReviewsPage=again), retries=1
+    )
+    with pytest.raises(ForgectlError) as caught:
+        rig.snapshot()
+    assert caught.value.code == "upstream_error"
+    assert rig.router.ops.count("ForgectlReviewsPage") == 2
+
+
+@pytest.mark.parametrize(
+    ("state", "kept", "warned"),
+    [
+        ("SUBMITTED", True, False),
+        ("PENDING", False, False),
+        (None, False, True),
+        ("pending", False, True),
+        ("DRAFT", False, True),
+        ("<missing>", False, True),
+    ],
+)
+def test_r1_10_only_a_submitted_comment_is_listed(
+    make: Callable[..., Rig], state: Any, kept: bool, warned: bool
+) -> None:
+    doc = rec("parts")
+    node = pr_of(doc)["reviewThreads"]["nodes"][0]["comments"]["nodes"][1]
+    if state == "<missing>":
+        del node["state"]
+    else:
+        node["state"] = state
+    rig = make(standard(ForgectlParts=doc))
+    out = rig.snapshot()
+    ids = [c["id"] for c in threads_by(out)["gh:rt:PRRT_kwDOexample0001"]["comments"]]
+    assert ("gh:rc:PRRC_kwDOexample0002" in ids) is kept
+    assert (out["incomplete"] == ["threads"]) is warned
+    assert bool(rig.warnings) is warned
+    comments_rig = make(standard(ForgectlParts=doc))
+    assert github_snapshot.comments(comments_rig.env, REF).complete is not warned
+
+
+def test_r1_11_a_reviews_page_of_another_head_repeats_then_fails(make: Callable[..., Rig]) -> None:
+    page = reviews_page(pr_of(rec("parts"))["reviews"]["nodes"])
+    page["data"]["node"]["headRefOid"] = OTHER
+    rig = make(standard(ForgectlReviewsPage=page))
+    with pytest.raises(ForgectlError) as caught:
+        rig.backend.reviews(REF)
+    assert caught.value.code == "upstream_error"
+    assert rig.router.ops.count("ForgectlShow") == 2
+    snap_rig = make(standard(ForgectlParts=parts_with_more_reviews(), ForgectlReviewsPage=page))
+    with pytest.raises(ForgectlError):
+        snap_rig.snapshot()
+    assert snap_rig.router.ops.count("ForgectlShow") == 2
+
+
+def test_r1_11_a_thread_comments_page_of_another_head_repeats(make: Callable[..., Rig]) -> None:
+    page = {
+        "data": {
+            "node": {
+                "pullRequest": {**IDENTITY, "headRefOid": OTHER},
+                "comments": {"pageInfo": {"hasNextPage": False, "endCursor": "x"}, "nodes": []},
+            }
+        }
+    }
+    rig = make(standard(ForgectlParts=thread_comments_parts(), ForgectlThreadCommentsPage=page))
+    with pytest.raises(ForgectlError):
+        rig.snapshot()
+    assert rig.router.ops.count("ForgectlShow") == 2
+
+
+def test_r1_12_an_enterprise_team_request_is_incomplete_without_extra_event_pages(
+    make: Callable[..., Rig],
+) -> None:
+    doc = rec("requests")
+    pr_of(doc)["reviewRequests"]["nodes"].append(
+        {"asCodeOwner": False, "requestedReviewer": {"__typename": "EnterpriseTeam"}}
+    )
+    pr_of(doc)["timelineItems"]["nodes"].append(
+        {
+            "__typename": "ReviewRequestedEvent",
+            "id": "RRE_kwDOexample0010",
+            "createdAt": "2026-10-02T08:00:00Z",
+            "requestedReviewer": {"__typename": "EnterpriseTeam"},
+        }
+    )
+    # every named reviewer has an event on the first page
+    pr_of(doc)["timelineItems"]["nodes"].append(
+        {
+            "__typename": "ReviewRequestedEvent",
+            "id": "RRE_kwDOexample0011",
+            "createdAt": "2026-10-02T08:05:00Z",
+            "requestedReviewer": {"__typename": "User", "login": "user-7", "databaseId": 1007},
+        }
+    )
+    pr_of(doc)["timelineItems"]["pageInfo"] = {
+        "hasPreviousPage": True,
+        "startCursor": "Y3Vyc29yOjk=",
+    }
+    rest = rec("requested-reviewers")
+    rest["teams"].append({"id": 99, "slug": "user-9"})  # REST names it as a team
+    page = {
+        "data": {
+            "node": {
+                "timelineItems": {
+                    "pageInfo": {"hasPreviousPage": True, "startCursor": "Y3Vyc29yOjg="},
+                    "nodes": [],
+                }
+            }
+        }
+    }
+    rig = make(standard(ForgectlRequests=doc, ForgectlRequestEvents=page, rest=rest_answer(rest)))
+    out = rig.snapshot()
+    assert out["incomplete"] == ["review_requests"]
+    assert rig.router.ops.count("ForgectlRequestEvents") == 0
+    assert any("EnterpriseTeam" in w for w in rig.warnings)
