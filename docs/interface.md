@@ -813,7 +813,7 @@ The default list is the union of requested-from-you and authored-by-you, as two 
 | repo and number, title | the `prs` item |
 | badge | state, draft and the first blocker |
 | CI glyph | `ci.state` |
-| approvals | `approvals`, with the required count when the host reports one, such as `1/2`; the bare count otherwise |
+| approvals | `approvals`; on GitLab over `approvals` plus the `approvals_left` of the approval rule forgectl already reads, such as `1/2`; on GitHub, which reports no required count in the model, the bare count |
 | comments | `activity`: `comments_total`, `unresolved_threads`, `others_since_push` (new since push) and `awaiting_my_reply` |
 | age | since `head.pushed_at` (blank when it is null) and since `updated_at` |
 
