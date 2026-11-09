@@ -7,8 +7,8 @@ Status: planned, 2026-11-03. Implements [interface.md](interface.md) (normative)
 - Test-first. Every behavior starts as a failing test.
 - Every process forgectl starts for a forge goes through `src/forgectl/gateway.py`, which owns the environment, the working directory, argv, status parsing and timeouts. Unit tests replace it with an in-process fake. Hooks, `token_command` and opening a browser use the same exact-PID and process-group rules from their own modules.
 - Normalization is tested against recorded host responses, scrubbed of account names and emails before they enter this repo. Each backend maps host wording to codes in one table, tested from those recordings, so a changed host message fails a test rather than a merge.
-- Process tests run the real CLI with fake `gh` and `glab` in `tests/fakebin/`, first on `PATH`, logging argv, environment and cwd. They assert the safety rules on every command: exactly one token variable, an empty private cwd, no untrusted text in argv, telemetry and update checks off, no inherited token variable. They run in CI and are not `live`.
-- Every `--json` output gets a golden-file test validated against `schemas/` (a `referencing` registry keyed by `$id`). Every hook payload, log record and audit record written in a test is validated too. `tests/golden/` holds no real names.
+- Process tests run the real CLI with the fake `gh` and `glab` of `tests/fakebin/`, through launchers each test writes to a private bin directory first on `PATH`, logging argv, environment and cwd. They assert the safety rules on every command: exactly one token variable, an empty private cwd, no untrusted text in argv, telemetry and update checks off, no inherited token variable. They run in CI and are not `live`.
+- Every `--json` output gets a golden-file test validated against `schemas/` (a `referencing` registry keyed by `$id`). Every hook payload, log record and audit record written in a test is validated too. `tests/golden/` holds no real names. Golden files are regenerated with `FORGECTL_UPDATE_GOLDEN=1` (exactly `1`, refused in CI), and recordings pass through `python -m tests.harness.scrub` before they are committed.
 - `live` tests (marker, deselected by default, never in CI) run against throwaway repositories and re-check each `live` row of design.md's Live verification. A failure means a host changed.
 - Every behavior design.md lists as relied on becomes a regression test in the stage that relies on it. A "Still to verify" row keeps its conservative default until a `live` test settles it.
 - `make verify` passes before every commit. PR titles are Conventional Commit headers; no `!` before 1.0.
@@ -22,7 +22,6 @@ Status: planned, 2026-11-03. Implements [interface.md](interface.md) (normative)
 | `surface.py` | 0 | argparse surface (the full, frozen command and flag set), global flags, value grammars |
 | `humanactions.py` | 0 | actor, human-only gate, interactive runs, required expected values, confirmation rule |
 | `registry.py` | 0 | handler registry the commands plug into; `cli.py` dispatches through it |
-| `textsafe.py` | 0 | stand-in for `sanitize.py` until it lands (todo #6) |
 | `output.py`, `errors.py` | 0 | result objects, error envelope, exit codes, dry-run results |
 | `config.py` | 0 | YAML and `config.d` merge, Pydantic models, defaults equal to `config.example.yaml`, `FORGECTL_*` overrides, config hash |
 | `identifiers.py` | 0 | anchored parsers for PR references, repo ids, typed comment and thread ids, logins, refs; closed-host check |
@@ -103,11 +102,15 @@ Status: planned, 2026-11-03. Implements [interface.md](interface.md) (normative)
 
 ## Stage 6: TUI (0.6)
 
-**Goal**: `browse` as specified.
+**Goal**: `browse` as specified: a read-only dashboard of your PRs with activity, filters and refresh, and then the `m` merge as a follow-up.
 
-**Success Criteria**: list, detail pane, `m` and `o`; `--focus` and `--result-file`; forge text renders with markup disabled; without the extra it exits 2 with the install command.
+**Issues**: #56 (`head.pushed_at`, `pushed_at_source`; depends on #10), #57 (`activity` block; depends on #56, #12, #16), #38 (read-only `browse`: list, detail pane, `o`, `/`, result file; no dependencies), #58 (list columns, sorting, filters; depends on #38, #57), #59 (manual and automatic refresh; depends on #58), #60 (`m` merge, the follow-up; depends on #38, #23). Related: #35 (self-managed GitLab verification, stage 5) must be done before GitLab rows can be treated as verified in #58 and #59, and #42 (ETag pass-through) lowers the cost of #59's polls.
 
-**Tests**: Textual pilot tests; a title holding markup; a check `url` with another scheme; the merge dialog passing the head and base it showed.
+**Order**: #56 and #38 start first (independent). #57 follows #56, then #58 follows #38 and #57, then #59 follows #58. #60 follows #38 and #23 (`merge --auto`) and does not block the read-only dashboard.
+
+**Success Criteria**: `snapshot` reports `head.pushed_at` with its source and the `activity` block on both hosts, with `activity.ignore_authors` honored; the list shows the columns, sorting and filters of [TUI](interface.md#tui), loads progressively with bounded concurrency and survives a failed snapshot; `r` and `R` refresh, the automatic refresh follows `browse.refresh_interval` and `--interval`, spends no more than changed or pending PRs plus a periodic full pass, and backs off near the rate limit; `o`, `--focus` and `--result-file` work; forge text renders with markup disabled; without the extra it exits 2 with the install command. The follow-up adds `m`, with the merge dialog, the same guards as `merge` and `merged` in the result file.
+
+**Tests**: Textual pilot tests; a title holding markup; a check `url` with another scheme; a mixed GitHub and GitLab fixture rendering every column; sort order with an ignored bot; each filter and their intersection; concurrency capped at the configured value with visible rows first; one failing snapshot; a fake clock for the refresh interval, the `0` setting and the flag overriding config; an unchanged PR skipped, a pending-CI PR re-snapshotted, a full pass every Nth cycle; backoff and recovery after `reset_at`; for `snapshot`, fixtures for each `pushed_at` source and for the `activity` rules including GitLab approvals; for the follow-up, the merge dialog passing the head and base it showed.
 
 **Status**: Not Started
 
@@ -118,7 +121,7 @@ Status: planned, 2026-11-03. Implements [interface.md](interface.md) (normative)
 - **0.3** (stage 3): merge; enough for the harness's merge rule and humans.
 - **0.4** (stage 4): posting; enough for pr-comment and the v1 review and response slices.
 - **0.5** (stage 5): live suite, self-managed GitLab and macOS checks.
-- **0.6** (stage 6): `browse`.
+- **0.6** (stage 6): `browse`, read-only first with activity, filters and refresh; the `m` merge follows as its own step. #42 (ETag pass-through; depends on #12, #16) is raised from 1.x to this milestone, to be measured against the refresh polling of #59 first and kept only if the measured cost justifies it.
 - **1.0**: stages 0–6 done; the v1 review, ticket and response slices have run through forgectl without interface changes; the live suite and the macOS checklist passed; the interface is declared stable (a deliberate breaking-change commit).
-- **1.x** (additive): `merge --wait` (poll, then a sha-enforced merge) if unattended terminal merging is wanted; `commits`; ETag pass-through if polling costs hurt; file-level comments through GitHub's GraphQL route once documented; a `compare` diff for `behind` and `diverged` once a direct diff is verified; merge-queue support once tested.
+- **1.x** (additive): `merge --wait` (poll, then a sha-enforced merge) if unattended terminal merging is wanted; `commits`; file-level comments through GitHub's GraphQL route once documented; a `compare` diff for `behind` and `diverged` once a direct diff is verified; merge-queue support once tested.
 - **2.0**: another forge backend made pluggable, direct HTTP in place of `gh` and `glab`, or any non-additive change.
