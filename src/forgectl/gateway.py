@@ -1167,9 +1167,10 @@ class Gateway:
         remaining = self.budget.remaining()
         if remaining <= 0:
             raise _error("network_error", "the time budget ran out before the call; nothing sent")
-        # TODO(#20): every write proof must reject a redirected GET's answer (a 301/302/303 the
-        # CLIs followed as a body-less GET): PUT/PATCH merge through step 9's re-read, PUT
-        # discussions must match the requested ``resolved``, DELETE draft notes by read-back.
+        # TODO(#24): every write proof must reject a redirected GET's answer (a 301/302/303 the
+        # CLIs followed as a body-less GET): PUT/PATCH merge through step 9's re-read (#21/#22),
+        # PUT discussions must match the requested ``resolved`` (#29), DELETE draft notes by
+        # read-back (#27).
         with private_dirs(self.environ, config=target.token is not None) as dirs:
             env = build_environment(self.environ, dirs=dirs, backend=target.backend, target=target)
             try:

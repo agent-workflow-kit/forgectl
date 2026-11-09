@@ -1116,7 +1116,7 @@ def test_a_patch_redirected_by_a_301_reaches_the_gateway_as_the_gets_answer(
 ) -> None:
     """gh and glab turn a 301/302/303 into a body-less GET and show only its answer: the
     gateway cannot see the redirect, so a write's proof must reject the GET's answer
-    (TODO(#20) in gateway.py)."""
+    (TODO(#24) in gateway.py)."""
     fake_forges.answer("gh", endpoint_re="pulls/1$", method="PATCH", redirect="/x", status=301)
     fake_forges.answer("gh", endpoint="x", method="GET", body={"number": 1, "title": "old"})
     gateway = make_gateway(fake_forges)
