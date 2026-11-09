@@ -1,9 +1,9 @@
 """GitLab `ci` (#17): the command over the shared head-pipeline read.
 
 The read itself is ``GitLabBackend._ci`` (statuses of ``head_pipeline`` from the pipeline's own
-project, the pipeline's status as a `(pipeline)` check, child pipelines through `/bridges`); `show`,
-`snapshot` and `ci` all use it, so the three agree. ``ci`` reads the MR once as `show` does and
-returns that read's CI object.
+project, the pipeline's status as a `(pipeline)` check, child pipelines through `/trigger_jobs`
+from GitLab 19.2 and `/bridges` below); `show`, `snapshot` and `ci` all use it, so the three
+agree. ``ci`` reads the MR once as `show` does and returns that read's CI object.
 
 Merged-results and merge-train pipelines (TODO(#31), user decision pending). Such a pipeline runs
 on the merge ref, so ``head_pipeline.sha`` is not the MR's head: ``for_current_head`` is false and

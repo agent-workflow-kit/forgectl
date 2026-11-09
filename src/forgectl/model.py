@@ -206,6 +206,10 @@ _CHECK_TABLE: dict[str, dict[str, CheckState]] = {
 }
 
 
+#: The name of a check whose host gave no usable name (both backends).
+UNNAMED_CHECK = "(unnamed check)"
+
+
 def normalize_check_state(
     source: CheckSource,
     raw: str,

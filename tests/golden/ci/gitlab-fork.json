@@ -7,7 +7,7 @@
         "name": "build",
         "required": null,
         "state": "passing",
-        "url": "https://gitlab.com/user-9/proj/-/jobs/7003"
+        "url": "https://gitlab.com/user-8/proj/-/jobs/7003"
       },
       {
         "counted": false,
@@ -15,7 +15,7 @@
         "name": "lint",
         "required": false,
         "state": "failing",
-        "url": "https://gitlab.com/user-9/proj/-/jobs/7005"
+        "url": "https://gitlab.com/user-8/proj/-/jobs/7005"
       },
       {
         "counted": true,
@@ -23,7 +23,7 @@
         "name": "test",
         "required": null,
         "state": "passing",
-        "url": "https://gitlab.com/user-9/proj/-/jobs/7004"
+        "url": "https://gitlab.com/user-8/proj/-/jobs/7004"
       }
     ],
     "complete": true,

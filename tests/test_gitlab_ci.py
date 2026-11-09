@@ -30,6 +30,7 @@ from .harness import golden, schemas
 
 FORK_STATUSES = f"projects/202/repository/commits/{HEAD}/statuses"
 STATUSES = f"projects/101/repository/commits/{HEAD}/statuses"
+FORK_PATH = "user-8/proj"  # the source project recording's path
 
 
 @pytest.fixture
@@ -42,11 +43,41 @@ def fork_mr(mr: dict[str, Any]) -> None:
     mr["head_pipeline"]["project_id"] = 202
 
 
-def job(name: str, status: str, identifier: int, *, allow_failure: bool = False) -> dict[str, Any]:
+def job(
+    name: str,
+    status: str,
+    identifier: int,
+    *,
+    allow_failure: bool = False,
+    project: str = "user-9/proj",
+) -> dict[str, Any]:
     row = copy.deepcopy(recording("statuses")[0])
     row.update(name=name, status=status, id=identifier, allow_failure=allow_failure)
-    row["target_url"] = f"https://gitlab.com/user-9/proj/-/jobs/{identifier}"
+    row["target_url"] = f"https://gitlab.com/{project}/-/jobs/{identifier}"
     return row
+
+
+def fork_statuses() -> list[dict[str, Any]]:
+    """The base statuses as the fork's pipeline lists them: its jobs live in the fork."""
+    rows = recording("statuses")
+    for row in rows:
+        row["target_url"] = row["target_url"].replace("/user-9/proj/", f"/{FORK_PATH}/")
+    return rows
+
+
+def bridge(name: str, status: str) -> dict[str, Any]:
+    return {
+        "id": 8001,
+        "name": name,
+        "allow_failure": False,
+        "downstream_pipeline": {
+            "id": 6001,
+            "project_id": 303,
+            "sha": HEAD,
+            "status": status,
+            "web_url": "https://gitlab.com/user-9/child/-/pipelines/6001",
+        },
+    }
 
 
 def read_ci(
@@ -61,6 +92,7 @@ def read_ci(
     mr = recording("mr")
     if fork:
         fork_mr(mr)
+        overrides.setdefault("statuses", fork_statuses())
     if mr_edit is not None:
         mr_edit(mr)
     standard(fake, mr=mr, **overrides)
@@ -90,6 +122,8 @@ def test_golden_ci(fake: FakeGitLab, tmp_path: Path, fork: bool) -> None:
     assert result.ci.state == "passing" and result.ci.complete
     assert fake.count(FORK_STATUSES if fork else STATUSES) == 1
     assert fake.count(STATUSES if fork else FORK_STATUSES) == 0
+    urls = [c.url for c in result.ci.checks if c.url is not None]
+    assert urls and all((f"/{FORK_PATH}/" in u) is fork for u in urls)
     golden.assert_golden(
         f"ci/gitlab-{'fork' if fork else 'open'}",
         result.to_dict(),
@@ -204,6 +238,36 @@ def test_equal_ids_take_the_worse_state(fake: FakeGitLab, tmp_path: Path, fork: 
     assert read_ci(fake, tmp_path, fork=fork, **only(rows)).ci.state == "failing"
 
 
+@BOTH
+@pytest.mark.parametrize("reverse", [False, True], ids=["in-order", "reversed"])
+@pytest.mark.parametrize("unfinished", ["pending", "running"])
+def test_equal_ids_rank_a_counted_pending_above_an_uncounted_failure(
+    fake: FakeGitLab, tmp_path: Path, fork: bool, reverse: bool, unfinished: str
+) -> None:
+    failed = "failed" if unfinished == "pending" else "canceled"
+    pair = [job("t", unfinished, 5), job("t", failed, 5, allow_failure=True)]
+    rows = [*(pair[::-1] if reverse else pair), job("b", "success", 6)]
+    ci = read_ci(fake, tmp_path, fork=fork, **only(rows)).ci
+    assert ci.state == "pending"
+    assert {c.name: (c.state, c.counted) for c in ci.checks}["t"] == ("pending", True)
+
+
+@BOTH
+@pytest.mark.parametrize("reverse", [False, True], ids=["in-order", "reversed"])
+def test_equal_ids_rank_a_skipped_status_above_a_counted_pass(
+    fake: FakeGitLab, tmp_path: Path, fork: bool, reverse: bool
+) -> None:
+    pair = [job("t", "skipped", 5), job("t", "success", 5)]
+    ci = read_ci(fake, tmp_path, fork=fork, **only(pair[::-1] if reverse else pair)).ci
+    assert ci.state == "none"
+    assert [(c.state, c.counted) for c in ci.checks] == [("skipped", False)]
+
+
+def test_an_unnamed_status_reads_the_shared_placeholder(fake: FakeGitLab, tmp_path: Path) -> None:
+    ci = read_ci(fake, tmp_path, **only([job("", "success", 1)])).ci
+    assert [c.name for c in ci.checks] == ["(unnamed check)"]
+
+
 @pytest.mark.parametrize("bad_id", [None, "7", 1.5, True, [1], -0.0])
 def test_a_status_id_that_is_not_an_integer_is_upstream_error(
     fake: FakeGitLab, tmp_path: Path, bad_id: Any
@@ -231,6 +295,20 @@ def test_a_null_head_pipeline_is_none_with_no_read(fake: FakeGitLab, tmp_path: P
 
 
 @BOTH
+def test_a_missing_head_pipeline_key_is_hidden_and_incomplete_with_no_read(
+    fake: FakeGitLab, tmp_path: Path, fork: bool
+) -> None:
+    def hide(mr: dict[str, Any]) -> None:
+        del mr["head_pipeline"]
+
+    warnings: list[str] = []
+    ci = read_ci(fake, tmp_path, fork=fork, mr_edit=hide, warnings=warnings).ci
+    assert (ci.state, ci.checks, ci.complete, ci.head_sha) == ("none", (), False, HEAD)
+    assert any("pipeline" in w and "cannot see" in w for w in warnings)
+    assert not [c for c in fake.calls if c.path.endswith(("/statuses", "/bridges"))]
+
+
+@BOTH
 def test_a_skipped_pipeline_is_none(fake: FakeGitLab, tmp_path: Path, fork: bool) -> None:
     def skipped(mr: dict[str, Any]) -> None:
         mr["head_pipeline"]["status"] = "skipped"
@@ -247,39 +325,46 @@ def test_a_pipeline_of_another_commit_is_pending_whatever_it_reported(
         mr["head_pipeline"]["sha"] = OLD
 
     project = 202 if fork else 101
+    old_statuses = f"projects/{project}/repository/commits/{OLD}/statuses"
     mr = recording("mr")
     if fork:
         fork_mr(mr)
     old(mr)
     standard(fake, mr=mr)
-    fake.pages(
-        f"projects/{project}/repository/commits/{OLD}/statuses",
-        [[job("t", "success", 3), job("u", "failed", 4)]],
-    )
-    ci = make_backend(fake, tmp_path).ci(ref()).ci
+    fake.pages(old_statuses, [[job("t", "success", 3), job("u", "failed", 4)]])
+    result = make_backend(fake, tmp_path).ci(ref())
+    schemas.validate_cli_output("ci", result.to_dict())
+    ci = result.ci
     assert (ci.state, ci.for_current_head, ci.head_sha) == ("pending", False, OLD)
+    assert fake.count(old_statuses) == 1
+    assert fake.count(STATUSES) == fake.count(FORK_STATUSES) == 0
+    assert [c.name for c in ci.checks if not c.name.startswith("(")] == ["t", "u"]
 
 
+@BOTH
 def test_merged_results_and_merge_train_pipelines_stay_pending_fail_closed(
-    fake: FakeGitLab, tmp_path: Path
+    fake: FakeGitLab, tmp_path: Path, fork: bool
 ) -> None:
     """TODO(#31) decision pending; the documented behavior is `pending`, never `passing`: such a
     pipeline's sha is the merge ref's, not the head's, and a green one proves nothing here."""
     merge_sha = "d4" * 20
-
-    def merged(mr: dict[str, Any]) -> None:
-        mr["head_pipeline"]["sha"] = merge_sha
-        mr["head_pipeline"]["ref"] = "refs/merge-requests/7/merge"
+    project = 202 if fork else 101
+    merge_statuses = f"projects/{project}/repository/commits/{merge_sha}/statuses"
 
     mr = recording("mr")
-    merged(mr)
+    if fork:
+        fork_mr(mr)
+    mr["head_pipeline"]["sha"] = merge_sha
+    mr["head_pipeline"]["ref"] = "refs/merge-requests/7/merge"
     standard(fake, mr=mr)
-    fake.pages(
-        f"projects/101/repository/commits/{merge_sha}/statuses",
-        [[job("t", "success", 3)]],
-    )
-    ci = make_backend(fake, tmp_path).ci(ref()).ci
+    fake.pages(merge_statuses, [[job("merged-t", "success", 3)]])
+    result = make_backend(fake, tmp_path).ci(ref())
+    schemas.validate_cli_output("ci", result.to_dict())
+    ci = result.ci
     assert (ci.state, ci.for_current_head, ci.head_sha) == ("pending", False, merge_sha)
+    assert fake.count(merge_statuses) == 1
+    assert fake.count(STATUSES) == fake.count(FORK_STATUSES) == 0
+    assert [c.name for c in ci.checks] == ["merged-t"]
 
 
 @BOTH
@@ -328,6 +413,84 @@ def test_an_unreadable_fork_pipeline_is_incomplete_and_a_target_one_is_an_error(
         with pytest.raises(ForgectlError) as raised:
             make_backend(same, tmp_path).ci(ref())
         assert raised.value.code == "upstream_error"
+
+
+@pytest.mark.parametrize("status", [404, 403])
+def test_a_manual_pipeline_whose_fork_jobs_are_unreadable_reads_pending(
+    fake: FakeGitLab, tmp_path: Path, status: int
+) -> None:
+    mr = recording("mr")
+    fork_mr(mr)
+    mr["head_pipeline"]["status"] = "manual"
+    standard(fake, mr=mr)
+    fake.on(FORK_STATUSES, {"message": "x"}, status=status)
+    read = make_backend(fake, tmp_path).get_pr(ref())
+    schemas.validate_cli_output("ci", make_backend(fake, tmp_path).ci(ref()).to_dict())
+    ci = read.ci
+    assert (ci.state, ci.complete) == ("pending", False)
+    assert [(c.name, c.state, c.counted) for c in ci.checks] == [("(pipeline)", "pending", True)]
+    assert "checks_pending" in [b.code.value for b in read.pr.blocked_by]
+
+
+def test_a_manual_pipeline_whose_jobs_are_listed_adds_nothing(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    def manual(mr: dict[str, Any]) -> None:
+        mr["head_pipeline"]["status"] = "manual"
+
+    ci = read_ci(fake, tmp_path, mr_edit=manual).ci
+    assert "(pipeline)" not in [c.name for c in ci.checks]
+
+
+# -- child pipelines: the route by version and a malformed answer ---------------------------
+
+BRIDGES = "projects/101/pipelines/5001/bridges"
+TRIGGER_JOBS = "projects/101/pipelines/5001/trigger_jobs"
+
+
+@pytest.mark.parametrize(
+    ("version", "route"),
+    [
+        ({"version": "19.2.0"}, TRIGGER_JOBS),
+        ({"version": "20.0.1-ee"}, TRIGGER_JOBS),
+        ({"version": "19.1.9"}, BRIDGES),
+        ({"version": "17.9.2-ee"}, BRIDGES),
+        ({}, BRIDGES),
+    ],
+)
+def test_child_pipelines_come_from_trigger_jobs_from_19_2_and_bridges_below(
+    fake: FakeGitLab, tmp_path: Path, version: dict[str, str], route: str
+) -> None:
+    ci = read_ci(fake, tmp_path, version=version, bridges=[bridge("deploy", "failed")]).ci
+    other = BRIDGES if route == TRIGGER_JOBS else TRIGGER_JOBS
+    assert (fake.count(route), fake.count(other)) == (1, 0)
+    assert ("(child) deploy", "failing") in [(c.name, c.state) for c in ci.checks]
+
+
+@pytest.mark.parametrize("version", [{"version": "19.2.0"}, {"version": "18.0.0"}])
+@pytest.mark.parametrize("body", [{"rows": []}, "x", [1], [["a"]], [None]])
+def test_a_malformed_child_pipeline_answer_is_upstream_error(
+    fake: FakeGitLab, tmp_path: Path, version: dict[str, str], body: Any
+) -> None:
+    route = TRIGGER_JOBS if version["version"] == "19.2.0" else BRIDGES
+    standard(fake, version=version)
+    fake.on(route, body)
+    with pytest.raises(ForgectlError) as raised:
+        make_backend(fake, tmp_path).ci(ref())
+    assert raised.value.code == "upstream_error"
+
+
+@pytest.mark.parametrize("version", [{"version": "19.2.0"}, {"version": "18.0.0"}])
+@pytest.mark.parametrize("status", [403, 404, 500])
+def test_a_child_pipeline_read_failure_still_degrades(
+    fake: FakeGitLab, tmp_path: Path, version: dict[str, str], status: int
+) -> None:
+    route = TRIGGER_JOBS if version["version"] == "19.2.0" else BRIDGES
+    warnings: list[str] = []
+    standard(fake, version=version)
+    fake.on(route, {"message": "x"}, status=status)
+    ci = make_backend(fake, tmp_path, warn=warnings.append).ci(ref()).ci
+    assert ci.complete is False and any("child" in w for w in warnings)
 
 
 # -- hosts below 17.9 -----------------------------------------------------------------------
