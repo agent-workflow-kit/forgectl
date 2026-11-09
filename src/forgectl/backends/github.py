@@ -24,9 +24,10 @@ fields a second way.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+import urllib.parse
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
 from .. import model as m
 from ..errors import ForgectlError
@@ -35,6 +36,8 @@ from ..identifiers import PrRef, RepoRef, bind_login
 from ..reads import SHOW_READINESS, ReadEnv
 from ..sanitize import sanitize_line, sanitize_text
 from .base import not_implemented
+
+T = TypeVar("T")
 
 # -- the constant queries ---------------------------------------------------------------------
 
@@ -162,6 +165,8 @@ query ForgectlChecks(
   $owner: String!, $name: String!, $oid: GitObjectID!, $number: Int!, $after: String
 ) {
   repository(owner: $owner, name: $name) {
+    nameWithOwner
+    url
     object(oid: $oid) { ...CommitChecks }
   }
 }
@@ -174,7 +179,11 @@ REVIEWS_QUERY = (
     """
 query ForgectlReviews($id: ID!, $before: String) {
   node(id: $id) {
-    ... on PullRequest { reviews(last: 100, before: $before) { ...ReviewFields } }
+    ... on PullRequest {
+      number
+      url
+      reviews(last: 100, before: $before) { ...ReviewFields }
+    }
   }
 }
 """
@@ -187,6 +196,8 @@ LABELS_QUERY = """
 query ForgectlLabels($id: ID!, $after: String) {
   node(id: $id) {
     ... on PullRequest {
+      number
+      url
       labels(first: 100, after: $after) {
         pageInfo { hasNextPage endCursor }
         nodes { name }
@@ -351,15 +362,18 @@ def rest_login(typename: str | None, login: object) -> str | None:
 
     A ``Bot`` is ``name[bot]`` in REST and ``name`` in GraphQL (``gh`` shows ``app/name``): all
     three map to ``name[bot]``. Any other type keeps its login, so a user named like a bot stays
-    the different account it is. A login that fails the input grammar is dropped, never passed on
-    to a later command.
+    the different account it is; a non-Bot login spelled ``app/...`` or ``...[bot]`` is not a
+    login. A login that fails the input grammar is dropped, never passed on to a later command.
     """
     if not isinstance(login, str):
         return None
-    if login.startswith("app/"):
-        login = login[len("app/") :]
-    if typename == "Bot" and not login.endswith("[bot]"):
-        login += "[bot]"
+    if typename == "Bot":
+        if login.startswith("app/"):
+            login = login[len("app/") :]
+        if not login.endswith("[bot]"):
+            login += "[bot]"
+    elif login.startswith("app/") or login.endswith("[bot]"):
+        return None  # only a Bot is spelled like a bot
     try:
         return bind_login(login, "github")
     except ForgectlError:
@@ -382,8 +396,8 @@ def parse_actor(value: object) -> Actor | None:
     if account is not None and not _ACCOUNT_ID.fullmatch(account):
         account = None
     bot: bool | None = {"Bot": True, "User": False}.get(typename or "")
-    given = node.get("login") is not None
-    return Actor(login=login, id=account, is_bot=bot, invalid_login=given and login is None)
+    # only a null author is deleted: a present one without a usable login is an invalid login
+    return Actor(login=login, id=account, is_bot=bot, invalid_login=login is None)
 
 
 def _same_account(a: tuple[str | None, str | None], b: tuple[str | None, str | None]) -> bool:
@@ -410,32 +424,49 @@ class ReviewTable:
 def latest_by_reviewer(reviews: Sequence[Any]) -> ReviewTable:
     """One entry per account holding its latest approved, changes-requested or dismissed review,
     from ``reviews`` oldest first (the host's order). A deleted account has no login, so its
-    reviews are skipped, as the interface says."""
+    reviews are skipped, as the interface says.
+
+    A state this adapter does not know replaces the account's latest entry as ``dismissed``: never
+    an approval, never a changes request. An account whose login is unusable is tracked by id, so
+    its later review replaces its changes request; without an id its changes request sticks."""
     latest: list[tuple[tuple[str | None, str | None], m.LatestByReviewer]] = []
-    unnamed = False
+    unnamed_by_id: dict[str, bool] = {}  # id -> its latest review blocks
+    sticky = False
     for index, raw in enumerate(reviews):
         review = _obj(raw, f"review {index}")
-        # commented, pending and a state this adapter does not know are never an opinion
-        state = _REVIEW_STATES.get(_str(review.get("state"), "a review state"))
-        if state is None:
-            continue
+        word = _str(review.get("state"), "a review state")
+        if word in _REVIEW_STATES:
+            state = _REVIEW_STATES[word]
+            if state is None:
+                continue  # commented and pending are never an opinion
+        else:
+            state = "dismissed"
         actor = parse_actor(review.get("author"))
         if actor is None:
             continue
+        can_push = _opt_bool(review.get("authorCanPushToRepository"))
         if actor.login is None:
-            unnamed = unnamed or (actor.invalid_login and state == "changes_requested")
+            blocks = state == "changes_requested" and can_push is not False
+            if actor.id is None:
+                sticky = sticky or blocks
+            else:
+                latest = [(k, e) for k, e in latest if k[1] != actor.id]
+                unnamed_by_id[actor.id] = blocks
             continue
+        if actor.id is not None:
+            unnamed_by_id.pop(actor.id, None)
         entry = m.LatestByReviewer(
             login=actor.login,
             id=actor.id,
             state=state,
             commit_sha=_sha((_opt_obj(review.get("commit"), "a commit") or {}).get("oid")),
             at=_ts(review.get("submittedAt")),
-            can_push=_opt_bool(review.get("authorCanPushToRepository")),
+            can_push=can_push,
         )
         key = (actor.login, actor.id)
         latest = [(k, e) for k, e in latest if not _same_account(k, key)]
         latest.append((key, entry))
+    unnamed = sticky or any(unnamed_by_id.values())
     return ReviewTable(tuple(e for _, e in latest), unnamed)
 
 
@@ -505,14 +536,43 @@ class _Shown:
 
 
 def _is_unknown(shown: _Shown) -> bool:
-    """Whether the host is still computing mergeability of an open PR."""
+    """Whether the mergeability of an open PR is not known: still computing, missing, of the
+    wrong type, or a `mergeable` this adapter does not map. Never a clean reading."""
     pr = shown.pr
     if pr.get("state") != "OPEN":
         return False
-    return pr.get("mergeStateStatus") in (None, "UNKNOWN") or pr.get("mergeable") in (
-        None,
-        "UNKNOWN",
+    status = pr.get("mergeStateStatus")
+    return (
+        not isinstance(status, str)
+        or status == "UNKNOWN"
+        or pr.get("mergeable") not in ("MERGEABLE", "CONFLICTING")
     )
+
+
+def _url_path(url: object, project: str, suffix: str) -> None:
+    """The raw path of a url the gateway accepted must be exactly ``/{project}{suffix}`` (one
+    trailing slash allowed): no percent escape, no dot segment, no other number."""
+    if not isinstance(url, str):
+        raise Malformed("the url")
+    path = urllib.parse.urlsplit(url).path
+    expected = f"/{project}{suffix}"
+    if "%" in path or path not in (expected, expected + "/"):
+        raise Malformed("the url")
+
+
+@dataclass(frozen=True, slots=True)
+class _Pages:
+    """What a follow-up page read needs, and whether to read further pages at all."""
+
+    target: Target
+    node_id: str
+    number: int
+    project: str  # the canonical `owner/repo` of the show answer
+    more: bool
+
+
+def _quiet(_message: str) -> None:
+    return None
 
 
 def _split(ref: PrRef) -> tuple[str, str]:
@@ -547,14 +607,32 @@ class GitHubBackend:
         except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
             raise malformed("data") from None
 
-    def _graphql(self, target: Target, query: str, variables: Mapping[str, Any]) -> dict[str, Any]:
+    def _graphql(
+        self,
+        target: Target,
+        query: str,
+        variables: Mapping[str, Any],
+        check: Callable[[dict[str, Any]], T],
+    ) -> T:
+        """One query, retried; ``check`` validates the answer inside the retried call, so an
+        answer that is not the documented shape is retried like a 5xx (interface: Reliability)."""
         gateway = self._env.gateway
-        return dict(self._env.call(lambda: gateway.graphql(target, query, variables)).data)
+
+        def once() -> T:
+            try:
+                data = dict(gateway.graphql(target, query, variables).data)
+                return check(data)
+            except Malformed as bad:
+                raise malformed(f"{bad}") from None
+            except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+                raise malformed("data") from None
+
+        return self._env.call(once)
 
     def _read_show(self, target: Target, ref: PrRef, owner: str, name: str) -> _Shown:
         variables = {"owner": owner, "name": name, "number": ref.number, "after": None}
-        data = self._graphql(target, SHOW_QUERY, variables)
-        try:
+
+        def check(data: dict[str, Any]) -> _Shown:
             repo = _opt_obj(data.get("repository"), "the repository")
             if repo is None:
                 raise ForgectlError("not_found", "no such repository, or no access to it")
@@ -565,11 +643,15 @@ class GitHubBackend:
             number = pr.get("number")
             if isinstance(number, bool) or number != ref.number:
                 raise Malformed("the pull request number")
-        except Malformed as bad:
-            raise malformed(f"{bad}") from None
-        # the answer must be this host's own, for the project it names (a rename is accepted)
-        verify_identity(pr.get("url"), host=target.host, project=project, secret=target.token)
-        return _Shown(repo=repo, pr=pr, project=project)
+            # the answer must be this host's own, for the project it names (a rename is accepted)
+            verify_identity(pr.get("url"), host=target.host, project=project, secret=target.token)
+            _url_path(pr.get("url"), project, f"/pull/{ref.number}")
+            shown = _Shown(repo=repo, pr=pr, project=project)
+            # every field of this answer is checked here, so a malformed answer is retried
+            self._normalize(target, ref, owner, name, shown, False, more=False)
+            return shown
+
+        return self._graphql(target, SHOW_QUERY, variables, check)
 
     def _normalize(
         self,
@@ -579,8 +661,13 @@ class GitHubBackend:
         name: str,
         shown: _Shown,
         still_unknown: bool,
+        *,
+        more: bool = True,
     ) -> m.PrRead:
+        """The PR of one show answer. ``more=False`` reads only that answer (no further pages
+        and no warnings): the shape check run inside the retried call."""
         pr, repo = shown.pr, shown.repo
+        warn = self._env.warn if more else _quiet
         state = _PR_STATES.get(_str(pr.get("state"), "the state"))
         if state is None:
             raise Malformed("the state")
@@ -589,12 +676,16 @@ class GitHubBackend:
         node_id = _str(pr.get("id"), "the id")
         if not _NODE_ID.fullmatch(node_id):
             raise Malformed("the id")
+        draft = pr.get("isDraft")
+        if not isinstance(draft, bool):
+            raise Malformed("the draft flag")
 
         head_sha = _req_sha(pr.get("headRefOid"), "the head sha")
         author = (parse_actor(pr.get("author")) or Actor(None, None, None)).author()
-        labels = self._labels(target, node_id, pr)
-        table = latest_by_reviewer(self._reviews(target, node_id, pr))
-        ci = self._ci(target, owner, name, number, head_sha, pr)
+        pages = _Pages(target, node_id, number, canonical, more)
+        labels = self._labels(pages, pr)
+        table = latest_by_reviewer(self._reviews(pages, pr))
+        ci = self._ci(pages, owner, name, head_sha, pr, warn)
         retarget_at, retarget_known = _retarget(pr)
 
         approvals = m.count_approvals(table.entries, author)
@@ -616,7 +707,7 @@ class GitHubBackend:
         facts = self._facts(
             state=state,
             ci=ci,
-            draft=pr.get("isDraft") is True,
+            draft=draft,
             merge_state=merge_state if isinstance(merge_state, str) else None,
             mergeable=mergeable_raw if isinstance(mergeable_raw, str) else None,
             still_unknown=still_unknown,
@@ -637,6 +728,7 @@ class GitHubBackend:
         default = _opt_obj(repo.get("defaultBranchRef"), "the default branch")
         base_ref = _str(pr.get("baseRefName"), "the base branch")
         merged = state == "merged"
+        is_open = state == "open"
         merge_commit = _opt_obj(pr.get("mergeCommit"), "the merge commit")
         merged_by = parse_actor(pr.get("mergedBy"))
         request = _opt_obj(pr.get("autoMergeRequest"), "the auto-merge request")
@@ -653,7 +745,7 @@ class GitHubBackend:
             body=None if pr.get("body") is None else sanitize_text(_str(pr["body"], "the body")),
             author=author,
             state=state,
-            draft=pr.get("isDraft") is True,
+            draft=draft,
             created_at=_req_ts(pr.get("createdAt"), "the creation time"),
             updated_at=_req_ts(pr.get("updatedAt"), "the update time"),
             closed_at=closed_at,
@@ -685,11 +777,12 @@ class GitHubBackend:
                 _sha(merge_commit.get("oid")) if merged and merge_commit is not None else None
             ),
             head_fetch_ref=f"refs/pull/{number}/head",
-            mergeable=mergeable if state == "open" else None,
+            mergeable=mergeable if is_open else None,
             blocked_by=blocked_by,
+            # a closed or merged PR keeps a stale request: armed only while open
             auto_merge=m.AutoMerge(
-                enabled=request is not None and not merged,
-                by=enabled_by.login if enabled_by is not None and not merged else None,
+                enabled=request is not None and is_open,
+                by=enabled_by.login if enabled_by is not None and is_open else None,
             ),
             merge_queue=_opt_bool(pr.get("isMergeQueueEnabled")),
             merge_methods_allowed=_methods(repo),
@@ -704,7 +797,25 @@ class GitHubBackend:
 
     # -- parts ---------------------------------------------------------------------------------
 
-    def _labels(self, target: Target, node_id: str, pr: dict[str, Any]) -> tuple[str, ...]:
+    def _node_page(
+        self, pages: _Pages, query: str, variables: Mapping[str, Any], field: str
+    ) -> dict[str, Any]:
+        """The ``field`` connection of the PR read again by node id, identity checked."""
+        target = pages.target
+
+        def check(data: dict[str, Any]) -> dict[str, Any]:
+            holder = _obj(data.get("node"), "the pull request")
+            number = holder.get("number")
+            if isinstance(number, bool) or number != pages.number:
+                raise Malformed("the pull request number")
+            url = holder.get("url")
+            verify_identity(url, host=target.host, project=pages.project, secret=target.token)
+            _url_path(url, pages.project, f"/pull/{pages.number}")
+            return _obj(holder.get(field), f"the {field}")
+
+        return self._graphql(target, query, variables, check)
+
+    def _labels(self, pages: _Pages, pr: dict[str, Any]) -> tuple[str, ...]:
         names: list[str] = []
         connection = _obj(pr.get("labels"), "the labels")
         for _page in range(MAX_PAGES):
@@ -719,36 +830,75 @@ class GitHubBackend:
             cursor = _cursor(info.get("endCursor"))
             if cursor is None:
                 raise Malformed("the labels page cursor")
-            data = self._graphql(target, LABELS_QUERY, {"id": node_id, "after": cursor})
-            holder = _obj(data.get("node"), "the pull request")
-            connection = _obj(holder.get("labels"), "the labels")
+            if not pages.more:
+                return tuple(names)
+            connection = self._node_page(
+                pages, LABELS_QUERY, {"id": pages.node_id, "after": cursor}, "labels"
+            )
         raise ForgectlError(
             "upstream_error", "the pull request has more labels than forgectl reads"
         )
 
-    def _reviews(self, target: Target, node_id: str, pr: dict[str, Any]) -> list[Any]:
-        pages: list[list[Any]] = []
+    def _reviews(self, pages: _Pages, pr: dict[str, Any]) -> list[Any]:
+        chunks: list[list[Any]] = []
         connection = _obj(pr.get("reviews"), "the reviews")
         for _page in range(MAX_PAGES):
-            pages.append(_list(connection.get("nodes"), "the reviews"))
+            chunks.append(_list(connection.get("nodes"), "the reviews"))
             info = _obj(connection.get("pageInfo"), "the reviews page")
             more = info.get("hasPreviousPage")
             if more is not True:
                 if more is not False:
                     raise Malformed("the reviews page")
-                return [review for chunk in reversed(pages) for review in chunk]
+                return [review for chunk in reversed(chunks) for review in chunk]
             cursor = _cursor(info.get("startCursor"))
             if cursor is None:
                 raise Malformed("the reviews page cursor")
-            data = self._graphql(target, REVIEWS_QUERY, {"id": node_id, "before": cursor})
-            holder = _obj(data.get("node"), "the pull request")
-            connection = _obj(holder.get("reviews"), "the reviews")
+            if not pages.more:
+                return [review for chunk in reversed(chunks) for review in chunk]
+            connection = self._node_page(
+                pages, REVIEWS_QUERY, {"id": pages.node_id, "before": cursor}, "reviews"
+            )
         raise ForgectlError(
             "upstream_error", "the pull request has more reviews than forgectl reads"
         )
 
+    def _commit_by_oid(
+        self, pages: _Pages, owner: str, name: str, head_sha: str, after: str | None
+    ) -> dict[str, Any]:
+        """The head commit read by oid (a page of its checks), identity checked."""
+        target = pages.target
+        variables = {
+            "owner": owner,
+            "name": name,
+            "oid": head_sha,
+            "number": pages.number,
+            "after": after,
+        }
+
+        def check(data: dict[str, Any]) -> dict[str, Any]:
+            repo = _obj(data.get("repository"), "the repository")
+            if _project(repo.get("nameWithOwner"), "the repository path") != pages.project:
+                raise Malformed("the repository path")
+            url = repo.get("url")
+            verify_identity(url, host=target.host, project=pages.project, secret=target.token)
+            _url_path(url, pages.project, "")
+            commit = _opt_obj(repo.get("object"), "the head commit")
+            if commit is None or commit.get("oid") != head_sha:
+                raise Malformed("the head commit")
+            if after is not None and commit.get("statusCheckRollup") is None:
+                raise Malformed("the check rollup of a later page")
+            return commit
+
+        return self._graphql(target, CHECKS_QUERY, variables, check)
+
     def _ci(
-        self, target: Target, owner: str, name: str, number: int, head_sha: str, pr: dict[str, Any]
+        self,
+        pages: _Pages,
+        owner: str,
+        name: str,
+        head_sha: str,
+        pr: dict[str, Any],
+        warn: m.Warn,
     ) -> m.CI:
         """The head's checks, read for ``headRefOid`` exactly: the rollup of the last listed
         commit when its oid matches, else the commit read by oid."""
@@ -760,29 +910,16 @@ class GitHubBackend:
         cursor: str | None = None
         for page in range(MAX_CHECK_PAGES):
             if commit is None:
-                after = cursor
-                data = self._graphql(
-                    target,
-                    CHECKS_QUERY,
-                    {
-                        "owner": owner,
-                        "name": name,
-                        "oid": head_sha,
-                        "number": number,
-                        "after": after,
-                    },
-                )
-                repo = _obj(data.get("repository"), "the repository")
-                commit = _opt_obj(repo.get("object"), "the head commit")
-                if commit is None or commit.get("oid") != head_sha:
-                    raise ForgectlError(
-                        "upstream_error", "the checks of the head commit could not be read"
-                    )
+                if not pages.more:
+                    break
+                commit = self._commit_by_oid(pages, owner, name, head_sha, cursor)
             rollup = _opt_obj(commit.get("statusCheckRollup"), "the check rollup")
             if rollup is None:
+                if page > 0:
+                    raise Malformed("the check rollup of a later page")
                 break  # no checks at all: null rollup
             contexts = _obj(rollup.get("contexts"), "the checks")
-            checks.extend(read_checks(_list(contexts.get("nodes"), "the checks"), self._env.warn))
+            checks.extend(read_checks(_list(contexts.get("nodes"), "the checks"), warn))
             info = _obj(contexts.get("pageInfo"), "the checks page")
             more = info.get("hasNextPage")
             if more is False:
@@ -882,8 +1019,15 @@ class GitHubBackend:
 
 
 def _detail(status: str) -> str:
-    """A host status as a blocker detail: one line, cut, never empty."""
-    return sanitize_line(status)[:MAX_DETAIL] or "(empty)"
+    """A host status as a blocker detail: one line, cut, never empty. The cut never splits a
+    ``<U+XXXX>`` marker: it goes back to the marker's start."""
+    text = sanitize_line(status)
+    if len(text) > MAX_DETAIL:
+        text = text[:MAX_DETAIL]
+        start = text.rfind("<U+")
+        if start != -1 and ">" not in text[start:]:
+            text = text[:start]
+    return text or "(empty)"
 
 
 def _methods(repo: Mapping[str, Any]) -> tuple[str, ...] | None:

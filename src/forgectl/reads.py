@@ -6,15 +6,17 @@ method (``backends/base.py``); everything a backend needs to be reliable comes f
 ``ReadEnv`` it is built with:
 
 - ``ReadEnv.call(fn)``: one read, retried (interface: Reliability). 429, a secondary rate limit,
-  5xx and network errors are retried up to ``retries`` times with a backoff from 1 s doubling to
-  8 s, jittered, never shorter than the host's ``retry-after``, all inside the command's budget.
-  A ``retry-after`` that does not fit in what is left of the budget ends the read at once with
-  ``retry_after`` set. Only reads are retried, so a backend never passes a write to it.
+  5xx, network errors and an answer that is not the documented shape are retried up to
+  ``retries`` times with a backoff from 1 s doubling to 8 s, jitter adding up to a quarter,
+  never shorter than the host's ``retry-after``, all inside the command's budget. A wait that
+  would leave less than ``MIN_LEFT`` of the budget ends the read at once (with ``retry_after``
+  set when the host gave one). Only reads are retried, so a backend never passes a write to it.
 - ``ReadEnv.until_known(fetch, is_unknown, spec)``: a read whose answer holds a value the host
   is still computing (GitHub ``mergeStateStatus: UNKNOWN``, GitLab ``checking``) is read again a
   few times (``SHOW_READINESS``: 3 tries in 4 s; ``MERGE_READINESS``: 5 in 10 s; ``prs`` none).
-  ``retries: 0`` turns off both kinds of retry. A value still unknown after the last try is
-  reported by the caller as ``mergeability_unknown``.
+  ``retries: 0`` turns off both kinds of retry. A value still unknown after the last try, or
+  whose re-read does not fit the budget or fails a retryable way, is reported by the caller as
+  ``mergeability_unknown``.
 """
 
 from __future__ import annotations
@@ -39,6 +41,8 @@ T = TypeVar("T")
 #: Backoff for a retried read: ``BACKOFF_FIRST`` seconds, doubling, at most ``BACKOFF_CAP``.
 BACKOFF_FIRST = 1.0
 BACKOFF_CAP = 8.0
+#: A wait must leave at least this much of the budget for the call after it.
+MIN_LEFT = 1.0
 #: What a retry covers: 429 and secondary limits (``rate_limited``), 5xx and a host answer that
 #: is not the documented shape (``upstream_error``), no status (``network_error``). The
 #: gateway gives every other answer (401, 403, 404, other 4xx, 3xx) a code that is never retried.
@@ -88,10 +92,13 @@ class ReadEnv:
             self.sleep(seconds)
 
     def backoff(self, attempt: int) -> float:
-        """The wait before retry number ``attempt`` (0 is the first): the table value, scaled
-        into its upper half by the jitter, so it is never shorter than half the table value."""
+        """The wait before retry number ``attempt`` (0 is the first): the table value plus up to
+        a quarter of it by the jitter, so it is never shorter than the table value."""
         base = min(BACKOFF_CAP, BACKOFF_FIRST * (2**attempt))
-        return base * (0.5 + 0.5 * self.jitter())
+        return base * (1.0 + 0.25 * self.jitter())
+
+    def _fits(self, seconds: float) -> bool:
+        return seconds + MIN_LEFT <= self.gateway.budget.remaining()
 
     def call(self, fn: Callable[[], T]) -> T:
         """Run one read, retrying a retryable failure up to ``retries`` times."""
@@ -104,11 +111,9 @@ class ReadEnv:
                     raise
                 delay = self.backoff(attempt)
                 if error.retry_after is not None:
-                    if error.retry_after > self.gateway.budget.remaining():
-                        raise  # waiting does not fit the budget: exit at once, retry_after set
                     delay = max(delay, error.retry_after)
-                if delay > self.gateway.budget.remaining():
-                    raise
+                if not self._fits(delay):
+                    raise  # waiting does not fit the budget: exit at once, retry_after kept
                 self._wait(delay)
                 attempt += 1
 
@@ -126,10 +131,15 @@ class ReadEnv:
             if not is_unknown(value):
                 return value, False
             elapsed = self.clock() - started
-            if elapsed + spec.pause > spec.window or spec.pause > self.gateway.budget.remaining():
+            if elapsed + spec.pause > spec.window or not self._fits(spec.pause):
                 return value, True
             self._wait(spec.pause)
-            value = fetch()
+            try:
+                value = fetch()
+            except ForgectlError as error:
+                if error.code not in RETRYABLE_CODES:
+                    raise
+                return value, True  # the re-read failed or ran out of budget: still unknown
         return value, is_unknown(value)
 
 

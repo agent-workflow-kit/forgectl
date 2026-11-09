@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from forgectl import gateway as gateway_module
 from forgectl import reads
 from forgectl.backends import BACKEND_CLASSES, create_backend
 from forgectl.config import LoadedConfig
@@ -120,15 +121,15 @@ def test_the_backoff_doubles_from_one_second_to_eight_and_stays_there() -> None:
     assert env.call(fn) == "ok"
     expected = [1, 2, 4, 8, 8, 8]
     assert len(clock.slept) == 6
-    for waited, top in zip(clock.slept, expected, strict=True):
-        assert top / 2 <= waited <= top  # jitter scales into the upper half
+    for waited, base in zip(clock.slept, expected, strict=True):
+        assert base <= waited <= base * 1.25  # jitter adds up to a quarter, never less
 
 
-def test_the_jitter_changes_the_wait_and_the_lowest_is_half_the_table_value() -> None:
+def test_the_jitter_changes_the_wait_and_the_lowest_is_the_table_value() -> None:
     low, _ = make_env(jitter=0.0)
     high, _ = make_env(jitter=0.999999)
-    assert low.backoff(2) == 2.0
-    assert 3.99 < high.backoff(2) <= 4.0
+    assert [low.backoff(n) for n in range(4)] == [1.0, 2.0, 4.0, 8.0]
+    assert 4.99 < high.backoff(2) <= 5.0
 
 
 def test_retry_after_longer_than_the_backoff_is_honored() -> None:
@@ -142,7 +143,7 @@ def test_retry_after_shorter_than_the_backoff_keeps_the_backoff() -> None:
     env, clock = make_env(jitter=0.0)
     fn = failing("rate_limited", 1, retry_after=0.1)
     assert env.call(fn) == "ok"
-    assert clock.slept == [0.5]
+    assert clock.slept == [1.0]
 
 
 def test_retry_after_past_the_budget_exits_at_once_with_retry_after() -> None:
@@ -164,16 +165,42 @@ def test_a_backoff_that_does_not_fit_the_budget_raises_instead_of_waiting() -> N
     assert clock.slept == []
 
 
-def test_a_wait_counts_against_the_budget() -> None:
-    env, _ = make_env(timeout=100)
+def test_a_wait_counts_against_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    env, _ = make_env(timeout=100, jitter=0.0)
+    real = gateway_module.time.monotonic
+    offset = {"s": 0.0}
+    waits: list[float] = []
 
-    def spend(seconds: float) -> None:
-        env.gateway.budget.spent += seconds
+    def sleep(seconds: float) -> None:  # only the clock moves: the budget must see it itself
+        waits.append(seconds)
+        offset["s"] += seconds
 
-    env.sleep = spend
-    fn = failing("upstream_error", 2)
-    env.call(fn)
-    assert env.gateway.budget.spent >= 1.0  # the waits are inside the budget
+    monkeypatch.setattr(gateway_module.time, "monotonic", lambda: real() + offset["s"])
+    env.sleep = sleep
+    env.call(failing("upstream_error", 2))
+    assert waits == [1.0, 2.0]
+    assert env.gateway.budget.spent >= sum(waits)  # the waits are inside the budget
+
+
+def test_a_retry_after_that_leaves_under_a_second_exits_at_once_with_retry_after() -> None:
+    env, clock = make_env(timeout=5.0)
+    fn = failing("rate_limited", 5, retry_after=4.5)
+    with pytest.raises(ForgectlError) as caught:
+        env.call(fn)
+    assert caught.value.code == "rate_limited"
+    assert caught.value.retry_after == 4.5
+    assert calls(fn) == 1
+    assert clock.slept == []
+
+
+def test_a_backoff_that_leaves_under_a_second_raises_the_previous_error() -> None:
+    env, clock = make_env(timeout=1.5, jitter=0.0)
+    fn = failing("network_error", 5)
+    with pytest.raises(ForgectlError) as caught:
+        env.call(fn)
+    assert caught.value.code == "network_error"
+    assert calls(fn) == 1
+    assert clock.slept == []
 
 
 # readiness -------------------------------------------------------------------------------------
@@ -231,6 +258,44 @@ def test_the_window_ends_the_tries_early_when_reads_are_slow() -> None:
 
     assert env.until_known(slow, lambda v: True, SHOW_READINESS) == ("UNKNOWN", True)
     assert clock.now <= 4.0 + 3.0  # a second read at most
+
+
+def test_a_readiness_pause_that_leaves_under_a_second_is_not_taken() -> None:
+    env, clock = make_env(timeout=2.0)  # pause 4/3 s + 1 s > 2 s
+    fetch = readiness_reads(["UNKNOWN", "CLEAN"])
+    assert env.until_known(fetch, lambda v: v == "UNKNOWN", SHOW_READINESS) == ("UNKNOWN", True)
+    assert clock.slept == []
+    assert len(fetch.seen) == 1  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("code", ["rate_limited", "upstream_error", "network_error"])
+def test_a_readiness_re_read_that_fails_retryably_leaves_the_value_unknown(code: str) -> None:
+    env, _ = make_env()
+    state = {"n": 0}
+
+    def fetch() -> str:
+        state["n"] += 1
+        if state["n"] > 1:
+            raise ForgectlError(code, "the budget ran out")
+        return "UNKNOWN"
+
+    assert env.until_known(fetch, lambda v: v == "UNKNOWN", SHOW_READINESS) == ("UNKNOWN", True)
+    assert state["n"] == 2
+
+
+def test_a_readiness_re_read_that_fails_otherwise_still_raises() -> None:
+    env, _ = make_env()
+    state = {"n": 0}
+
+    def fetch() -> str:
+        state["n"] += 1
+        if state["n"] > 1:
+            raise ForgectlError("not_found", "gone")
+        return "UNKNOWN"
+
+    with pytest.raises(ForgectlError) as caught:
+        env.until_known(fetch, lambda v: v == "UNKNOWN", SHOW_READINESS)
+    assert caught.value.code == "not_found"
 
 
 def test_prs_has_no_readiness_retry() -> None:
