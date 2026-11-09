@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, TextIO
 
 from .errors import ForgectlError, sanitize_tree
-from .textsafe import sanitize_line, sanitize_text
+from .sanitize import sanitize_line, sanitize_text
 
 PARTIAL_RESULT_COMMANDS = frozenset({"prs", "whoami"})
 POST_COMMANDS = frozenset({"review", "comment", "reply", "approve"})
