@@ -525,15 +525,15 @@ Lists have a fixed order, so two snapshots compare directly, excluding `fetched_
 
 ### `diff`
 
-`diff <pr>`: the unified diff; with `--json`, `{pr, head_sha, base_sha, merge_base_sha, diff}`. `merge_base_sha` is null if unavailable. If the host will not produce the whole diff, exit 20 (`too_large`): a partial diff would mislead a reviewer. On GitLab a file is cut when `too_large` or `collapsed` is true, or when it is `modified` with an empty `diff` and no mode or path change. A cut file exits 20 (`too_large`). The text is assembled from `/diffs` fragments with `diff --git`, `---` and `+++` headers forgectl writes; `unidiff` is not used. If the head moved during the fetch, forgectl fetches once more, then exits 12 (`upstream_error`). The GitLab endpoint is `/diffs`, never `/changes`.
+`diff <pr>`: the unified diff; with `--json`, `{pr, head_sha, base_sha, merge_base_sha, diff}`. `merge_base_sha` is null if unavailable. If the host will not produce the whole diff, or it is larger than forgectl's read cap, exit 20 (`too_large`): a partial diff would mislead a reviewer. On GitHub the diff's `diff --git` headers must number the PR's `changed_files`, a required count; otherwise exit 12 (`upstream_error`). On GitLab a file is cut when `too_large` or `collapsed` is true, or when it is `modified` with an empty `diff` and no mode or path change. A cut file exits 20 (`too_large`). The text is assembled from `/diffs` fragments with `diff --git`, `---` and `+++` headers forgectl writes; `unidiff` is not used. If the head moved during the fetch, forgectl fetches once more, then exits 12 (`upstream_error`). The GitLab endpoint is `/diffs`, never `/changes`.
 
 ### `compare`
 
 `compare <pr> --from <sha> --to <sha>`: `{pr, from_sha, to_sha, status, diff}`, `status` being `ahead`, `behind`, `diverged`, `identical` or `unavailable` (a host no longer has it, or it is inaccessible). `diff` is the change from `from` to `to`: present on `ahead`, empty on `identical`, null on `behind`, `diverged` and `unavailable`. It is sanitized as for [`diff`](#diff). Shas only.
 
-GitHub: `/compare/<from>...<to>`, whose `status` is used; `diff` by the diff media type. GitLab: `/repository/compare` in the target project, `straight=false`, both ways. Commits only forward is `ahead`, only backward `behind`, both `diverged`. `identical` requires equal shas or the host's own `identical` status; an answer with no commits either way for two different shas is `unavailable`. A 404 is `unavailable`; other failures follow the read table.
+GitHub: the PR is read first, for its canonical path (a missing PR is `not_found`); then `/compare/<from>...<to>`, whose `status` is used; `diff` by the diff media type. GitLab: `/repository/compare` in the target project, `straight=false`, both ways. Commits only forward is `ahead`, only backward `behind`, both `diverged`. `identical` requires equal shas or the host's own `identical` status; an answer with no commits either way for two different shas is `unavailable`. A 404 is `unavailable`; other failures follow the read table.
 
-Exit 20 (`too_large`) when cut. GitHub: a 406 on the diff, or a listed file count at the host's cap. GitLab: `compare_timeout`, or a file cut by [`diff`](#diff)'s rule. An unclear answer is `unavailable`, never a partial diff.
+Exit 20 (`too_large`) when cut. GitHub: a 406 on the diff, a diff larger than forgectl's read cap, or a listed file count at the host's cap; a diff whose `diff --git` header count is not the listed file count is `unavailable`. GitLab: `compare_timeout`, or a file cut by [`diff`](#diff)'s rule. An unclear answer is `unavailable`, never a partial diff.
 
 ### `files`
 
@@ -907,6 +907,7 @@ There is no database to migrate. `audit.jsonl` and `log.jsonl` change additively
 - **Keyring under a custom config dir.** The unusable bus address closes only a Linux keyring. On macOS `gh` and `glab` are expected to reach the login Keychain without them, so a custom config dir may still yield the stored login there. A directory named only through `XDG_CONFIG_HOME` keeps the bus variables on every platform.
 - **`glab` repeats `Private-Token` on a cross-host redirect of a read.** A declared host redirecting a GET to another host hands that host the token. Only hosts you declare are reachable; gitlab.com's rename redirects stay on the host. `gh` does not do this. The target can then forge reads, including `ci.state` and approvals. A write through a renamed path uses the numeric id, so it reaches the renamed project with no signal.
 - **A `git` earlier on an absolute `PATH` entry** sees the token, because `glab` runs git.
+- **A GitHub head that moves and returns.** `files` and `diff` are fetched by PR number between two reads of the PR; a head that moves and moves back between them (A, then B, then A) is not detected, so the answer may be B's. A sha-pinned GitHub diff is not available without other cuts.
 - **`access` on GitLab.** Members of an invited private group can be invisible, which reads as `false`; this errs in the safe direction. Level 30 or more is an approximation of push rights on protected branches.
 
 ## Platform notes
