@@ -1,6 +1,6 @@
 # forgectl: interface
 
-Status: 0.1.0-design, 2026-11-03. This document is the single normative source for forgectl's rules. `docs/design.md`, the README and the awkit architecture link to its headings and do not restate its tables. Schemas live in [`schemas/`](../schemas/).
+Status: 0.2.0-design, 2026-11-09. This document is the single normative source for forgectl's rules. `docs/design.md`, the README and the awkit architecture link to its headings and do not restate its tables. Schemas live in [`schemas/`](../schemas/).
 
 forgectl gives one normalized interface to pull requests on GitHub and merge requests on GitLab, for reading, posting and merging. It runs `gh api` and `glab api`; it never uses their high-level commands. It keeps no database.
 
@@ -112,7 +112,7 @@ Field rules:
 | `draft` | `DRAFT`, `isDraft` | `draft_status` |
 | `conflicts` | `DIRTY` | `conflict`; `has_conflicts: true`, whatever the status (`need_rebase` can hide conflicts) |
 | `checks_pending` | any counted check pending ([CI object](#ci-object)); `ci.state` is `pending`; `BLOCKED` with `ci.state: none`, a required check that has not reported | any counted check pending; `ci.state` is `pending`; `ci_still_running`; `ci_must_pass` when no counted check is failing; `for_current_head: false` |
-| `checks_failing` | any counted check failing | any counted check failing |
+| `checks_failing` | any counted check of the current head failing | any counted check of the current head failing; an old commit's failing checks give `checks_pending` instead (`for_current_head: false`) |
 | `reviews_required` | `BLOCKED` with `reviewDecision: REVIEW_REQUIRED` | `not_approved` |
 | `changes_requested` | any `latest_by_reviewer` entry with that state and `can_push` not false, whether or not the host would block | `requested_changes`; any `latest_by_reviewer` entry with that state and `can_push` not false |
 | `discussions_unresolved` | `BLOCKED` with unresolved resolvable threads, when no other code explains it | `discussions_not_resolved` |
@@ -190,6 +190,34 @@ A published GitLab draft is a resolvable thread, including a review's body, so o
 
 A comment is `{id, author, body, created_at, updated_at, minimized, reply_to, review_id}`. `review_id` is the review it belongs to, or null. `minimized` is false on GitLab. System notes are left out.
 
+### Push time
+
+`snapshot` adds two fields to `head`: `pushed_at`, an RFC 3339 UTC time, and `pushed_at_source`, `push_event` or `commit_date`. They say when the current head was last pushed and how that was determined, so a consumer can ask what happened after the last push without keeping state. Both are null when the time cannot be determined. `pushed_at` is not part of the PR object, `prs` or `show`.
+
+| Host | `push_event` | `commit_date` |
+|---|---|---|
+| GitHub | the newest push event on the PR timeline for the current head sha: `HeadRefForcePushedEvent` or `PullRequestCommit` | the head commit's committed date, when the timeline holds no such event for the head sha |
+| GitLab | `created_at` of the newest entry of `/merge_requests/:id/versions` | the head commit's date, when versions are unavailable |
+
+A new push gives a later `pushed_at` on the next snapshot. Nothing is stored between runs.
+
+### Activity
+
+`snapshot` carries `activity`, derived in forgectl from the snapshot's own `threads`, `reviews` and `latest_by_reviewer` and from `head.pushed_at`, so every consumer shows the same counts and gets the same answer to "did others comment after my push". It is the same code path for both hosts and stores nothing.
+
+| Field | Meaning |
+|---|---|
+| `comments_total` | all comments across all `threads`, including mine and those of ignored authors |
+| `unresolved_threads` | threads that are not resolved |
+| `others_since_push` | comments plus reviews by an account that is not me and not ignored, timestamped after `head.pushed_at`; null when `pushed_at` is null |
+| `awaiting_my_reply` | unresolved threads whose last comment by a non-ignored author is not mine |
+
+- **Me** is the authenticated user from [`whoami`](#whoami), compared as in [Logins](#logins). My own login is always excluded from "others", whatever the config says.
+- **Ignored** authors are those matching `activity.ignore_authors` ([Config](#config)): logins, with glob patterns allowed, such as `dependabot[bot]`, `renovate*` or `gitlab-bot`. The config list alone decides. `author.is_bot` stays in the output as information and never changes a count: a bot not on the list counts, and a listed account is ignored whatever `is_bot` says.
+- **Resolved threads** are never awaiting my reply, whoever wrote last.
+- **GitHub.** Comments come from `threads`, reviews from `reviews`; a review counts at its `submitted_at`.
+- **GitLab.** `reviews` is always empty, so nothing is inferred from it. Review comments are discussion notes, already in `threads`. Approvals feed `others_since_push` from `latest_by_reviewer`: only entries with state `approved` whose `at` is set, by someone who is not me and not ignored, with `at` after `head.pushed_at`. Such an approval counts once.
+
 ### CI object
 
 `{state, head_sha, for_current_head, complete, checks}`, with `state` one of `passing`, `failing`, `pending` or `none`. `checks` is a list of `{name, state, required, counted, url, finished_at}`. GitHub's check runs and status contexts merge into one list.
@@ -209,7 +237,7 @@ A check's `state`:
 
 An unmapped value is `pending` with a `warn` log line, so a new host state never reads as passing.
 
-- `counted` is false for a GitLab `allow_failure` job and for `skipped`; true otherwise. `required` is `true`, `false` or `null`; GitLab gives `false` for `allow_failure: true`, else `null`. A check's `url` is null for a scheme other than `http` or `https`.
+- `counted` is false for a GitLab `allow_failure` job and for `skipped`; true otherwise. `required` is `true`, `false` or `null`; GitLab gives `false` for `allow_failure: true`, else `null`. A check's `url` is null for a scheme other than lowercase `http://` or `https://`, matching the schema's pattern, and for a url holding whitespace or a control character.
 - **Aggregation over counted checks:** any `failing` gives `failing`; else any `pending` gives `pending`; else any `passing` gives `passing`; else `none`. **`none` is not passing:** it means no evidence, including a head whose only pipeline was skipped.
 - `for_current_head` false (GitLab `head_pipeline.sha` differs from the head) forces `state: pending`, whatever the old pipeline reported; `head_sha` names the old commit. With `state: none`, `for_current_head` is true and `head_sha` is the PR's head. `passing` means no counted check registered for this head is failing or pending, and at least one passed. It does not say which checks, that every expected check registered, or who ran them.
 - `complete` false (a host cap on the check list) turns `passing` into `pending`.
@@ -238,7 +266,7 @@ Applied to every forge text field, diffs, and anything printed from input or a c
 
 - Characters of Unicode categories `Cc` (except tab and newline), `Cf`, `Cs`, `Co`, `Cn`, `Zl` and `Zp` are replaced by a visible marker `<U+XXXX>`, for example `<U+202E>`. Bidi overrides stay visible rather than disappearing, because in a diff they can be the attack.
 - So are these code points: all variation selectors, U+034F, U+17B4, U+17B5, U+180B to U+180F, U+115F, U+1160, U+3164, U+FFA0 and U+2800.
-- **One-line fields** (`title`, `head.ref`, `base.ref`, `path`, `login`, a check's `name`, labels; `x-one-line` in the schemas): tab and LF also become markers.
+- **One-line fields** (`title`, `head.ref`, `base.ref`, `path`, `login`, a check's `name` and `url`, labels; `x-one-line` in the schemas): tab and LF also become markers.
 - In text fields CRLF becomes LF. A lone CR becomes `<U+000D>`. In a diff, a CR before LF stays as it is.
 - Bytes that are not valid UTF-8 become U+FFFD.
 
@@ -489,7 +517,7 @@ With `--repo` or `--host` there is one target, so a failure uses the ordinary ex
 
 ### `snapshot`
 
-`snapshot <pr>`: the PR object plus `review_requests`, `teams_visible`, `reviews`, `latest_by_reviewer`, `threads`, `ci`, `rate_limit`, `complete`, `incomplete` (names of the parts that are not complete) and `fetched_at`. One call for a caller that compares successive states. forgectl emits no events and stores nothing. `updated_at` is not a reliable change signal on either host.
+`snapshot <pr>`: the PR object plus `review_requests`, `teams_visible`, `reviews`, `latest_by_reviewer`, `threads`, `ci`, `activity` ([Activity](#activity)), `rate_limit`, `complete`, `incomplete` (names of the parts that are not complete) and `fetched_at`. In `snapshot` only, `head` also carries `pushed_at` and `pushed_at_source` ([Push time](#push-time)); `prs` and `show` items keep the `head` fields they have. One call for a caller that compares successive states. forgectl emits no events and stores nothing. `updated_at` is not a reliable change signal on either host.
 
 `incomplete` names any of `review_requests`, `reviews`, `threads`, `ci`. The `ci` name follows `ci.complete`.
 
@@ -554,7 +582,7 @@ Output: `{pr, merged, already_merged, auto_merge_enabled, merged_head_sha, merge
 
 `review <pr> --file <path|-> [--expected-head <sha>] [--expected-base <ref>] [--allow-self] [--dedupe-key K] [--yes] [--dry-run] [--actor A] [--decision-id D]... [--override-escalation]`
 
-The input file (`schemas/review-input.json`) is `{event, body, comments}`: `event` is `comment`, `request_changes` or `approve`; `comments` is a list of `{path, line, side, start_line, body}`, with `line` required, `side` being `left` or `right` (default `right`), and a range on one side. An `approve` event follows [`approve`](#approve)'s rules for self-approval and already-approved; its text is always posted. An empty review means `comment` with neither body nor comments; `approve` with neither is allowed. Attribution footers are the caller's. `--expected-head` and `--expected-base` are required unless the run is interactive.
+The input file (`schemas/review-input.json`) is `{event, body, comments}`: `event` is `comment`, `request_changes` or `approve`; `comments` is a list of `{path, line, side, start_line, body}`, with `line` required, `side` being `left` or `right` (default `right`), and a range on one side. An `approve` event follows [`approve`](#approve)'s rules for self-approval and already-approved; its text is always posted. An empty review means `comment` with neither body nor comments; `approve` with neither is allowed. Attribution footers are the caller's. `review` accepts at most 200 inline comments per call; more is a usage error (exit 2), so the audit outcome record stays under the 64 KiB line cap. `--expected-head` and `--expected-base` are required unless the run is interactive.
 
 Output: `{pr, action, ids, thread_ids, review_id, already_posted, follow_up_done, neutralized_lines, markers_removed, warnings, head_sha, head_verified, dry_run}`, as for every post; `head_verified` is only on `review` and `approve`, and null for other events.
 
@@ -597,7 +625,7 @@ See [TUI](#tui).
 
 ### `export`
 
-`export [--since TIME]`: audit records, as JSONL; `--json` prints an array. `--since` takes RFC 3339 or a duration. A missing file gives empty output; a malformed line warns and is skipped.
+`export [--since TIME]`: audit records, as JSONL; `--json` prints an array. `--since` takes RFC 3339 or a duration. A missing file gives empty output; a malformed line warns and is skipped. If the state directory or `audit.jsonl` exists but is refused (see [Files](#files)) or cannot be read, `export` exits 12 `audit_unavailable`.
 
 ## Global flags
 
@@ -743,9 +771,11 @@ Reads fire none.
 | `hosts.<host>.me` | null | login on this host, under its backend's login grammar |
 | `hosts.<host>.api_prefix` | null | GitLab under a path, such as `/gitlab` |
 | `repos.<id>.merge_method` | null | `squash`, `merge` or `rebase` |
+| `activity.ignore_authors` | `[]` | logins whose comments and reviews [`activity`](#activity) ignores; glob patterns allowed; replaces on merge like any list |
+| `browse.refresh_interval` | `120s` | seconds between automatic refreshes in [`browse`](#tui); `0` disables them; the flag `browse --interval` wins |
 | `hooks.<name>` | `[]` | [Hooks](#hooks) |
 
-Per-repo overrides hold only `merge_method` in v1: no setting lowers a safety rule, so none can be relaxed per repo. A duration is a positive number or a numeric string, in seconds, or `<number><unit>` with unit `ms`, `s`, `m`, `h` or `d`. `api_prefix` is only for declared hosts and null for GitHub; it has 1 to 8 segments of 1 to 64 characters from `A-Za-z0-9._-`, none of them `.` or `..`, and no trailing slash. A host key has labels of at most 63 characters and a name of at most 253, and a GitHub host's key has no port (`gh` refuses one); either failure exits 2 (`config_invalid`) naming the key. A built-in host's `backend` must match. A hook's `cmd` is not empty.
+Per-repo overrides hold only `merge_method` in v1: no setting lowers a safety rule, so none can be relaxed per repo. A duration is a positive number or a numeric string, in seconds, or `<number><unit>` with unit `ms`, `s`, `m`, `h` or `d`; `browse.refresh_interval` alone also accepts `0`, which disables the refresh. `api_prefix` is only for declared hosts and null for GitHub; it has 1 to 8 segments of 1 to 64 characters from `A-Za-z0-9._-`, none of them `.` or `..`, and no trailing slash. A host key has labels of at most 63 characters and a name of at most 253, and a GitHub host's key has no port (`gh` refuses one); either failure exits 2 (`config_invalid`) naming the key. A built-in host's `backend` must match. A hook's `cmd` is not empty.
 
 **Reading files.** A config file or drop-in must be a regular file (a symlink to one is followed) of at most 256 KiB, valid UTF-8, a single YAML document of at most 10,000 nodes whose top level is a mapping; at most 256 drop-ins are read, and names that do not end in `.yaml` or that start with `.` are skipped. The default `config.yaml` and `config.d` are absent only when no entry exists at their path (a missing parent, or a parent that is not a directory, counts as none); an entry that exists but is not a readable regular file (`config.yaml`) or directory (`config.d`), a dangling symlink included, is refused. Scalars resolve under the YAML 1.2 core schema, with numbers in decimal only: only `true` and `false` are booleans and integers are decimal, so `yes`, `010`, `0x1f` and `1:30` are strings. YAML anchors, aliases, merge keys, duplicate keys, non-string keys, tags beyond the core types (so also timestamps and binary), and a NUL or a lone surrogate (U+D800 to U+DFFF) in any key or value are refused. `--config` and its drop-ins do not read the default location. A refusal names the key, or the file for a problem that has no key, and its message repeats no file content other than a key. Each of `FORGECTL_TIMEOUT`, `FORGECTL_RETRIES`, `FORGECTL_GH_BIN` and `FORGECTL_GLAB_BIN` is refused when empty, and is named by the variable. Beyond the schema, these are refused: a hook `cmd` that is only whitespace (Unicode whitespace included); an executable named `.` or `..`; control characters (Unicode category Cc: C0, DEL and C1) in an executable name or a `token_command` argument; a NUL or a lone surrogate in any string; `retries` written with a fraction part, such as `3.0`; a duration that is infinite, NaN or over 100 years; per-repo keys that differ only by case; a `me.github`, `me.gitlab` or `hosts.<host>.me` that is not a login under its own backend's grammar (the schema allows the union of both); a `token_command` whose first word is not a bare name or an absolute path; a `token_env` naming a variable forgectl sets in or passes to a child (see [Credentials](#credentials)); and a GitHub host key that `gh` rewrites (see [Hosts](#hosts)). Each is refused at load, before any process starts. `config_hash` covers the environment's overrides; its canonical form is defined under [Audit and log](#audit-and-log).
 
@@ -787,13 +817,43 @@ forgectl stores no long-lived objects, so it has no labels of its own. Conventio
 
 ## TUI
 
-`browse [--focus <pr>] [--result-file PATH]` needs the extra `forgectl[tui]`; without it, exit 2 with the install command.
+`browse [--focus <pr>] [--result-file PATH] [--interval D]` needs the extra `forgectl[tui]`; without it, exit 2 with the install command.
 
-A list and a detail pane with facts, CI, reviews, comments and diff. The default list is the union of requested-from-you and authored-by-you, as two `prs` calls. Two actions: `m` merge, `o` open in a browser. The browser runs with forgectl's environment minus every configured `token_env` variable and the [ambient token list](#credentials), as a hook does. Posting stays with the tools that own drafts.
+`browse` is read-only: a dashboard of your open PRs and MRs on GitHub and GitLab, a detail pane with facts, CI, reviews, comments and diff, and one action, `o` open in a browser. The browser runs with forgectl's environment minus every configured `token_env` variable and the [ambient token list](#credentials), as a hook does. Posting stays with the tools that own drafts. Merging is a separate follow-up ([Merge from `browse`](#merge-from-browse-follow-up)). Forge text renders with Textual markup disabled. GitLab rows rely on the GitLab path being verified against a self-managed instance (#35).
 
-`m` runs the merge in process, with `--actor human:<me.name>`, and `--expected-head`, `--expected-base` from that read. `m`'s dialog is [Merge order](#merge-order) step 5's, plus a choice of `merge_methods_allowed`, preselecting the configured method, when the method is unresolved. A blocked PR gets no merge: the status line shows `not_ready` and the CLI command. Audit: `actor_source: tty`. A veto, an escalation or any refusal shows in the status line. `o` opens only the built `url`; a check's `url` is shown, opened only when `http` or `https`. Forge text renders with Textual markup disabled.
+### List
 
-`--result-file` writes `{"intent": "open"|"back", "selected": [...], "merged": [...]}` on exit (`schemas/cli/browse-result.json`). `selected` holds zero or one `pr`; `merged` lists the PRs merged with `m`. `enter` opens the detail pane and `intent` stays `back` on exit; `intent: open` means `o` was used. Keys: `q` quit, `?` help, `/` filter, `enter` open, `r` refresh.
+The default list is the union of requested-from-you and authored-by-you, as two `prs` calls. Columns:
+
+| Column | Source |
+|---|---|
+| repo and number, title | the `prs` item |
+| badge | state, draft and the first blocker |
+| CI glyph | `ci.state` |
+| approvals | `approvals`; on GitLab over `approvals` plus the `approvals_left` of the approval rule forgectl already reads, such as `1/2`; on GitHub, which reports no required count in the model, the bare count |
+| comments | `activity`: `comments_total`, `unresolved_threads`, `others_since_push` (new since push) and `awaiting_my_reply` |
+| age | since `head.pushed_at` (blank when it is null) and since `updated_at` |
+
+- **Grouping and order.** Rows group by repo. A "needs attention first" order puts rows with failing CI, new comments from others since the push, a thread awaiting my reply or changes requested first, then the rest; a key switches between it and the default order. Authors in `activity.ignore_authors` never move a row.
+- **Filters.** Authored by me or review-requested from me; CI failing; has new comments. Filters combine as an intersection, and the status bar names the active ones. `/` filters by text.
+- **Loading.** One `prs` call per query builds the rows, then `snapshot` runs per PR with bounded concurrency (configurable, a small default), visible rows first. Rows render as each snapshot arrives, with a per-row loading state and a progress count in the status bar. The names and defaults of the tunables here and in Refresh (concurrency, the full pass every Nth cycle, the rate-limit threshold) are fixed with their schema entries when the implementation lands. A failed snapshot marks its row with the error and does not block the others.
+
+### Refresh
+
+- **Manual.** `r` refreshes the selected PR (its `snapshot`); `R` refreshes all (`prs`, then snapshots). A refresh in flight is never started twice: `R` during a cycle is ignored, with a status note.
+- **Automatic.** Every `browse.refresh_interval` seconds, default 120, `0` disables it; `--interval` takes a duration like the config value, or `0`, wins over the config, and an invalid value exits 2. Each cycle re-runs `prs`, re-snapshots only PRs whose `updated_at` or head sha changed and PRs with pending CI, and re-snapshots all every Nth cycle (configurable, default 5), because `updated_at` is not a reliable change signal and can miss CI and approval changes.
+- **Place and change.** Selection and scroll position survive any refresh. Rows whose data changed are highlighted until the next cycle or a keypress. A failed refresh keeps the row's last good data and marks it stale.
+- **Status bar.** Last refresh time, `rate_limit.remaining` per host, the active filters, loading progress, and partial errors (`complete` false, `errors`).
+- **Cost control.** When `rate_limit.remaining` for a host drops below a threshold, the interval for that host lengthens and the status bar says so; the normal interval resumes after `rate_limit.reset_at`. Polling stays within [Reliability](#reliability); an ETag pass-through may later lower its cost.
+- **State.** Nothing is stored between runs (D-4); change tracking lives in memory only.
+
+### Result file
+
+`--result-file` writes `{"intent": "open"|"back", "selected": [...], "merged": [...]}` on exit (`schemas/cli/browse-result.json`). `selected` holds zero or one `pr`; `merged` lists the PRs merged from `browse`, and stays empty until the merge follow-up. `enter` opens the detail pane and `intent` stays `back` on exit; `intent: open` means `o` was used. `o` opens only the built `url`; a check's `url` is shown, opened only when `http` or `https`. Keys: `q` quit, `?` help, `/` filter, `enter` open, `r` refresh selected, `R` refresh all, `o` open in a browser; the keys for sort order and filters are listed in `?`.
+
+### Merge from `browse` (follow-up)
+
+`m` is not part of the read-only `browse`; it follows as its own step. It runs the merge in process, with `--actor human:<me.name>`, and `--expected-head`, `--expected-base` from that read. `m`'s dialog is [Merge order](#merge-order) step 5's, plus a choice of `merge_methods_allowed`, preselecting the configured method, when the method is unresolved. A blocked PR gets no merge and no override: the status line shows `not_ready` and the CLI command. Audit: `actor_source: tty`. A veto, an escalation or any refusal shows in the status line, and merged PRs are listed in `merged` in the result file.
 
 ## Files
 
@@ -804,7 +864,9 @@ A list and a detail pane with facts, CI, reviews, comments and diff. The default
 | `log.jsonl` | 0600 | public contract |
 | private temporary directories | 0700 | empty cwd and config dirs per process, under `TMPDIR`, removed on exit |
 
-`audit.jsonl` gets mode 0600 on creation; an existing file's mode is not changed. There is no `state.db`.
+`audit.jsonl` gets mode 0600 on creation; an existing file's mode is not changed. There is no `state.db`. Neither file is rotated. Each record is one ASCII line (non-ASCII is escaped) of at most 64 KiB, written with a single append, so concurrent runs never interleave lines. The state directory must be a real directory (not a symlink) owned by the user and not writable by group or others, and a file must be a regular file owned by the user with one link and not writable by group or others (an existing file's mode is still never changed, so 0600 and 0644 are accepted and 0620 or 0666 are not); otherwise it is not used (an audit append fails as `audit_unavailable`, a log write warns). `export` skips a line over 256 KiB.
+
+Either file may contain empty lines: forgectl adds a newline first when an append finds the file not ending in one. A reader skips empty lines.
 
 ## Audit and log
 
@@ -812,9 +874,9 @@ A list and a detail pane with facts, CI, reviews, comments and diff. The default
 
 **Two records per write.** Before a host write, forgectl appends a record with `result: attempted` and an `attempt_id`; after, a second record with the same id and the outcome. `attempted` is written once per run, before its first write, whichever step that is. A record with no outcome means forgectl died in between. If that first append fails, exit 12 (`audit_unavailable`), with nothing sent. If the second fails, exit 12 (`audit_failed`) with the outcome in `details`, so a caller does not retry.
 
-**Fields.** `merge_unverified` is recorded as `merged_unexpected` when the PR merged at another head or base, with `observed: {head_sha, base_ref}` in the outcome record, else as `outcome_unknown`; `observed` is null otherwise. A post's `quick_action_ran` as itself; `approved_stale_head` as `approved`, since the approval exists. `config_hash` is the sha256 hex digest of the canonical JSON of the effective config, after files, environment overrides and defaults but not flags: every key present, each with its default when unset (null only where the default is null, such as `me.name`), keys sorted, compact separators (`,` and `:`), non-ASCII characters as `\u` escapes, encoded as UTF-8, durations as JSON numbers of seconds always written with a fraction part, as Python's float repr does (`60.0`, `0.009`), keys spelled as in the schema (such as `pre-merge` and a hook's `async`), and `me.name` as configured (null when unset, not the OS username). `config_path` is null for the default. `actor_source` is `flag`, `tty` or `default`. `human:` with `stdin_tty: false` is expected from a dashboard, and is checkable, not refused.
+**Fields.** `merge_unverified` is recorded as `merged_unexpected` when the PR merged at another head or base, with `observed: {head_sha, base_ref}` in the outcome record, else as `outcome_unknown`; `observed` is null otherwise. A post's `quick_action_ran` as itself; `approved_stale_head` as `approved`, since the approval exists. `config_hash` is the sha256 hex digest of the canonical JSON of the effective config, after files, environment overrides and defaults but not flags: every key present, each with its default when unset (null only where the default is null, such as `me.name`), keys sorted, compact separators (`,` and `:`), non-ASCII characters as `\u` escapes, encoded as UTF-8, durations as JSON numbers of seconds always written with a fraction part, as Python's float repr does (`60.0`, `0.009`), keys spelled as in the schema (such as `pre-merge` and a hook's `async`), and `me.name` as configured (null when unset, not the OS username). `config_path` is null for the default. `actor_source` is `flag`, `tty` or `default`. `human:` with `stdin_tty: false` is expected from a dashboard, and is checkable, not refused. `inputs.base_ref` and `observed.base_ref` are cut to their first 1024 characters when written. `ts` must be a real instant: `export` skips, as malformed, a record whose `ts` matches the schema pattern but names no real time (such as a leap second `23:59:60`, an offset of `+24:00` or a date that does not exist).
 
-**Log** (`schemas/log.json`): `ts`, `level`, `event`, `pr`, `host`, `details`. `error` for exit 1; `warn` for refusals, vetoes, escalations, exit 12 and an unmatched instance note; `info` otherwise; `debug` for `--verbose`. Reads log only at `--verbose` or on failure, so polling does not grow the file. A log write failure warns only. URLs are recorded without userinfo. Secrets never appear in either file.
+**Log** (`schemas/log.json`): `ts`, `level`, `event`, `pr`, `host`, `details`. `error` for exit 1; `warn` for refusals, vetoes, escalations, exit 12 and an unmatched instance note; `info` otherwise; `debug` for `--verbose`. Reads log only at `--verbose` or on failure, so polling does not grow the file. A log write failure warns only, and never changes the exit code. `export` prints each record with its untrusted fields (`base_ref`, `host_login`, `observed.base_ref`) sanitized, and skips, with a warning that does not repeat the line, any line that is not valid against `schemas/audit.json`. URLs are recorded without userinfo. Secrets never appear in either file.
 
 ## Upgrades
 
