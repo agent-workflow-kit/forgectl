@@ -248,7 +248,7 @@ def test_retries_zero_turns_the_readiness_retry_off_too() -> None:
     assert clock.slept == []
 
 
-def test_each_readiness_read_is_itself_retried() -> None:
+def test_a_readiness_read_retries_through_call_and_is_not_retried_twice() -> None:
     env, _ = make_env()
     state = {"n": 0}
 
@@ -258,7 +258,13 @@ def test_each_readiness_read_is_itself_retried() -> None:
             raise ForgectlError("upstream_error", "blip")
         return "UNKNOWN" if state["n"] < 4 else "CLEAN"
 
-    assert env.until_known(fetch, lambda v: v == "UNKNOWN", SHOW_READINESS) == ("CLEAN", False)
+    assert env.until_known(lambda: env.call(fetch), lambda v: v == "UNKNOWN", SHOW_READINESS) == (
+        "CLEAN",
+        False,
+    )
+    assert state["n"] == 4  # one failure retried once, three readiness reads
+    with pytest.raises(ForgectlError):  # until_known itself never retries a failure
+        env.until_known(failing("upstream_error", 1), lambda v: False, SHOW_READINESS)
 
 
 # the backend table -----------------------------------------------------------------------------

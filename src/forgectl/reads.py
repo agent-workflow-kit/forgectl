@@ -115,12 +115,13 @@ class ReadEnv:
     def until_known(
         self, fetch: Callable[[], T], is_unknown: Callable[[T], bool], spec: Readiness
     ) -> tuple[T, bool]:
-        """Read with ``fetch`` (each read itself retried) until ``is_unknown`` is false or the
-        tries or window of ``spec`` run out. Returns the last answer and whether it is still
+        """Read with ``fetch`` until ``is_unknown`` is false or the tries or window of ``spec``
+        run out. ``fetch`` retries its own calls through ``call``; this never retries one, so a
+        failure is not retried twice over. Returns the last answer and whether it is still
         unknown. ``retries: 0`` makes it one try."""
         tries = spec.tries if self.retries > 0 else 1
         started = self.clock()
-        value = self.call(fetch)
+        value = fetch()
         for _ in range(tries - 1):
             if not is_unknown(value):
                 return value, False
@@ -128,7 +129,7 @@ class ReadEnv:
             if elapsed + spec.pause > spec.window or spec.pause > self.gateway.budget.remaining():
                 return value, True
             self._wait(spec.pause)
-            value = self.call(fetch)
+            value = fetch()
         return value, is_unknown(value)
 
 

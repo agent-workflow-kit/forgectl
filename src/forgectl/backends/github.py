@@ -24,7 +24,7 @@ second way.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -135,7 +135,10 @@ query ForgectlShow($owner: String!, $name: String!, $number: Int!, $after: Strin
         nodes { isResolved }
       }
       commits(last: 1) { nodes { commit { ...CommitChecks } } }
-      timelineItems(last: 1, itemTypes: [BASE_REF_CHANGED_EVENT, AUTOMATIC_BASE_CHANGE_SUCCEEDED_EVENT]) {
+      timelineItems(
+        last: 1
+        itemTypes: [BASE_REF_CHANGED_EVENT, AUTOMATIC_BASE_CHANGE_SUCCEEDED_EVENT]
+      ) {
         nodes {
           __typename
           ... on BaseRefChangedEvent { createdAt }
@@ -155,7 +158,9 @@ query ForgectlShow($owner: String!, $name: String!, $number: Int!, $after: Strin
 #: pages of a long check list.
 CHECKS_QUERY = (
     """
-query ForgectlChecks($owner: String!, $name: String!, $oid: GitObjectID!, $number: Int!, $after: String) {
+query ForgectlChecks(
+  $owner: String!, $name: String!, $oid: GitObjectID!, $number: Int!, $after: String
+) {
   repository(owner: $owner, name: $name) {
     object(oid: $oid) { ...CommitChecks }
   }
@@ -206,7 +211,7 @@ MERGE_STATE_TABLE: Mapping[str, Mapping[str, bool]] = {
     "BEHIND": {"behind": True},
     "DRAFT": {"draft": True},
     "BLOCKED": {"host_blocked": True},
-    "UNKNOWN": {"mergeability_unknown": True},
+    "UNKNOWN": {},  # still computing: `mergeability_unknown` once the tries ran out
     "CLEAN": {},
     "HAS_HOOKS": {},
     "UNSTABLE": {},
@@ -245,7 +250,9 @@ class Malformed(Exception):
 
 
 def malformed(what: str) -> ForgectlError:
-    return ForgectlError("upstream_error", f"GitHub answered {what} that is not the documented shape")
+    return ForgectlError(
+        "upstream_error", f"GitHub answered {what} that is not the documented shape"
+    )
 
 
 # -- reading untrusted values ------------------------------------------------------------------
@@ -408,10 +415,9 @@ def latest_by_reviewer(reviews: Sequence[Any]) -> ReviewTable:
     unnamed = False
     for index, raw in enumerate(reviews):
         review = _obj(raw, f"review {index}")
-        state = _REVIEW_STATES.get(_str(review.get("state"), "a review state"), "unmapped")
+        # commented, pending and a state this adapter does not know are never an opinion
+        state = _REVIEW_STATES.get(_str(review.get("state"), "a review state"))
         if state is None:
-            continue
-        if state == "unmapped":  # a state this adapter does not know: never an approval
             continue
         actor = parse_actor(review.get("author"))
         if actor is None:
@@ -562,9 +568,7 @@ class GitHubBackend:
         except Malformed as bad:
             raise malformed(f"{bad}") from None
         # the answer must be this host's own, for the project it names (a rename is accepted)
-        verify_identity(
-            pr.get("url"), host=target.host, project=project, secret=target.token
-        )
+        verify_identity(pr.get("url"), host=target.host, project=project, secret=target.token)
         return _Shown(repo=repo, pr=pr, project=project)
 
     def _normalize(
@@ -576,7 +580,6 @@ class GitHubBackend:
         shown: _Shown,
         still_unknown: bool,
     ) -> m.PrRead:
-        env = self._env
         pr, repo = shown.pr, shown.repo
         state = _PR_STATES.get(_str(pr.get("state"), "the state"))
         if state is None:
@@ -623,9 +626,7 @@ class GitHubBackend:
             unresolved=_unresolved_threads(pr),
         )
         blocked_by = m.compute_blocked_by(facts)
-        mergeable = (
-            MERGEABLE_TABLE.get(mergeable_raw) if isinstance(mergeable_raw, str) else None
-        )
+        mergeable = MERGEABLE_TABLE.get(mergeable_raw) if isinstance(mergeable_raw, str) else None
 
         merged_at = _ts(pr.get("mergedAt"))
         if state == "merged" and merged_at is None:
@@ -685,7 +686,7 @@ class GitHubBackend:
             ),
             head_fetch_ref=f"refs/pull/{number}/head",
             mergeable=mergeable if state == "open" else None,
-            blocked_by=tuple(_clean_blocker(b) for b in blocked_by),
+            blocked_by=blocked_by,
             auto_merge=m.AutoMerge(
                 enabled=request is not None and not merged,
                 by=enabled_by.login if enabled_by is not None and not merged else None,
@@ -699,7 +700,6 @@ class GitHubBackend:
             approvals=approvals,
             approvals_at_head=approvals_at_head,
         )
-        env.warn  # the warn hook is read where a mapping needs it
         return m.PrRead(pr=built, ci=ci)
 
     # -- parts ---------------------------------------------------------------------------------
@@ -707,7 +707,7 @@ class GitHubBackend:
     def _labels(self, target: Target, node_id: str, pr: dict[str, Any]) -> tuple[str, ...]:
         names: list[str] = []
         connection = _obj(pr.get("labels"), "the labels")
-        for page in range(MAX_PAGES):
+        for _page in range(MAX_PAGES):
             for node in _list(connection.get("nodes"), "the labels"):
                 names.append(sanitize_line(_str(_obj(node, "a label").get("name"), "a label")))
             info = _obj(connection.get("pageInfo"), "the labels page")
@@ -722,12 +722,14 @@ class GitHubBackend:
             data = self._graphql(target, LABELS_QUERY, {"id": node_id, "after": cursor})
             holder = _obj(data.get("node"), "the pull request")
             connection = _obj(holder.get("labels"), "the labels")
-        raise ForgectlError("upstream_error", "the pull request has more labels than forgectl reads")
+        raise ForgectlError(
+            "upstream_error", "the pull request has more labels than forgectl reads"
+        )
 
     def _reviews(self, target: Target, node_id: str, pr: dict[str, Any]) -> list[Any]:
         pages: list[list[Any]] = []
         connection = _obj(pr.get("reviews"), "the reviews")
-        for page in range(MAX_PAGES):
+        for _page in range(MAX_PAGES):
             pages.append(_list(connection.get("nodes"), "the reviews"))
             info = _obj(connection.get("pageInfo"), "the reviews page")
             more = info.get("hasPreviousPage")
@@ -741,7 +743,9 @@ class GitHubBackend:
             data = self._graphql(target, REVIEWS_QUERY, {"id": node_id, "before": cursor})
             holder = _obj(data.get("node"), "the pull request")
             connection = _obj(holder.get("reviews"), "the reviews")
-        raise ForgectlError("upstream_error", "the pull request has more reviews than forgectl reads")
+        raise ForgectlError(
+            "upstream_error", "the pull request has more reviews than forgectl reads"
+        )
 
     def _ci(
         self, target: Target, owner: str, name: str, number: int, head_sha: str, pr: dict[str, Any]
@@ -753,13 +757,20 @@ class GitHubBackend:
         commit = last if last is not None and last.get("oid") == head_sha else None
         checks: list[m.Check] = []
         complete = True
+        cursor: str | None = None
         for page in range(MAX_CHECK_PAGES):
             if commit is None:
-                after = cursor if page else None
+                after = cursor
                 data = self._graphql(
                     target,
                     CHECKS_QUERY,
-                    {"owner": owner, "name": name, "oid": head_sha, "number": number, "after": after},
+                    {
+                        "owner": owner,
+                        "name": name,
+                        "oid": head_sha,
+                        "number": number,
+                        "after": after,
+                    },
                 )
                 repo = _obj(data.get("repository"), "the repository")
                 commit = _opt_obj(repo.get("object"), "the head commit")
@@ -803,18 +814,13 @@ class GitHubBackend:
         flags: dict[str, Any] = {}
         others: list[str] = []
         if merge_state is None:
-            flags["mergeability_unknown"] = True  # missing is never "clean"
+            pass  # missing is unknown: `still_unknown` covers it, and nothing reads as clean
         elif merge_state in MERGE_STATE_TABLE:
             flags.update(MERGE_STATE_TABLE[merge_state])
         else:
             others.append(_detail(merge_state))
         if mergeable == "CONFLICTING":
             flags["conflicts"] = True
-        # the retry-until-known rule: only a value still unknown after the tries is reported
-        unknown_now = merge_state in (None, "UNKNOWN") or mergeable in (None, "UNKNOWN")
-        flags["mergeability_unknown"] = bool(still_unknown and unknown_now)
-        if merge_state == "UNKNOWN" and not still_unknown:
-            flags["mergeability_unknown"] = False
         blocked = bool(flags.get("host_blocked"))
         return m.BlockFacts(
             state=state,
@@ -822,7 +828,7 @@ class GitHubBackend:
             draft=draft or bool(flags.get("draft")),
             conflicts=bool(flags.get("conflicts")),
             behind=bool(flags.get("behind")),
-            mergeability_unknown=bool(flags.get("mergeability_unknown")),
+            mergeability_unknown=still_unknown,
             reviews_required=blocked and has_decision and decision == "review_required",
             host_blocked=blocked,
             host_changes_requested=table.unnamed_changes_requested,
@@ -872,10 +878,6 @@ def _detail(status: str) -> str:
     return sanitize_line(status)[:MAX_DETAIL] or "(empty)"
 
 
-def _clean_blocker(blocker: m.Blocker) -> m.Blocker:
-    return blocker
-
-
 def _methods(repo: Mapping[str, Any]) -> tuple[str, ...] | None:
     """The repository's merge methods, or None when any of the three flags is missing."""
     flags = (
@@ -915,6 +917,3 @@ def _retarget(pr: Mapping[str, Any]) -> tuple[str | None, bool]:
     last = nodes[-1]
     when = _ts(last.get("createdAt")) if isinstance(last, dict) else None
     return (when, True) if when is not None else (None, False)
-
-
-Warn = Callable[[str], None]
