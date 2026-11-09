@@ -677,6 +677,30 @@ INVALID: dict[str, tuple[str, str]] = {
         HOST + "    backend: gitlab\n    api_prefix: '/a?b=1'\n",
         "hosts.h.example.com.api_prefix",
     ),
+    "api_prefix tilde": (
+        HOST + "    backend: gitlab\n    api_prefix: '/~a'\n",
+        "hosts.h.example.com.api_prefix",
+    ),
+    "api_prefix segment of 65": (
+        HOST + "    backend: gitlab\n    api_prefix: '/" + "a" * 65 + "'\n",
+        "hosts.h.example.com.api_prefix",
+    ),
+    "api_prefix nine segments": (
+        HOST + "    backend: gitlab\n    api_prefix: '/a/b/c/d/e/f/g/h/i'\n",
+        "hosts.h.example.com.api_prefix",
+    ),
+    "host label of 64": (
+        "hosts:\n  " + "a" * 64 + ".example.com: {backend: gitlab}\n",
+        "hosts." + "a" * 64 + ".example.com",
+    ),
+    "host name of 254": (
+        "hosts:\n  " + ".".join(["a" * 50] * 5) + ": {backend: gitlab}\n",
+        "hosts." + ".".join(["a" * 50] * 5),
+    ),
+    "github host with a port": (
+        "hosts:\n  h.example.com:8443: {backend: github}\n",
+        "hosts.h.example.com:8443",
+    ),
     "host name uppercase": ("hosts:\n  H.Example.com: {backend: gitlab}\n", "hosts.H.Example.com"),
     "host name with userinfo": (
         "hosts:\n  'user@example.test': {backend: gitlab}\n",
@@ -960,6 +984,7 @@ STRICTER_THAN_SCHEMA = {
     "timeout huge float",
     "timeout huge numeric string",
     "repo keys differing only by case",
+    "github host with a port",  # the key decides, which a schema cannot see
     "host key with :443",  # a host key that input normalization could never produce
     "host key leading-zero port",
     "host key port zero",

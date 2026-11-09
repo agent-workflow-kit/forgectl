@@ -87,11 +87,15 @@ _LOGIN_RE = re.compile(
 )
 _BIN_RE = re.compile(r"/.*|[^/]+", re.ASCII)
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*", re.ASCII)
-_HOST_LABEL = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
-_HOST_PATTERN = rf"{_HOST_LABEL}(?:\.{_HOST_LABEL})*(?::[0-9]{{1,5}})?"
+# Aligned with gateway._valid_host: labels of at most 63 characters, a name of at most 253.
+_HOST_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+_HOST_PATTERN = (
+    rf"(?=[a-z0-9.-]{{1,253}}(?![a-z0-9.-])){_HOST_LABEL}(?:\.{_HOST_LABEL})*(?::[0-9]{{1,5}})?"
+)
 _HOST_RE = re.compile(_HOST_PATTERN, re.ASCII)
 _REPO_RE = re.compile(rf"{_HOST_PATTERN}(?:/(?!\.\.?(?:/|$))[A-Za-z0-9._-]+)+", re.ASCII)
-_API_PREFIX_RE = re.compile(r"(?:/(?!\.\.?(?:/|$))[A-Za-z0-9._-]+)+", re.ASCII)
+# Aligned with gateway._API_PREFIX: 1 to 8 segments of 1 to 64 characters.
+_API_PREFIX_RE = re.compile(r"(?:/(?!\.\.?(?:/|$))[A-Za-z0-9._-]{1,64}){1,8}", re.ASCII)
 _ENV_RETRIES_RE = re.compile(r"0|[1-9][0-9]?", re.ASCII)
 
 
@@ -567,6 +571,8 @@ def _check_keys(config: Config) -> None:
             raise _invalid(f"{key}.backend", "required for a host that is not built in")
         if entry.backend == "github" and entry.api_prefix is not None:
             raise _invalid(f"{key}.api_prefix", "must be null for a GitHub host")
+        if entry.backend == "github" and ":" in host:
+            raise _invalid(key, "a GitHub host takes no port (gh refuses one)")
     seen: set[str] = set()
     for repo in config.repos:
         key = f"repos.{repo}"
