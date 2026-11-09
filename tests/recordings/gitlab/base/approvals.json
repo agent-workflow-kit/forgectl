@@ -1,0 +1,23 @@
+{
+  "approvals_left": 0,
+  "approvals_required": 1,
+  "approved": true,
+  "approved_by": [
+    {
+      "user": {
+        "avatar_url": "https://avatars.example.test/user-2",
+        "id": 12,
+        "name": "User 2",
+        "state": "active",
+        "username": "user-2",
+        "web_url": "https://gitlab.com/user-2"
+      }
+    }
+  ],
+  "id": 90001,
+  "iid": 7,
+  "project_id": 101,
+  "state": "opened",
+  "user_can_approve": true,
+  "user_has_approved": false
+}
