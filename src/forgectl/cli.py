@@ -108,7 +108,7 @@ def _dispatch(argv: list[str], tty: Tty | None) -> int:
     try:
         args = parse(argv)
         json_mode = args.json
-        emit_success(_run(args, tty or _tty()), json_mode=json_mode)
+        emit_success(_run(args, tty or _tty()), json_mode=json_mode, command=args.command)
         return 0
     except ForgectlError as err:
         return emit_error(

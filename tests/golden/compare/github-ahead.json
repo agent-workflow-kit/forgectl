@@ -1,7 +1,7 @@
 {
   "diff": "diff --git a/src/app.py b/src/app.py\nindex 1111111..2222222 100644\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1,2 +1,4 @@\n a\n-b\n+c\n+d\n",
   "from_sha": "1111111111111111111111111111111111111111",
-  "pr": "github.com/example-org/example-repo#7",
+  "pr": "github.com/user-1/example-repo#7",
   "status": "ahead",
   "to_sha": "2222222222222222222222222222222222222222"
 }

@@ -115,8 +115,8 @@ class RouterHarness(Harness):
 
 @pytest.fixture
 def make(fake_forges: FakeForges) -> Callable[..., RouterHarness]:
-    def build(**routes: Answer) -> RouterHarness:
-        return RouterHarness(fake_forges, Router(**routes), retries=0)
+    def build(retries: int = 0, **routes: Answer) -> RouterHarness:
+        return RouterHarness(fake_forges, Router(**routes), retries=retries)
 
     return build
 
@@ -260,6 +260,10 @@ def test_a_file_listed_twice_is_upstream_error(make: Callable[..., RouterHarness
         item("a", "renamed", previous_filename="../x"),
         {**item("a"), "filename": 7},
         {**item("a"), "patch": 5},
+        {**item("a"), "additions": "1"},
+        {**item("a"), "additions": -1},
+        {**item("a"), "deletions": True},
+        {k: v for k, v in item("a").items() if k != "deletions"},
         "not an object",
     ],
 )
@@ -321,6 +325,66 @@ def test_a_pull_of_another_number_is_upstream_error(make: Callable[..., RouterHa
 def test_a_missing_pull_is_not_found(make: Callable[..., RouterHarness]) -> None:
     h = make(pull=http(404, {"message": "Not Found"}))
     assert raises(lambda: h.backend.files(REF)).code == "not_found"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/user-1/example-repo/issues/7",
+        "https://github.com/user-1/example-repo/pull/9999",
+        "https://github.com/user-1/example-repo",
+        "https://github.com/user-1/example-repo/pull/7/../../../other/x",
+        "https://github.com/user-1/example-repo/%2e%2e/example-repo/pull/7",
+    ],
+)
+@pytest.mark.parametrize("command", ["files", "diff"])
+def test_a_pull_whose_url_is_not_this_pr_is_refused(
+    make: Callable[..., RouterHarness], url: str, command: str
+) -> None:
+    h = make(**diff_routes(pull=pull(changed_files=1, html_url=url)), files=[item("a")])
+    assert raises(lambda: getattr(h.backend, command)(REF)).code == "upstream_error"
+
+
+def test_a_file_listed_on_two_pages_is_a_moved_list_read_once_more(
+    make: Callable[..., RouterHarness],
+) -> None:
+    def pages(n: int) -> Any:
+        if n % 2:
+            return [item(f"a{i}") for i in range(100)]
+        return [item("a0")] if n == 2 else [item("b")]
+
+    h = make(pull=pull(changed_files=101), files=pages)
+    result = h.backend.files(REF)
+    assert result.files_complete is True and len(result.files) == 101
+    assert h.script.kinds == ["pull", "files", "files", "pull", "files", "files", "pull"]
+
+
+def test_a_file_listed_on_two_pages_twice_is_upstream_error(
+    make: Callable[..., RouterHarness],
+) -> None:
+    def pages(n: int) -> Any:
+        return [item(f"a{i}") for i in range(100)] if n % 2 else [item("a0")]
+
+    h = make(pull=pull(changed_files=101), files=pages)
+    assert raises(lambda: h.backend.files(REF)).code == "upstream_error"
+    assert h.script.kinds.count("files") == 4
+
+
+def test_a_project_that_changed_between_the_reads_reads_once_more(
+    make: Callable[..., RouterHarness],
+) -> None:
+    def moved(n: int) -> Any:
+        if n != 2:
+            return pull()
+        repo = {"full_name": "user-2/example-repo"}
+        return pull(
+            html_url="https://github.com/user-2/example-repo/pull/7",
+            base={**pull()["base"], "repo": repo},
+        )
+
+    h = make(pull=moved, files=[item("a")])
+    assert h.backend.files(REF).pr == "github.com/user-1/example-repo#7"
+    assert h.script.kinds.count("files") == 2
 
 
 def test_the_endpoints_hold_only_validated_parts_and_the_token_is_not_in_argv(
@@ -408,6 +472,49 @@ def test_an_empty_diff_for_a_pr_with_no_changes_is_empty(
     assert h.backend.diff(REF).diff == ""
 
 
+def test_a_diff_with_fewer_headers_than_changed_files_is_upstream_error(
+    make: Callable[..., RouterHarness],
+) -> None:
+    h = make(**diff_routes(pull=pull(changed_files=250)))
+    assert raises(lambda: h.backend.diff(REF)).code == "upstream_error"
+
+
+def test_a_diff_with_more_headers_than_changed_files_is_upstream_error(
+    make: Callable[..., RouterHarness],
+) -> None:
+    text = b"diff --git a/x b/x\n+a\ndiff --git a/y b/y\n+b\n"
+    h = make(**diff_routes(text=text))
+    assert raises(lambda: h.backend.diff(REF)).code == "upstream_error"
+
+
+@pytest.mark.parametrize("changed", ["1", -1, True, None, "missing"])
+@pytest.mark.parametrize("text", [b"", None])
+def test_a_diff_needs_a_valid_changed_files(
+    make: Callable[..., RouterHarness], changed: Any, text: bytes | None
+) -> None:
+    doc = pull(changed_files=changed)
+    if changed == "missing":
+        del doc["changed_files"]
+    h = make(**diff_routes(text=text, pull=doc))
+    assert raises(lambda: h.backend.diff(REF)).code == "upstream_error"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"https://evil.example/user-1/example-repo/compare/{BASE}...{HEAD}",
+        f"https://github.com/other/example-repo/compare/{BASE}...{HEAD}",
+        f"https://github.com/user-1/example-repo/%2e%2e/compare/{BASE}...{HEAD}",
+    ],
+)
+def test_a_merge_base_answer_of_another_place_is_wrong_host_response(
+    make: Callable[..., RouterHarness], url: str
+) -> None:
+    doc = {**recording("merge-base"), "html_url": url}
+    h = make(**diff_routes(mergebase=doc))
+    assert raises(lambda: h.backend.diff(REF)).code == "wrong_host_response"
+
+
 HOSTILE = (
     b"diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,6 +1,6 @@\n"
     b"-crlf\r\n+\x1b[31mred\x1b[0m\n+rlo \xe2\x80\xae evil\n+nul\x00here\n+lone\rcr\n"
@@ -432,7 +539,9 @@ def test_hostile_diff_content_is_sanitized_per_line_with_line_count_kept(
 
 def test_a_huge_line_is_sanitized_whole(make: Callable[..., RouterHarness]) -> None:
     line = b"+" + b"\x1b" * 200_000 + b"\n"
-    text = make(**diff_routes(text=b"@@ -1 +1 @@\n" + line)).backend.diff(REF).diff
+    text = (
+        make(**diff_routes(text=b"diff --git a/x b/x\n@@ -1 +1 @@\n" + line)).backend.diff(REF).diff
+    )
     assert text.count("<U+001B>") == 200_000
 
 
@@ -451,18 +560,23 @@ def test_diff_head_moved_twice_is_upstream_error_and_once_refetches(
     assert raises(lambda: h2.backend.diff(REF)).code == "upstream_error"
 
 
-def test_a_diff_answer_over_the_size_cap_is_upstream_error(
+CUT = ProcessResult(
+    pid=1,
+    pgid=1,
+    returncode=0,
+    stdout=b"HTTP/2.0 200 OK\r\n\r\ndiff --git a/x b/x\n",
+    stderr=b"",
+    stdout_truncated=True,
+)
+
+
+def test_a_diff_answer_over_the_read_cap_is_too_large_and_never_retried(
     make: Callable[..., RouterHarness],
 ) -> None:
-    big = ProcessResult(
-        pid=1,
-        pgid=1,
-        returncode=0,
-        stdout=b"HTTP/2.0 200 OK\r\n\r\n",
-        stderr=b"",
-        stdout_truncated=True,
-    )
-    assert raises(lambda: make(**diff_routes(diff=big)).backend.diff(REF)).code == "upstream_error"
+    h = make(retries=3, **diff_routes(diff=CUT))
+    err = raises(lambda: h.backend.diff(REF))
+    assert (err.code, err.reason, err.exit_code) == ("refused", "too_large", 20)
+    assert h.script.kinds.count("diff") == 1
 
 
 # -- compare -------------------------------------------------------------------------------------
@@ -474,14 +588,32 @@ def compare_doc(status: str, ahead: Any, behind: Any, **over: Any) -> dict[str, 
     return doc
 
 
+def listed(n: int) -> list[dict[str, Any]]:
+    return [item(f"f{i}") for i in range(n)]
+
+
+def headers(n: int) -> bytes:
+    return b"".join(b"diff --git a/f%d b/f%d\n" % (i, i) for i in range(n))
+
+
 def cmp(h: RouterHarness, from_sha: str = FROM, to_sha: str = TO) -> CompareResult:
     result = h.backend.compare(REF, from_sha, to_sha)
     assert isinstance(result, CompareResult)
     return result
 
 
-def test_golden_compare_ahead(make: Callable[..., RouterHarness]) -> None:
-    h = make(
+@pytest.fixture
+def cmake(make: Callable[..., RouterHarness]) -> Callable[..., RouterHarness]:
+    """``make`` with the PR read every ``compare`` starts with."""
+
+    def build(retries: int = 0, **routes: Answer) -> RouterHarness:
+        return make(retries=retries, **{"pull": pull(), **routes})
+
+    return build
+
+
+def test_golden_compare_ahead(cmake: Callable[..., RouterHarness]) -> None:
+    h = cmake(
         compare=recording("compare-ahead"),
         comparediff=ok_bytes((RECORDINGS / "pull.diff").read_bytes()),
     )
@@ -489,10 +621,44 @@ def test_golden_compare_ahead(make: Callable[..., RouterHarness]) -> None:
     golden.assert_golden(
         "compare/github-ahead", result.to_dict(), schema_id="forgectl/cli/compare.json"
     )
-    assert h.script.accepts == [None, DIFF_TYPE]
+    assert h.script.kinds == ["pull", "compare", "comparediff"]
+    assert h.script.accepts == [None, None, DIFF_TYPE]
     assert (
-        h.script.argvs[0][-1] == f"repos/example-org/example-repo/compare/{FROM}...{TO}?per_page=1"
+        h.script.argvs[1][-1] == f"repos/example-org/example-repo/compare/{FROM}...{TO}?per_page=1"
     )
+
+
+def test_compare_names_the_pr_by_its_canonical_path(cmake: Callable[..., RouterHarness]) -> None:
+    result = cmp(cmake(compare=compare_doc("behind", 0, 3)))
+    assert result.pr == "github.com/user-1/example-repo#7"
+
+
+def test_compare_of_a_missing_pr_is_not_found(cmake: Callable[..., RouterHarness]) -> None:
+    h = cmake(pull=http(404, {"message": "Not Found"}))
+    assert raises(lambda: cmp(h)).code == "not_found"
+    assert h.script.kinds == ["pull"]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://evil.example/user-1/example-repo/compare/x...y",
+        "https://github.com/other/example-repo/compare/x...y",
+        "https://github.com/example-org/example-repo/compare/x...y",  # the typed, not canonical
+        "https://github.com/user-1/example-repo/%2e%2e/example-repo/compare/x...y",
+        "https://github.com/user-1/example-repo/compare/x/../../y",
+        "https://github.com/user-1/example-repo/pull/7",
+        "https://github.com/user-1/example-repo/compare/",
+        "https://github.com/user-1/example-repo",
+        7,
+    ],
+)
+def test_a_compare_answer_of_another_place_is_wrong_host_response(
+    cmake: Callable[..., RouterHarness], url: Any
+) -> None:
+    h = cmake(retries=3, compare=compare_doc("ahead", 1, 0, html_url=url))
+    assert raises(lambda: cmp(h)).code == "wrong_host_response"
+    assert h.script.kinds == ["pull", "compare"]  # never retried
 
 
 @pytest.mark.parametrize(
@@ -500,67 +666,107 @@ def test_golden_compare_ahead(make: Callable[..., RouterHarness]) -> None:
     [("behind", 0, 3), ("diverged", 2, 3)],
 )
 def test_behind_and_diverged_have_a_null_diff_and_no_diff_request(
-    make: Callable[..., RouterHarness], status: str, ahead: int, behind: int
+    cmake: Callable[..., RouterHarness], status: str, ahead: int, behind: int
 ) -> None:
-    h = make(compare=compare_doc(status, ahead, behind))
+    h = cmake(compare=compare_doc(status, ahead, behind))
     result = cmp(h)
     assert (result.status, result.diff) == (status, None)
-    assert h.script.kinds == ["compare"]
+    assert h.script.kinds == ["pull", "compare"]
 
 
-def test_identical_by_the_host_has_an_empty_diff(make: Callable[..., RouterHarness]) -> None:
-    result = cmp(make(compare=compare_doc("identical", 0, 0)))
+def test_identical_by_the_host_has_an_empty_diff(cmake: Callable[..., RouterHarness]) -> None:
+    result = cmp(cmake(compare=compare_doc("identical", 0, 0, files=[])))
     assert (result.status, result.diff) == ("identical", "")
 
 
-def test_equal_shas_are_identical_with_no_request(make: Callable[..., RouterHarness]) -> None:
-    h = make()
+def test_equal_shas_read_the_pr_and_are_identical_with_no_compare_request(
+    cmake: Callable[..., RouterHarness],
+) -> None:
+    h = cmake()
     result = cmp(h, FROM, FROM)
     assert (result.status, result.diff) == ("identical", "")
-    assert h.script.argvs == []
+    assert result.pr == "github.com/user-1/example-repo#7"
+    assert h.script.kinds == ["pull"]
 
 
-def test_a_404_is_unavailable(make: Callable[..., RouterHarness]) -> None:
-    h = make(compare=http(404, {"message": "Not Found"}))
+def test_a_404_is_unavailable(cmake: Callable[..., RouterHarness]) -> None:
+    h = cmake(compare=http(404, {"message": "Not Found"}))
     result = cmp(h)
     assert (result.status, result.diff) == ("unavailable", None)
 
 
 def test_a_404_on_the_diff_after_an_ahead_is_unavailable_never_partial(
-    make: Callable[..., RouterHarness],
+    cmake: Callable[..., RouterHarness],
 ) -> None:
-    h = make(compare=compare_doc("ahead", 1, 0), comparediff=http(404, {"message": "Not Found"}))
+    h = cmake(compare=compare_doc("ahead", 1, 0), comparediff=http(404, {"message": "Not Found"}))
     result = cmp(h)
     assert (result.status, result.diff) == ("unavailable", None)
 
 
-def test_a_406_on_the_diff_is_too_large(make: Callable[..., RouterHarness]) -> None:
-    h = make(compare=compare_doc("ahead", 1, 0), comparediff=http(406, {"message": "too big"}))
+def test_a_406_on_the_diff_is_too_large(cmake: Callable[..., RouterHarness]) -> None:
+    h = cmake(compare=compare_doc("ahead", 1, 0), comparediff=http(406, {"message": "too big"}))
     err = raises(lambda: cmp(h))
     assert (err.code, err.reason) == ("refused", "too_large")
 
 
-def test_a_diff_with_as_many_files_as_the_cap_is_too_large(
-    make: Callable[..., RouterHarness],
+def test_a_compare_diff_over_the_read_cap_is_too_large_and_never_retried(
+    cmake: Callable[..., RouterHarness],
 ) -> None:
-    text = b"".join(b"diff --git a/f%d b/f%d\n" % (i, i) for i in range(300))
-    h = make(compare=compare_doc("ahead", 1, 0), comparediff=ok_bytes(text))
+    h = cmake(retries=3, compare=compare_doc("ahead", 1, 0), comparediff=CUT)
+    err = raises(lambda: cmp(h))
+    assert (err.code, err.reason, err.exit_code) == ("refused", "too_large", 20)
+    assert h.script.kinds.count("comparediff") == 1
+
+
+def test_a_listed_file_count_at_the_cap_is_too_large_with_no_diff_request(
+    cmake: Callable[..., RouterHarness],
+) -> None:
+    h = cmake(compare=compare_doc("ahead", 1, 0, files=listed(300)))
     assert raises(lambda: cmp(h)).reason == "too_large"
-    under = b"".join(b"diff --git a/f%d b/f%d\n" % (i, i) for i in range(299))
-    h = make(compare=compare_doc("ahead", 1, 0), comparediff=ok_bytes(under))
+    assert "comparediff" not in h.script.kinds
+
+
+def test_a_diff_with_as_many_files_as_the_cap_is_too_large(
+    cmake: Callable[..., RouterHarness],
+) -> None:
+    h = cmake(
+        compare=compare_doc("ahead", 1, 0, files=listed(1)), comparediff=ok_bytes(headers(300))
+    )
+    assert raises(lambda: cmp(h)).reason == "too_large"
+    h = cmake(
+        compare=compare_doc("ahead", 1, 0, files=listed(299)), comparediff=ok_bytes(headers(299))
+    )
     assert cmp(h).status == "ahead"
+
+
+@pytest.mark.parametrize(
+    "files,text", [(2, headers(1)), (1, headers(2)), (1, b""), (0, headers(1))]
+)
+def test_a_diff_that_does_not_match_the_listed_count_is_unavailable(
+    cmake: Callable[..., RouterHarness], files: int, text: bytes
+) -> None:
+    h = cmake(compare=compare_doc("ahead", 1, 0, files=listed(files)), comparediff=ok_bytes(text))
+    assert (cmp(h).status, cmp(h).diff) == ("unavailable", None)
+
+
+@pytest.mark.parametrize("files", ["x", {"a": 1}, None])
+def test_a_listed_files_that_is_not_a_list_is_upstream_error(
+    cmake: Callable[..., RouterHarness], files: Any
+) -> None:
+    h = cmake(compare=compare_doc("ahead", 1, 0, files=files))
+    assert raises(lambda: cmp(h)).code == "upstream_error"
 
 
 def test_a_hunk_line_that_looks_like_a_header_does_not_count(
-    make: Callable[..., RouterHarness],
+    cmake: Callable[..., RouterHarness],
 ) -> None:
-    text = b"@@ -0,0 +1,400 @@\n" + b"+diff --git a/x b/x\n" * 400
-    h = make(compare=compare_doc("ahead", 1, 0), comparediff=ok_bytes(text))
+    text = headers(1) + b"@@ -0,0 +1,400 @@\n" + b"+diff --git a/x b/x\n" * 400
+    h = cmake(compare=compare_doc("ahead", 1, 0, files=listed(1)), comparediff=ok_bytes(text))
     assert cmp(h).status == "ahead"
 
 
-def test_the_compare_diff_is_sanitized(make: Callable[..., RouterHarness]) -> None:
-    h = make(compare=compare_doc("ahead", 1, 0), comparediff=ok_bytes(HOSTILE))
+def test_the_compare_diff_is_sanitized(cmake: Callable[..., RouterHarness]) -> None:
+    h = cmake(compare=compare_doc("ahead", 1, 0), comparediff=ok_bytes(HOSTILE))
     result = cmp(h)
     assert result.diff is not None and "\x1b" not in result.diff
     assert result.diff.count("\n") == HOSTILE.count(b"\n")
@@ -581,39 +787,75 @@ def test_the_compare_diff_is_sanitized(make: Callable[..., RouterHarness]) -> No
     ],
 )
 def test_an_unclear_answer_is_unavailable_never_a_diff(
-    make: Callable[..., RouterHarness], doc: dict[str, Any]
+    cmake: Callable[..., RouterHarness], doc: dict[str, Any]
 ) -> None:
-    h = make(compare=doc)
+    h = cmake(compare=doc)
     result = cmp(h)
     assert (result.status, result.diff) == ("unavailable", None)
-    assert h.script.kinds == ["compare"]
-
-
-def test_a_compare_answer_from_another_host_is_wrong_host_response(
-    make: Callable[..., RouterHarness],
-) -> None:
-    h = make(compare=compare_doc("ahead", 1, 0, html_url="https://evil.example/c"))
-    assert raises(lambda: cmp(h)).code == "wrong_host_response"
+    assert h.script.kinds == ["pull", "compare"]
 
 
 def test_a_compare_that_is_not_an_object_is_upstream_error(
-    make: Callable[..., RouterHarness],
+    cmake: Callable[..., RouterHarness],
 ) -> None:
-    assert raises(lambda: cmp(make(compare=[]))).code == "upstream_error"
+    assert raises(lambda: cmp(cmake(compare=[]))).code == "upstream_error"
 
 
-def test_a_server_error_follows_the_read_table(make: Callable[..., RouterHarness]) -> None:
-    assert raises(lambda: cmp(make(compare=http(502, {"message": "x"})))).code == "upstream_error"
+def test_a_server_error_follows_the_read_table(cmake: Callable[..., RouterHarness]) -> None:
+    assert raises(lambda: cmp(cmake(compare=http(502, {"message": "x"})))).code == "upstream_error"
     assert (
-        raises(lambda: cmp(make(compare=http(403, {"message": "no"})))).code == "permission_denied"
+        raises(lambda: cmp(cmake(compare=http(403, {"message": "no"})))).code == "permission_denied"
     )
 
 
-def test_the_head_of_the_request_is_not_a_ref(make: Callable[..., RouterHarness]) -> None:
+def test_the_head_of_the_request_is_not_a_ref(cmake: Callable[..., RouterHarness]) -> None:
     # shas only: the endpoint is built from the two validated shas and nothing else
-    h = make(compare=compare_doc("behind", 0, 1))
+    h = cmake(compare=compare_doc("behind", 0, 1))
     cmp(h)
     assert re.fullmatch(
         r"repos/example-org/example-repo/compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}\?per_page=1",
-        h.script.argvs[0][-1],
+        h.script.argvs[1][-1],
     )
+
+
+# -- retries of a malformed answer (interface: Reliability) --------------------------------------
+
+
+def first_bad(bad: Any, good: Any) -> Callable[[int], Any]:
+    return lambda n: bad if n == 1 else good
+
+
+def test_a_malformed_pull_is_retried_like_a_5xx(make: Callable[..., RouterHarness]) -> None:
+    h = make(retries=3, pull=first_bad({"number": 7}, pull()), files=recording("files"))
+    assert h.backend.files(REF).files_complete is True
+    assert h.script.kinds[:2] == ["pull", "pull"] and h.slept.waits
+
+
+def test_a_malformed_files_page_is_retried_like_a_5xx(make: Callable[..., RouterHarness]) -> None:
+    h = make(retries=3, pull=pull(), files=first_bad([{"status": "added"}], recording("files")))
+    assert h.backend.files(REF).files_complete is True
+    assert h.script.kinds.count("files") == 2
+
+
+def test_a_malformed_merge_base_is_retried_like_a_5xx(make: Callable[..., RouterHarness]) -> None:
+    bad = copy.deepcopy(recording("merge-base"))
+    bad["merge_base_commit"]["sha"] = "nope"
+    h = make(retries=3, **diff_routes(mergebase=first_bad(bad, recording("merge-base"))))
+    assert h.backend.diff(REF).merge_base_sha == "6b" * 20
+    assert h.script.kinds.count("mergebase") == 2
+
+
+def test_a_malformed_compare_is_retried_like_a_5xx(cmake: Callable[..., RouterHarness]) -> None:
+    h = cmake(
+        retries=3,
+        compare=first_bad(compare_doc("ahead", 1, 0, files="x"), recording("compare-ahead")),
+        comparediff=ok_bytes((RECORDINGS / "pull.diff").read_bytes()),
+    )
+    assert cmp(h).status == "ahead"
+    assert h.script.kinds.count("compare") == 2
+
+
+def test_a_wrong_host_pull_is_never_retried(make: Callable[..., RouterHarness]) -> None:
+    h = make(retries=3, pull=pull(html_url="https://evil.example/user-1/example-repo/pull/7"))
+    assert raises(lambda: h.backend.files(REF)).code == "wrong_host_response"
+    assert h.script.kinds == ["pull"]

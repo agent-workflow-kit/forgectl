@@ -73,6 +73,24 @@ def test_diff_prints_the_schema_valid_object(
     assert out["diff"].startswith("diff --git a/src/app.py")
 
 
+HOSTILE_DIFF = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\tb\n+\x1b[31mred\n"
+
+
+def test_diff_without_json_prints_only_the_sanitized_unified_diff(
+    run_forgectl: Run, fake_forges: FakeForges, config: Path
+) -> None:
+    doc = pull(changed_files=1)
+    fake_forges.answer("gh", PR_ENDPOINT, body=doc, times=1)
+    fake_forges.answer("gh", PR_ENDPOINT, body_text=HOSTILE_DIFF, times=1)
+    fake_forges.answer("gh", endpoint_re=r"/compare/", body=recording("merge-base"))
+    fake_forges.answer("gh", PR_ENDPOINT, body=doc)
+    done = run_forgectl(["diff", PR, "--config", str(config)], env={"SHOW_TOKEN": TOKEN})
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == (
+        "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\tb\n+<U+001B>[31mred\n"
+    )
+
+
 def test_a_406_exits_20_too_large(run_forgectl: Run, fake_forges: FakeForges, config: Path) -> None:
     doc = pull(changed_files=400)
     fake_forges.answer("gh", PR_ENDPOINT, body=doc, times=1)
@@ -87,6 +105,7 @@ def test_a_406_exits_20_too_large(run_forgectl: Run, fake_forges: FakeForges, co
 def test_compare_prints_the_schema_valid_object(
     run_forgectl: Run, fake_forges: FakeForges, config: Path
 ) -> None:
+    fake_forges.answer("gh", PR_ENDPOINT, body=pull())
     fake_forges.answer("gh", endpoint_re=r"/compare/", body=recording("compare-ahead"), times=1)
     fake_forges.answer(
         "gh", endpoint_re=r"/compare/", body_text=(RECORDINGS / "pull.diff").read_text()
@@ -96,11 +115,13 @@ def test_compare_prints_the_schema_valid_object(
     out = json.loads(done.stdout)
     schemas.validate_cli_output("compare", out)
     assert out["status"] == "ahead"
+    assert out["pr"] == "github.com/user-1/example-repo#7"
 
 
 def test_compare_of_an_unknown_commit_is_unavailable_exit_0(
     run_forgectl: Run, fake_forges: FakeForges, config: Path
 ) -> None:
+    fake_forges.answer("gh", PR_ENDPOINT, body=pull())
     fake_forges.answer("gh", endpoint_re=r"/compare/", status=404, body={"message": "Not Found"})
     done = go(run_forgectl, config, "compare", PR, "--from", FROM, "--to", TO)
     assert done.returncode == 0, done.stderr

@@ -26,7 +26,7 @@ import pytest
 from forgectl import gateway as gw
 from forgectl.config import LoadedConfig
 from forgectl.errors import ForgectlError
-from forgectl.gateway import Gateway, ProcessResult, Target
+from forgectl.gateway import AnswerCut, Gateway, ProcessResult, Target
 
 from .harness.fixtures import forgectl_env
 from .harness.forges import Call, FakeForges
@@ -966,6 +966,15 @@ def test_oversized_and_unfinished_answers_are_errors_never_partial_data(tmp_path
             runner = stub(head(200) + body, **flags)
             assert code_of(stub_gateway(tmp_path, runner)).code == "upstream_error", flags
             assert code_of(stub_gateway(tmp_path, runner), write=True).code == "outcome_unknown"
+
+
+def test_a_read_past_the_cap_is_told_apart_from_one_that_never_ended(tmp_path: Path) -> None:
+    cut = code_of(stub_gateway(tmp_path, stub(head(200) + b"{}", stdout_truncated=True)))
+    assert isinstance(cut, AnswerCut) and cut.code == "upstream_error"
+    endless = code_of(stub_gateway(tmp_path, stub(head(200) + b"{}", streams_incomplete=True)))
+    assert not isinstance(endless, AnswerCut)
+    write = stub_gateway(tmp_path, stub(head(200) + b"{}", stdout_truncated=True))
+    assert not isinstance(code_of(write, write=True), AnswerCut)
 
 
 MALFORMED = [

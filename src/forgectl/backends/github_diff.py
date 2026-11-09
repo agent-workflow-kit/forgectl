@@ -9,11 +9,17 @@ passed off as a whole answer:
   large, rename only) is kept, with ``patch`` ``None`` in ``RawFile`` (the data position
   validation, TODO(#25), needs: it treats such a file as invalid for inline comments).
 - ``diff``: the PR's diff media type; a 406 (more than 300 files, or a diff the host will not
-  produce) is ``too_large``. The head is read before and after; a moved head fetches once more,
-  then ``upstream_error``.
-- ``compare``: ``/compare/<from>...<to>``, status from the host cross-checked with its counts; the
-  diff only on ``ahead``, by the diff media type; a 406, or as many ``diff --git`` headers as the
-  host's file cap, is ``too_large``; a 404 or an unclear answer is ``unavailable``.
+  produce), or an answer past forgectl's read cap, is ``too_large``. Its ``diff --git`` headers
+  must number the PR's ``changed_files``. The PR is read before and after; a moved head, base or
+  project (or a file list that shifted) fetches once more, then ``upstream_error``.
+- ``compare``: reads the PR first (``not_found``, and the canonical path), then
+  ``/compare/<from>...<to>``, status from the host cross-checked with its counts; the diff only on
+  ``ahead``, by the diff media type; a 406, a cut answer, a listed file count at the host's cap
+  or as many ``diff --git`` headers is ``too_large``; a 404, an unclear answer or a header count
+  other than the listed count is ``unavailable``.
+
+Every answer is checked inside the call ``ReadEnv.call`` retries, so a malformed one is retried
+like a 5xx (interface: Reliability).
 
 Diff text is decoded and sanitized with ``sanitize_bytes(..., diff=True)`` (a CR before LF stays,
 invalid UTF-8 becomes U+FFFD); a path is sanitized as a one-line field. Repo, number and shas
@@ -24,13 +30,14 @@ is never followed.
 from __future__ import annotations
 
 import re
+import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from .. import model as m
 from ..errors import ForgectlError, refused
-from ..gateway import Response, Target, verify_identity
+from ..gateway import AnswerCut, Response, Target, shown_text, verify_identity
 from ..identifiers import PrRef
 from ..reads import ReadEnv
 from ..sanitize import sanitize_bytes, sanitize_line
@@ -44,6 +51,7 @@ from .github import (
     _req_sha,
     _split,
     _str,
+    _url_path,
     malformed,
 )
 
@@ -113,12 +121,63 @@ class Pull:
     changed_files: int | None
 
 
+# -- reading through the gateway ---------------------------------------------------------------
+
+
+def _get[T](
+    env: ReadEnv,
+    target: Target,
+    segments: list[str],
+    check: Callable[[Response], T],
+    *,
+    cut: str | None = None,
+    **kwargs: Any,
+) -> T:
+    """One GET, retried by ``env.call``; ``check`` validates the answer inside the retried call,
+    so an answer that is not the documented shape is retried like a 5xx (interface:
+    Reliability). With ``cut`` (a diff), an answer past forgectl's read cap is ``too_large``,
+    never retried: the cut is forgectl's own and a partial diff is never shown."""
+    gateway = env.gateway
+
+    def once() -> T:
+        try:
+            response = gateway.api(target, "GET", segments, **kwargs)
+        except AnswerCut:
+            if cut is None:
+                raise
+            raise refused(
+                "too_large",
+                f"{cut} is larger than forgectl's read cap; a partial diff would mislead",
+            ) from None
+        try:
+            return check(response)
+        except Malformed as bad:
+            raise malformed(f"{bad}") from None
+
+    return env.call(once)
+
+
+def _compare_identity(url: object, target: Target, project: str) -> None:
+    """A comparison's ``html_url`` must be this host's, with the path exactly
+    ``/{project}/compare/<one segment>`` (no percent escape, no dot segment)."""
+    verify_identity(url, host=target.host, project=project, secret=target.token)
+    path = urllib.parse.urlsplit(url).path if isinstance(url, str) else ""  # it is, once accepted
+    prefix = f"/{project}/compare/"
+    rest = path[len(prefix) :].removesuffix("/") if path.startswith(prefix) else ""
+    if "%" in path or not rest or "/" in rest or rest in (".", ".."):
+        raise ForgectlError(
+            "wrong_host_response",
+            f"the answer does not belong to {target.host} and {project}: the token may have"
+            " reached another host and should be rotated",
+            details={"observed": shown_text(str(url), target.token)},
+        )
+
+
 # -- reading one PR ----------------------------------------------------------------------------
 
 
-def _api(env: ReadEnv, target: Target, segments: list[str], **kwargs: Any) -> Response:
-    gateway = env.gateway
-    return env.call(lambda: gateway.api(target, "GET", segments, **kwargs))
+class _Moved(Exception):
+    """The PR's file list shifted under the read (a file on two pages): read it all once more."""
 
 
 def _pull_segments(ref: PrRef) -> list[str]:
@@ -128,9 +187,13 @@ def _pull_segments(ref: PrRef) -> list[str]:
     return ["repos", owner, name, "pulls", str(ref.number)]
 
 
-def read_pull(env: ReadEnv, target: Target, ref: PrRef) -> Pull:
-    response = _api(env, target, _pull_segments(ref), shape="object")
-    try:
+def read_pull(
+    env: ReadEnv, target: Target, ref: PrRef, *, need_changed_files: bool = False
+) -> Pull:
+    """The PR, whose ``html_url`` must be exactly this PR's on this host (a rename is accepted,
+    as for ``show``). ``need_changed_files``: a missing or invalid count is malformed."""
+
+    def check(response: Response) -> Pull:
         pr = _obj(response.data, "the pull request")
         number = pr.get("number")
         if isinstance(number, bool) or number != ref.number:
@@ -138,28 +201,43 @@ def read_pull(env: ReadEnv, target: Target, ref: PrRef) -> Pull:
         head = _obj(pr.get("head"), "the head")
         base = _obj(pr.get("base"), "the base")
         project = _project(_obj(base.get("repo"), "the base repository").get("full_name"), "repo")
+        verify_identity(pr.get("html_url"), host=target.host, project=project, secret=target.token)
+        _url_path(pr.get("html_url"), project, f"/pull/{ref.number}")
         head_sha = _req_sha(head.get("sha"), "the head sha")
         base_sha = _req_sha(base.get("sha"), "the base sha")
         changed = _count(pr.get("changed_files"))
-    except Malformed as bad:
-        raise malformed(f"{bad}") from None
-    verify_identity(pr.get("html_url"), host=target.host, project=project, secret=target.token)
-    return Pull(project=project, head_sha=head_sha, base_sha=base_sha, changed_files=changed)
+        if changed is None and need_changed_files:
+            raise Malformed("the changed file count")
+        return Pull(project=project, head_sha=head_sha, base_sha=base_sha, changed_files=changed)
+
+    return _get(env, target, _pull_segments(ref), check, shape="object")
 
 
 def _stable[T](
-    env: ReadEnv, target: Target, ref: PrRef, fetch: Callable[[Pull], T]
+    env: ReadEnv,
+    target: Target,
+    ref: PrRef,
+    fetch: Callable[[Pull], T],
+    *,
+    need_changed_files: bool = False,
 ) -> tuple[Pull, T]:
-    """``fetch`` pinned to a PR whose head and base did not move meanwhile: one more try, then
-    ``upstream_error``."""
+    """``fetch`` pinned to a PR whose project, head and base did not move meanwhile, and whose
+    file list did not shift under the read: one more try, then ``upstream_error``."""
     for _ in range(2):
-        before = read_pull(env, target, ref)
-        value = fetch(before)
-        after = read_pull(env, target, ref)
-        if (before.head_sha, before.base_sha) == (after.head_sha, after.base_sha):
+        before = read_pull(env, target, ref, need_changed_files=need_changed_files)
+        try:
+            value = fetch(before)
+        except _Moved:
+            continue
+        after = read_pull(env, target, ref, need_changed_files=need_changed_files)
+        if (before.project, before.head_sha, before.base_sha) == (
+            after.project,
+            after.head_sha,
+            after.base_sha,
+        ):
             return after, value
     raise ForgectlError(
-        "upstream_error", "the pull request's head moved during the read, twice; try again"
+        "upstream_error", "the pull request moved during the read, twice; try again"
     )
 
 
@@ -176,6 +254,13 @@ def _path(value: object, what: str) -> str:
     if any(part in ("", ".", "..") for part in text.split("/")):
         raise Malformed(what)
     return text
+
+
+def _req_count(value: object, what: str) -> int:
+    count = _count(value)
+    if count is None:
+        raise Malformed(what)
+    return count
 
 
 def parse_file(item: object) -> RawFile:
@@ -196,43 +281,51 @@ def parse_file(item: object) -> RawFile:
         path=path,
         previous_path=previous,
         status=status,
-        additions=_count(entry.get("additions")),
-        deletions=_count(entry.get("deletions")),
+        additions=_req_count(entry.get("additions"), "a file's additions"),
+        deletions=_req_count(entry.get("deletions"), "a file's deletions"),
         patch=patch,
     )
 
 
 def has_next_page(response: Response) -> bool:
     link = response.headers.get("link")
-    return bool(link) and _NEXT_LINK.search(link) is not None  # type: ignore[arg-type]
+    if not link:
+        return False
+    return _NEXT_LINK.search(link) is not None
+
+
+def _file_page(response: Response) -> tuple[list[RawFile], bool]:
+    """One page, checked whole; and whether it ends the list."""
+    items = _list(response.data, "the file list")
+    if len(items) > PAGE_SIZE:
+        raise Malformed("a page longer than the page size")
+    parsed = [parse_file(item) for item in items]
+    if len({f.path for f in parsed}) != len(parsed):
+        raise Malformed("a page that lists a file twice")
+    return parsed, len(items) < PAGE_SIZE and not has_next_page(response)
 
 
 def list_files(env: ReadEnv, target: Target, ref: PrRef) -> RawFiles:
-    """Every file the host lists, 100 a page, up to ``MAX_FILE_PAGES`` pages."""
+    """Every file the host lists, 100 a page, up to ``MAX_FILE_PAGES`` pages. A file on two
+    pages is a list that shifted under the read (``_Moved``)."""
     segments = [*_pull_segments(ref), "files"]
     files: list[RawFile] = []
     seen: set[str] = set()
     for page in range(1, MAX_FILE_PAGES + 1):
-        response = _api(
+        parsed, last = _get(
             env,
             target,
             segments,
+            _file_page,
             query=[("per_page", str(PAGE_SIZE)), ("page", str(page))],
             shape="list",
         )
-        try:
-            items = _list(response.data, "the file list")
-            if len(items) > PAGE_SIZE:
-                raise Malformed("a page longer than the page size")
-            for item in items:
-                parsed = parse_file(item)
-                if parsed.path in seen:  # a list that shifted under the read repeats a file
-                    raise Malformed("a file listed twice")
-                seen.add(parsed.path)
-                files.append(parsed)
-        except Malformed as bad:
-            raise malformed(f"{bad}") from None
-        if len(items) < PAGE_SIZE and not has_next_page(response):
+        for found in parsed:
+            if found.path in seen:
+                raise _Moved
+            seen.add(found.path)
+            files.append(found)
+        if last:
             return RawFiles(tuple(files), ended=True, reason=None)
     return RawFiles(tuple(files), ended=False, reason="the host's list went past the page limit")
 
@@ -263,40 +356,49 @@ def _too_large(what: str) -> ForgectlError:
 
 def _merge_base(env: ReadEnv, target: Target, ref: PrRef, pull: Pull) -> str | None:
     owner, name = _split(ref)
-    response = _api(
+
+    def check(response: Response) -> str | None:
+        if response.status == 404:
+            return None
+        data = _obj(response.data, "the comparison")
+        _compare_identity(data.get("html_url"), target, pull.project)
+        found = data.get("merge_base_commit")
+        if found is None:
+            return None
+        return _req_sha(_obj(found, "the merge base").get("sha"), "the merge base sha")
+
+    return _get(
         env,
         target,
         ["repos", owner, name, "compare", f"{pull.base_sha}...{pull.head_sha}"],
+        check,
         query=[("per_page", "1")],
         shape="object",
         passthrough=frozenset({404}),
     )
-    if response.status == 404:
-        return None
-    try:
-        found = _obj(response.data, "the comparison").get("merge_base_commit")
-        if found is None:
-            return None
-        return _req_sha(_obj(found, "the merge base").get("sha"), "the merge base sha")
-    except Malformed as bad:
-        raise malformed(f"{bad}") from None
 
 
 def _diff_text(env: ReadEnv, target: Target, ref: PrRef, pull: Pull) -> str:
-    response = _api(
+    def check(response: Response) -> str:
+        if response.status == 406:
+            raise _too_large("this diff")
+        raw = response.data
+        if not isinstance(raw, bytes):
+            raise Malformed("no diff text")
+        if len(_DIFF_HEADER.findall(raw)) != pull.changed_files:
+            raise Malformed("a diff whose files do not number the PR's changed_files")
+        return sanitize_bytes(raw, diff=True)
+
+    return _get(
         env,
         target,
         _pull_segments(ref),
+        check,
+        cut="this diff",
         headers=DIFF_ACCEPT,
         parse="bytes",
         passthrough=frozenset({406}),
     )
-    if response.status == 406:
-        raise _too_large("this diff")
-    raw = response.data
-    if not isinstance(raw, bytes) or (not raw.strip() and pull.changed_files):
-        raise ForgectlError("upstream_error", "GitHub answered no diff for a PR with changes")
-    return sanitize_bytes(raw, diff=True)
 
 
 def diff_result(env: ReadEnv, ref: PrRef) -> m.DiffResult:
@@ -305,7 +407,7 @@ def diff_result(env: ReadEnv, ref: PrRef) -> m.DiffResult:
     def fetch(pull: Pull) -> tuple[str, str | None]:
         return _diff_text(env, target, ref, pull), _merge_base(env, target, ref, pull)
 
-    pull, (text, merge_base) = _stable(env, target, ref, fetch)
+    pull, (text, merge_base) = _stable(env, target, ref, fetch, need_changed_files=True)
     return m.DiffResult(
         pr=f"{ref.host}/{pull.project}#{ref.number}",
         head_sha=pull.head_sha,
@@ -316,12 +418,6 @@ def diff_result(env: ReadEnv, ref: PrRef) -> m.DiffResult:
 
 
 # -- compare -----------------------------------------------------------------------------------
-
-
-def _unavailable(ref: PrRef, from_sha: str, to_sha: str) -> m.CompareResult:
-    return m.CompareResult(
-        pr=str(ref), from_sha=from_sha, to_sha=to_sha, status="unavailable", diff=None
-    )
 
 
 def _compare_status(data: dict[str, Any]) -> m.CompareStatus:
@@ -342,63 +438,72 @@ def _compare_status(data: dict[str, Any]) -> m.CompareStatus:
 
 
 def compare_result(env: ReadEnv, ref: PrRef, from_sha: str, to_sha: str) -> m.CompareResult:
-    if from_sha == to_sha:
-        return m.CompareResult(
-            pr=str(ref), from_sha=from_sha, to_sha=to_sha, status="identical", diff=""
-        )
     target = env.hosts.target(ref.host)
+    pull = read_pull(env, target, ref)  # a missing PR is not_found; the canonical path
+    pr = f"{ref.host}/{pull.project}#{ref.number}"
+
+    def result(status: m.CompareStatus, diff: str | None) -> m.CompareResult:
+        return m.CompareResult(pr=pr, from_sha=from_sha, to_sha=to_sha, status=status, diff=diff)
+
+    if from_sha == to_sha:
+        return result("identical", "")
     owner, name = _split(ref)
     segments = ["repos", owner, name, "compare", f"{from_sha}...{to_sha}"]
-    response = _api(
+
+    def check(response: Response) -> tuple[m.CompareStatus, int | None] | None:
+        if response.status == 404:
+            return None
+        data = _obj(response.data, "the comparison")
+        _compare_identity(data.get("html_url"), target, pull.project)
+        status = _compare_status(data)
+        listed = None
+        if status == "ahead" or "files" in data:
+            listed = len(_list(data.get("files"), "the listed files"))
+        return status, listed
+
+    answer = _get(
         env,
         target,
         segments,
+        check,
         query=[("per_page", "1")],
         shape="object",
         passthrough=frozenset({404}),
     )
-    if response.status == 404:
-        return _unavailable(ref, from_sha, to_sha)
-    data = _obj_or_none(response.data)
-    if data is None:
-        return _unavailable(ref, from_sha, to_sha)
-    verify_identity(data.get("html_url"), host=target.host, secret=target.token)
-    status = _compare_status(data)
-    if status == "unavailable":
-        return _unavailable(ref, from_sha, to_sha)
+    if answer is None:
+        return result("unavailable", None)
+    status, listed = answer
     if status == "identical":
-        return m.CompareResult(
-            pr=str(ref), from_sha=from_sha, to_sha=to_sha, status=status, diff=""
-        )
-    if status != "ahead":  # behind, diverged: no diff, by the interface
-        return m.CompareResult(
-            pr=str(ref), from_sha=from_sha, to_sha=to_sha, status=status, diff=None
-        )
-    text = _api(
+        return result(status, "")
+    if status != "ahead" or listed is None:  # behind, diverged: no diff, by the interface
+        return result(status, None)
+    if listed >= COMPARE_FILE_CAP:  # the host lists at most this many: the list may be cut
+        raise _too_large("this comparison")
+
+    def check_diff(response: Response) -> bytes | None:
+        if response.status == 404:
+            return None
+        if response.status == 406:
+            raise _too_large("this comparison")
+        if not isinstance(response.data, bytes):
+            raise Malformed("no diff text")
+        return response.data
+
+    raw = _get(
         env,
         target,
         segments,
+        check_diff,
+        cut="this comparison",
         headers=DIFF_ACCEPT,
         parse="bytes",
         passthrough=frozenset({404, 406}),
     )
-    if text.status == 404:
-        return _unavailable(ref, from_sha, to_sha)
-    if text.status == 406:
+    if raw is None:
+        return result("unavailable", None)
+    found = len(_DIFF_HEADER.findall(raw))
+    if found >= COMPARE_FILE_CAP:  # a backstop: the host may have cut the diff here
         raise _too_large("this comparison")
-    raw = text.data
-    if not isinstance(raw, bytes):
-        raise ForgectlError("upstream_error", "GitHub answered no diff text")
-    if len(_DIFF_HEADER.findall(raw)) >= COMPARE_FILE_CAP:  # the host may have cut the list here
-        raise _too_large("this comparison")
-    return m.CompareResult(
-        pr=str(ref),
-        from_sha=from_sha,
-        to_sha=to_sha,
-        status="ahead",
-        diff=sanitize_bytes(raw, diff=True),
-    )
-
-
-def _obj_or_none(value: object) -> dict[str, Any] | None:
-    return value if isinstance(value, dict) else None
+    if found != listed:  # an unclear answer, never a partial diff
+        return result("unavailable", None)
+    return result("ahead", sanitize_bytes(raw, diff=True))

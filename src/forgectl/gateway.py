@@ -148,6 +148,12 @@ def _error(code: str, message: str, **kwargs: Any) -> ForgectlError:
     return ForgectlError(code, message, **kwargs)
 
 
+class AnswerCut(ForgectlError):
+    """A read whose answer went past forgectl's own size cap: ``upstream_error`` like any other
+    unusable answer, told apart by its type for a caller to which a cut means too large (a
+    diff)."""
+
+
 # -- Percent-encoding and endpoints ---------------------------------------------------------
 
 
@@ -1341,6 +1347,8 @@ class Gateway:
 
         if result.timed_out:
             raise failure("network_error", f"{where}: no answer within the time budget")
+        if result.stdout_truncated and not write:
+            raise AnswerCut("upstream_error", f"{where}: the answer was larger than the read cap")
         if result.stdout_truncated or result.streams_incomplete:
             raise failure("upstream_error", f"{where}: the answer was too large or never ended")
         parsed = parse_http(result.stdout)
