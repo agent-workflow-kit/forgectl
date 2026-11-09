@@ -163,3 +163,29 @@ def show(inv: registry.Invocation) -> dict[str, Any]:
         raise ForgectlError("internal", "show: the pull request was not bound to a host")
     read = backend_for(ref, make_env(inv)).get_pr(ref)
     return read.pr.to_dict()
+
+
+def _bound(inv: registry.Invocation, command: str) -> PrRef:
+    ref = inv.args.pr
+    if not isinstance(ref, PrRef):  # bind_args binds it before any handler runs
+        raise ForgectlError("internal", f"{command}: the pull request was not bound to a host")
+    return ref
+
+
+@registry.register("files")
+def files(inv: registry.Invocation) -> dict[str, Any]:
+    ref = _bound(inv, "files")
+    return backend_for(ref, make_env(inv)).files(ref).to_dict()
+
+
+@registry.register("diff")
+def diff(inv: registry.Invocation) -> dict[str, Any]:
+    ref = _bound(inv, "diff")
+    return backend_for(ref, make_env(inv)).diff(ref).to_dict()
+
+
+@registry.register("compare")
+def compare(inv: registry.Invocation) -> dict[str, Any]:
+    ref = _bound(inv, "compare")
+    result = backend_for(ref, make_env(inv)).compare(ref, inv.args.from_sha, inv.args.to_sha)
+    return result.to_dict()

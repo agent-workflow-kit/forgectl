@@ -26,7 +26,7 @@ import pytest
 from forgectl import gateway as gw
 from forgectl.config import LoadedConfig
 from forgectl.errors import ForgectlError
-from forgectl.gateway import Gateway, ProcessResult, Target
+from forgectl.gateway import AnswerCut, Gateway, ProcessResult, Target
 
 from .harness.fixtures import forgectl_env
 from .harness.forges import Call, FakeForges
@@ -968,6 +968,15 @@ def test_oversized_and_unfinished_answers_are_errors_never_partial_data(tmp_path
             assert code_of(stub_gateway(tmp_path, runner), write=True).code == "outcome_unknown"
 
 
+def test_a_read_past_the_cap_is_told_apart_from_one_that_never_ended(tmp_path: Path) -> None:
+    cut = code_of(stub_gateway(tmp_path, stub(head(200) + b"{}", stdout_truncated=True)))
+    assert isinstance(cut, AnswerCut) and cut.code == "upstream_error"
+    endless = code_of(stub_gateway(tmp_path, stub(head(200) + b"{}", streams_incomplete=True)))
+    assert not isinstance(endless, AnswerCut)
+    write = stub_gateway(tmp_path, stub(head(200) + b"{}", stdout_truncated=True))
+    assert not isinstance(code_of(write, write=True), AnswerCut)
+
+
 MALFORMED = [
     b"{", b'{"a":1}}', b'{"a":NaN}', b'{"a":Infinity}', b'{"a":1e999}', b'{"a":1,"a":2}',
     b"\xef\xbb\xbf{}", b'{"a":"\xff"}', b"[" * 100000, b"{'a':1}", b"nul", b'{"a":1} x',
@@ -990,6 +999,12 @@ def test_a_success_status_with_a_failing_exit_is_not_a_success(tmp_path: Path) -
 def test_text_mode_is_strict_utf8(tmp_path: Path) -> None:
     err = code_of(stub_gateway(tmp_path, stub(head(200) + b"\xff")), parse="text")
     assert err.code == "upstream_error"
+
+
+def test_bytes_mode_returns_the_raw_body_whatever_its_encoding(tmp_path: Path) -> None:
+    body = b"diff --git a b\n+caf\xe9 \xff\n"
+    response = call_of(stub_gateway(tmp_path, stub(head(200) + body)), parse="bytes")
+    assert response.data == body
 
 
 def test_a_passthrough_status_in_text_mode_tolerates_invalid_utf8(tmp_path: Path) -> None:

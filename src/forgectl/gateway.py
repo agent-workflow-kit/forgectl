@@ -148,6 +148,12 @@ def _error(code: str, message: str, **kwargs: Any) -> ForgectlError:
     return ForgectlError(code, message, **kwargs)
 
 
+class AnswerCut(ForgectlError):
+    """A read whose answer went past forgectl's own size cap: ``upstream_error`` like any other
+    unusable answer, told apart by its type for a caller to which a cut means too large (a
+    diff)."""
+
+
 # -- Percent-encoding and endpoints ---------------------------------------------------------
 
 
@@ -1128,7 +1134,7 @@ class Gateway:
         headers: Mapping[str, str] | None = None,
         write: bool = False,
         shape: Shape = "any",
-        parse: Literal["json", "text"] = "json",
+        parse: Literal["json", "text", "bytes"] = "json",
         expect_status: frozenset[int] | None = None,
         passthrough: frozenset[int] = frozenset(),
         _graphql: bool = False,
@@ -1143,7 +1149,8 @@ class Gateway:
         arrives here as that GET's answer. ``shape`` is the
         documented body: a list where one object is documented on a write is ``host_rejected``.
         ``passthrough`` lists non-2xx statuses the caller maps itself (409, 405...): they return
-        as a ``Response`` instead of raising.
+        as a ``Response`` instead of raising. ``parse="bytes"`` returns the body undecoded (a
+        diff may hold any bytes; the caller decodes with ``sanitize_bytes``).
         """
         method = method.upper()
         if method not in _METHODS:
@@ -1324,7 +1331,7 @@ class Gateway:
         *,
         write: bool,
         shape: Shape,
-        parse: Literal["json", "text"],
+        parse: Literal["json", "text", "bytes"],
         expect_status: frozenset[int] | None,
         passthrough: frozenset[int],
         graphql: bool,
@@ -1340,6 +1347,8 @@ class Gateway:
 
         if result.timed_out:
             raise failure("network_error", f"{where}: no answer within the time budget")
+        if result.stdout_truncated and not write:
+            raise AnswerCut("upstream_error", f"{where}: the answer was larger than the read cap")
         if result.stdout_truncated or result.streams_incomplete:
             raise failure("upstream_error", f"{where}: the answer was too large or never ended")
         parsed = parse_http(result.stdout)
@@ -1550,7 +1559,9 @@ def _encode_body(body: Any) -> bytes:
         raise ValueError("body holds a lone surrogate") from exc
 
 
-def _decode(raw: bytes, parse: Literal["json", "text"], *, tolerant: bool) -> Any:
+def _decode(raw: bytes, parse: Literal["json", "text", "bytes"], *, tolerant: bool) -> Any:
+    if parse == "bytes":  # the caller decodes and sanitizes (a diff may hold any bytes)
+        return raw
     try:
         return raw.decode("utf-8") if parse == "text" else parse_json(raw)
     except ValueError:  # UnicodeDecodeError included

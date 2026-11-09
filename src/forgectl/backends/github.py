@@ -993,13 +993,19 @@ class GitHubBackend:
         return github_snapshot.snapshot(self._env, ref, self.get_pr)
 
     def diff(self, ref: PrRef) -> m.DiffResult:
-        raise not_implemented("diff")  # TODO(#13)
+        from . import github_diff  # a late import: github_diff reads this module's helpers
+
+        return github_diff.diff_result(self._env, ref)
 
     def compare(self, ref: PrRef, from_sha: str, to_sha: str) -> m.CompareResult:
-        raise not_implemented("compare")  # TODO(#13)
+        from . import github_diff
+
+        return github_diff.compare_result(self._env, ref, from_sha, to_sha)
 
     def files(self, ref: PrRef) -> m.FilesResult:
-        raise not_implemented("files")  # TODO(#13)
+        from . import github_diff
+
+        return github_diff.files_result(self._env, ref)
 
     def comments(self, ref: PrRef) -> m.CommentsResult:
         from . import github_snapshot  # (#12)

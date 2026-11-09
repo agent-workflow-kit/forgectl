@@ -6,6 +6,8 @@ import json
 import os
 import sys
 from argparse import Namespace
+from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any, TextIO
 
 from .errors import ForgectlError, sanitize_tree
@@ -132,8 +134,8 @@ def _discard(stream: TextIO) -> None:
         pass
 
 
-def write_line(stream: TextIO | None, text: str) -> bool:
-    """Write ``text`` and a newline, flushed; False when the stream is missing or failed.
+def write_text(stream: TextIO | None, text: str) -> bool:
+    """Write ``text`` as it is, flushed; False when the stream is missing or failed.
 
     A failure (closed or absent stream, broken pipe, full disk) never raises: the exit code is
     already decided and an output problem must not change it.
@@ -141,7 +143,7 @@ def write_line(stream: TextIO | None, text: str) -> bool:
     if stream is None:
         return False
     try:
-        stream.write(text + "\n")
+        stream.write(text)
         stream.flush()
     except (OSError, ValueError):
         _discard(stream)
@@ -149,7 +151,64 @@ def write_line(stream: TextIO | None, text: str) -> bool:
     return True
 
 
-def emit_success(data: dict[str, Any], *, json_mode: bool) -> None:
+def write_line(stream: TextIO | None, text: str) -> bool:
+    """Write ``text`` and a newline, as ``write_text`` does."""
+    return write_text(stream, text + "\n")
+
+
+@dataclass
+class RecordStream:
+    """A result that is a sequence of records (``export``): a JSON line each, or with ``--json``
+    one array. Read lazily, so a large file is never held in memory."""
+
+    records: Iterable[dict[str, Any]]
+
+
+def warn(text: str) -> None:
+    """One ``forgectl: warning:`` line on stderr; never raises."""
+    write_line(sys.stderr, f"forgectl: warning: {sanitize_line(text)}")
+
+
+def _write_stream(stream: TextIO | None, records: Iterable[dict[str, Any]], *, array: bool) -> None:
+    if stream is None:
+        return
+
+    def put(text: str) -> bool:
+        # Only the writes are guarded: an error from producing the records is not a broken pipe.
+        try:
+            stream.write(text)
+            if not array:
+                stream.flush()
+        except (OSError, ValueError):
+            _discard(stream)
+            return False
+        return True
+
+    if array and not put("["):
+        return
+    for index, record in enumerate(records):
+        if not put(("," if array and index else "") + dumps(record) + ("" if array else "\n")):
+            return
+    if array:
+        put("]\n")
+    try:
+        stream.flush()
+    except (OSError, ValueError):
+        _discard(stream)
+
+
+def emit_success(
+    data: dict[str, Any] | RecordStream, *, json_mode: bool, command: str | None = None
+) -> None:
+    """The result on stdout. Human `diff` prints the unified diff alone, as the backend
+    sanitized it (interface: `diff`; Sanitizing): LF, tab and a CR before LF stay raw, so its
+    lines are the diff's own."""
+    if isinstance(data, RecordStream):
+        _write_stream(sys.stdout, data.records, array=json_mode)
+        return
+    if command == "diff" and not json_mode:
+        write_text(sys.stdout, data["diff"])
+        return
     write_line(sys.stdout, dumps(data) if json_mode else format_human(data))
 
 
