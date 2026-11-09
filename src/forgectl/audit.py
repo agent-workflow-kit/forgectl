@@ -26,9 +26,7 @@ from typing import Any, Literal
 from . import jsonlog
 from .errors import ForgectlError
 from .jsonlog import PATTERNS, JsonlError, matches, parse_ts
-
-# TODO(#6): the one import point for sanitization; sanitize.py replaces textsafe here.
-from .textsafe import sanitize_line, sanitize_text
+from .sanitize import sanitize_line, sanitize_text
 
 __all__ = [
     "PATTERNS",

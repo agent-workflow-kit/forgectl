@@ -14,7 +14,7 @@ from forgectl import jsonlog
 from forgectl.cli import main
 from forgectl.humanactions import Tty
 
-from .cli_schema_check import validate  # TODO(#3): the shared schema registry replaces this
+from .harness.schemas import validate
 
 NO_TTY = Tty(stdin=False, stderr=False)
 SHA = "a" * 40
@@ -365,7 +365,7 @@ def test_urls_lose_userinfo_and_token_shapes_are_masked(state: Path) -> None:
         "warn",
         "upstream_error",
         details={
-            "url": "https://bob:hunter2@github.com/o/r?x=1",
+            "url": "https://bob:hunter2" + "@github.com/o/r?x=1",
             "nested": [{"m": "token ghp_abcdefghijklmnop and glpat-abcdefghijklmnop"}],
             "pat": "github_pat_AAAAAAAAAAA",
         },

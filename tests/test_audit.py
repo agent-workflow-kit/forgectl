@@ -18,7 +18,7 @@ from forgectl.audit import Attempt, AuditContext, AuditInputs
 from forgectl.cli import SignalExit, _signals
 from forgectl.errors import ForgectlError
 
-from .cli_schema_check import validate  # TODO(#3): the shared schema registry replaces this
+from .harness.schemas import validate
 
 SHA = "a" * 40
 HASH = "b" * 64
