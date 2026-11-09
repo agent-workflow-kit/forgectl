@@ -35,7 +35,6 @@ from ..gateway import Target, verify_identity
 from ..identifiers import PrRef, RepoRef, bind_login
 from ..reads import SHOW_READINESS, ReadEnv
 from ..sanitize import sanitize_line, sanitize_text
-from .base import not_implemented
 
 T = TypeVar("T")
 
