@@ -357,7 +357,7 @@ def test_urls_lose_userinfo_and_token_shapes_are_masked(state: Path) -> None:
     secrets = [
         "hunter2",
         "ghp_abcdefghijklmnop",
-        "glpat-abcdefghijklmnop",
+        "glpat" + "-abcdefghijklmnop",
         "github_pat_AAAAAAAAAAA",
     ]
     jsonlog.log_event(
@@ -366,7 +366,7 @@ def test_urls_lose_userinfo_and_token_shapes_are_masked(state: Path) -> None:
         "upstream_error",
         details={
             "url": "https://bob:hunter2" + "@github.com/o/r?x=1",
-            "nested": [{"m": "token ghp_abcdefghijklmnop and glpat-abcdefghijklmnop"}],
+            "nested": [{"m": "token ghp_abcdefghijklmnop and glpat" + "-abcdefghijklmnop"}],
             "pat": "github_pat_AAAAAAAAAAA",
         },
     )

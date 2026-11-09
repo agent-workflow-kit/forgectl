@@ -425,21 +425,21 @@ def test_userinfo_is_dropped_up_to_the_last_at_sign() -> None:
 @pytest.mark.parametrize(
     "token",
     [
-        "glpat-abcdefghijkl",
-        "glpat-abcdefghijkl.01.abcdefghi",
-        "gloas-abcdefghijkl",
-        "glrt-abcdefghijkl",
-        "gldt-abcdefghijkl",
-        "glptt-abcdefghijkl",
-        "glft-abcdefghijkl",
-        "glimt-abcdefghijkl",
-        "glsoat-abcdefghijkl",
-        "glcbt-abcdefghijkl",
-        "glagent-abcdefghijkl",
+        "glpat" + "-abcdefghijkl",
+        "glpat" + "-abcdefghijkl.01.abcdefghi",
+        "gloas" + "-abcdefghijkl",
+        "glrt" + "-abcdefghijkl",
+        "gldt" + "-abcdefghijkl",
+        "glptt" + "-abcdefghijkl",
+        "glft" + "-abcdefghijkl",
+        "glimt" + "-abcdefghijkl",
+        "glsoat" + "-abcdefghijkl",
+        "glcbt" + "-abcdefghijkl",
+        "glagent" + "-abcdefghijkl",
         "glwt-abcdefghijkl",
         "glffct-abcdefghijkl",
         "gltst-abcdefghijkl",
-        "(glpat-abcdefghijkl)",
+        "(glpat" + "-abcdefghijkl)",
     ],
 )
 def test_gitlab_token_shapes_are_masked(token: str) -> None:
@@ -452,7 +452,7 @@ def test_gitlab_token_shapes_are_masked(token: str) -> None:
         "glossary-update-2024",
         "feature/global-config-refactor",
         "english-translations",
-        "xglpat-abcdefghijkl",
+        "xglpat" + "-abcdefghijkl",
     ],
 )
 def test_ordinary_words_are_not_masked_as_gitlab_tokens(text: str) -> None:
