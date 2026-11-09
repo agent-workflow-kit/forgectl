@@ -177,7 +177,8 @@ def _compare_identity(url: object, target: Target, project: str) -> None:
 
 
 class _Moved(Exception):
-    """The PR's file list shifted under the read (a file on two pages): read it all once more."""
+    """The PR's files shifted under the read (a file on two pages, or a diff whose file count is
+    not the PR's ``changed_files``): read it all once more."""
 
 
 def _pull_segments(ref: PrRef) -> list[str]:
@@ -378,16 +379,17 @@ def _merge_base(env: ReadEnv, target: Target, ref: PrRef, pull: Pull) -> str | N
     )
 
 
-def _diff_text(env: ReadEnv, target: Target, ref: PrRef, pull: Pull) -> str:
-    def check(response: Response) -> str:
+def _diff_text(env: ReadEnv, target: Target, ref: PrRef) -> tuple[bytes, int]:
+    """The raw diff and its file header count. The count is compared with the PR's
+    ``changed_files`` by the caller, outside the retried call: a mismatch is a PR that moved."""
+
+    def check(response: Response) -> tuple[bytes, int]:
         if response.status == 406:
             raise _too_large("this diff")
         raw = response.data
         if not isinstance(raw, bytes):
             raise Malformed("no diff text")
-        if len(_DIFF_HEADER.findall(raw)) != pull.changed_files:
-            raise Malformed("a diff whose files do not number the PR's changed_files")
-        return sanitize_bytes(raw, diff=True)
+        return raw, len(_DIFF_HEADER.findall(raw))
 
     return _get(
         env,
@@ -405,7 +407,10 @@ def diff_result(env: ReadEnv, ref: PrRef) -> m.DiffResult:
     target = env.hosts.target(ref.host)
 
     def fetch(pull: Pull) -> tuple[str, str | None]:
-        return _diff_text(env, target, ref, pull), _merge_base(env, target, ref, pull)
+        raw, count = _diff_text(env, target, ref)
+        if count != pull.changed_files:
+            raise _Moved  # a push mid-read; a second mismatch ends upstream_error
+        return sanitize_bytes(raw, diff=True), _merge_base(env, target, ref, pull)
 
     pull, (text, merge_base) = _stable(env, target, ref, fetch, need_changed_files=True)
     return m.DiffResult(

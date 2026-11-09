@@ -497,6 +497,41 @@ def test_a_diff_needs_a_valid_changed_files(
         del doc["changed_files"]
     h = make(**diff_routes(text=text, pull=doc))
     assert raises(lambda: h.backend.diff(REF)).code == "upstream_error"
+    assert h.script.kinds == ["pull"]  # no diff is downloaded for an unknown count
+
+
+TWO_FILES = (
+    b"diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+    b"diff --git a/y b/y\nnew file mode 100644\n--- /dev/null\n+++ b/y\n@@ -0,0 +1 @@\n+c\n"
+)
+
+
+def test_a_push_that_adds_a_file_mid_read_reads_once_more(
+    make: Callable[..., RouterHarness],
+) -> None:
+    new_head = "4" * 40
+    moved = pull(changed_files=2, head={**pull()["head"], "sha": new_head})
+    h = make(
+        retries=3,
+        **diff_routes(
+            text=TWO_FILES,
+            pull=lambda n: pull(changed_files=1) if n == 1 else moved,
+            compare=recording("merge-base"),  # the router names a merge base by the old head
+        ),
+    )
+    result = h.backend.diff(REF)
+    assert result.head_sha == new_head and result.diff.count("diff --git") == 2
+    assert h.script.kinds == ["pull", "diff", "pull", "diff", "compare", "pull"]
+
+
+def test_a_diff_count_mismatched_twice_is_upstream_error_never_retried_or_printed(
+    make: Callable[..., RouterHarness],
+) -> None:
+    h = make(retries=3, **diff_routes(text=TWO_FILES, pull=pull(changed_files=1)))
+    err = raises(lambda: h.backend.diff(REF))
+    assert err.code == "upstream_error"
+    assert "diff --git" not in str(err) and "+c" not in str(err)
+    assert h.script.kinds == ["pull", "diff", "pull", "diff"]
 
 
 @pytest.mark.parametrize(
