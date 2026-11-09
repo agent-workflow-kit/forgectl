@@ -1046,6 +1046,7 @@ def verify_identity(
     call's token), sanitized and cut. This detects an accidental redirect, not a hostile host.
     """
     # TODO(#7): require https in html_url for github.com and *.ghe.com
+    # TODO(#7): match the url path exactly, not by prefix
     ok = False
     shown = ""
     if isinstance(observed, str):
@@ -1417,6 +1418,8 @@ class Gateway:
         *,
         write: bool,
     ) -> ForgectlError:
+        # TODO(#7): attach retry_after to retried 5xx read errors so reads honor retry-after on
+        # 5xx (interface.md Reliability)
         host_text = _host_message(raw, target.token)
         suffix = f": {host_text}" if host_text else ""
         retry = _retry_after(headers)

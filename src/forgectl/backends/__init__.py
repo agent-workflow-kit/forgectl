@@ -20,6 +20,8 @@ from .base import Backend
 if TYPE_CHECKING:
     from ..reads import ReadEnv
 
+# TODO(#15): GitLabBackend takes ReadEnv as its only argument and runs env.until_known in get_pr
+# itself
 BACKEND_CLASSES: dict[str, tuple[str, str]] = {
     "github": ("forgectl.backends.github", "GitHubBackend"),
     # TODO(#15): "gitlab": ("forgectl.backends.gitlab", "GitLabBackend"),
