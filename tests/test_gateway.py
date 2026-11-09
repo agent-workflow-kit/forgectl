@@ -2350,3 +2350,109 @@ def test_a_hostile_caller_directory_cannot_steer_or_run_anything(
         assert call.argv[-1] in ("repos/o/r", "projects/7")
         assert_call_safe(call, host=call.request["host"] if call.request else "")
     assert not marker.exists()
+
+
+# -- Hook machinery round 1 (#20) ------------------------------------------------------------------
+
+
+def test_run_process_accepts_the_config_maximum_timeout() -> None:
+    """A timeout past the selector's int-millisecond range (about 24.8 days) still runs."""
+    result = gw.run_process(
+        ["/bin/sh", "-c", "exit 0"], env=plain_env(), cwd=os.environ["TMPDIR"],
+        timeout=100 * 365 * 86400.0,
+    )  # fmt: skip
+    assert result.returncode == 0 and not result.timed_out
+
+
+def test_remove_tree_never_chmods_through_a_symlink(tmp_path: Path) -> None:
+    """An unremovable directory holding a symlink: the retry fixes the directory, never the
+    symlink's target."""
+    victim = tmp_path / "victim"
+    victim.write_text("x")
+    victim.chmod(0o644)
+    top = tmp_path / "forgectl-top"
+    inner = top / "d"
+    inner.mkdir(parents=True)
+    (inner / "link").symlink_to(victim)
+    inner.chmod(0o500)  # the link cannot be unlinked until the directory is writable
+    gw.remove_tree(str(top))
+    assert not top.exists()
+    assert (victim.stat().st_mode & 0o777) == 0o644
+
+
+def test_remove_tree_never_touches_the_parent_of_the_top_path(tmp_path: Path) -> None:
+    """A tree already deleted (a hook removed its own root) leaves the parent's mode alone."""
+    base = tmp_path / "base"
+    base.mkdir()
+    base.chmod(0o755)
+    gw.remove_tree(str(base / "forgectl-gone"))
+    assert (base.stat().st_mode & 0o777) == 0o755
+    top = base / "forgectl-top"
+    top.mkdir()
+    top.chmod(0o500)
+    gw.remove_tree(str(top))  # the top itself is ours to fix; its parent is not
+    assert not top.exists() and (base.stat().st_mode & 0o777) == 0o755
+
+
+def wait_zombie(pid: int, timeout: float = 10) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        if stat.rpartition(")")[2].split()[0] == "Z":
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"{pid} did not exit")
+
+
+def test_spawn_detached_restores_the_mask_when_on_start_raises() -> None:
+    before = blocked_mask()
+    started: list[int] = []
+
+    def boom(pid: int, _pgid: int) -> None:
+        started.append(pid)
+        raise RuntimeError("on_start")
+
+    with pytest.raises(RuntimeError):
+        gw.spawn_detached(
+            [sys.executable, "-I", "-c", "import sys; sys.stdin.read()"],
+            env=plain_env(), cwd="/", stdin=b"", on_start=boom,
+        )  # fmt: skip
+    assert blocked_mask() == before
+    (pid,) = started
+    gw.detached_children()
+    assert not Path(f"/proc/{pid}").exists()
+
+
+def test_spawn_detached_reaps_earlier_children_that_exited() -> None:
+    first: list[int] = []
+    gw.spawn_detached(
+        ["/bin/sh", "-c", "exit 0"], env=plain_env(), cwd="/", stdin=b"",
+        on_start=lambda pid, _pgid: first.append(pid),
+    )  # fmt: skip
+    wait_zombie(first[0])
+    second: list[int] = []
+    gw.spawn_detached(
+        ["/bin/sh", "-c", "exit 0"], env=plain_env(), cwd="/", stdin=b"",
+        on_start=lambda pid, _pgid: second.append(pid),
+    )  # fmt: skip
+    assert not Path(f"/proc/{first[0]}").exists()  # reaped by the second spawn's entry pass
+    wait_zombie(second[0])
+    assert gw.detached_children() == []
+
+
+def test_spawn_detached_waits_for_an_acknowledgement_when_asked() -> None:
+    started: list[int] = []
+    gw.spawn_detached(
+        [sys.executable, "-I", "-c", "import os, sys; sys.stdin.read(); os.write(1, b'1')"],
+        env=plain_env(), cwd="/", stdin=b"spec", on_start=lambda p, _g: started.append(p),
+        ack_timeout=10,
+    )  # fmt: skip
+    with pytest.raises(gw.NoAcknowledgement):
+        gw.spawn_detached(
+            ["/bin/sh", "-c", "exit 0"], env=plain_env(), cwd="/", stdin=b"",
+            on_start=lambda p, _g: started.append(p), ack_timeout=10,
+        )  # fmt: skip
+    for pid in started:
+        wait_zombie(pid) if Path(f"/proc/{pid}").exists() else None
+    assert gw.detached_children() == []
+    assert all(not Path(f"/proc/{pid}").exists() for pid in started)

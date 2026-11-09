@@ -55,6 +55,7 @@ from .errors import ForgectlError
 from .sanitize import sanitize_line
 
 KILL_GRACE = 2.0  # seconds between SIGTERM and SIGKILL to a child's group
+MAX_SELECT_WAIT = 86400.0  # one select wait; the loop recomputes the deadline after it
 REAP_WAIT = 5.0  # seconds to wait for the leader after SIGKILL
 DRAIN_AFTER_EXIT = 0.5  # seconds to keep reading after the leader exited (a held-open pipe)
 MAX_STDOUT = 32 * 1024 * 1024
@@ -366,13 +367,27 @@ def make_private_dirs(source: Mapping[str, str], *, config: bool) -> PrivateDirs
     return PrivateDirs(root=root, cwd=cwd, config=config_dir)
 
 
+def _chmod_dir(path: str) -> None:
+    """Make ``path`` 0700 if it is a real directory (``lstat``: a symlink is never followed)."""
+    if stat.S_ISDIR(os.lstat(path).st_mode):
+        os.chmod(path, 0o700)
+
+
 def remove_tree(path: str) -> None:
-    """Remove ``path`` (a directory this module made), without following symlinks."""
+    """Remove ``path`` (a directory this module made), without following symlinks.
+
+    An entry that cannot be removed is retried after making its directory (and, for a
+    directory, itself) 0700. Only real directories inside ``path`` are changed: never a
+    symlink's target and never the parent of ``path``."""
+    top = os.path.normpath(path)
 
     def retry(function: Callable[..., Any], target: str, _exc: BaseException) -> None:
         with contextlib.suppress(OSError):
-            os.chmod(os.path.dirname(target), 0o700)
-            os.chmod(target, 0o700)
+            target = os.path.normpath(target)
+            parent = os.path.dirname(target)
+            if target != top and (parent == top or parent.startswith(top + os.sep)):
+                _chmod_dir(parent)
+            _chmod_dir(target)
             function(target)
 
     shutil.rmtree(path, onexc=retry)
@@ -800,6 +815,7 @@ def _collect(
             wait = min(wait, left)
         elif leader.wait_fd is None:
             wait = min(wait, 0.05)
+        wait = min(wait, MAX_SELECT_WAIT)  # a selector takes a timeout of at most ~24.8 days
         for key, _events in selector.select(wait):
             tag = key.data
             if tag == "exit":
@@ -876,11 +892,17 @@ class Spawner(Protocol):
         cwd: str,
         stdin: bytes,
         on_start: Callable[[int, int], None] | None,
+        ack_timeout: float | None = None,
     ) -> Detached: ...
 
 
 SPAWN_WRITE_TIMEOUT = 10.0  # seconds to hand a detached child its stdin
 _DETACHED: list[subprocess.Popen[bytes]] = []  # started here, reaped here (never signaled)
+
+
+class NoAcknowledgement(OSError):
+    """``spawn_detached``: the child exited, or closed its stdout, or stayed silent past the
+    bound, without writing its acknowledgement byte."""
 
 
 def detached_children() -> list[subprocess.Popen[bytes]]:
@@ -896,25 +918,34 @@ def spawn_detached(
     cwd: str,
     stdin: bytes,
     on_start: Callable[[int, int], None] | None = None,
+    ack_timeout: float | None = None,
 ) -> Detached:
     """Start ``argv`` (no shell) as the leader of a new session and hand it ``stdin``; then return
-    without waiting. stdout and stderr go to /dev/null. The child outlives this process, so it
-    must enforce its own deadline. If handing over stdin fails, the child's group is killed
-    (it is our unreaped child, so the id is ours) and the error is raised."""
+    without waiting. stderr goes to /dev/null, and so does stdout unless ``ack_timeout`` is
+    given: then stdout is a pipe and the child must write one byte to it within ``ack_timeout``
+    seconds of the hand-over, else ``NoAcknowledgement``. The child outlives this process, so it
+    must enforce its own deadline. If handing over stdin or the acknowledgement fails, the
+    child's group is killed (it is our unreaped child, so the id is ours) and the error is
+    raised. Each call first reaps the earlier detached children that have exited."""
+    detached_children()
     old_mask = _block_signals()
     try:
-        proc = _popen_detached(argv, env, cwd, old_mask)
+        proc = _popen_detached(argv, env, cwd, old_mask, ack=ack_timeout is not None)
     except BaseException as exc:
         _restore_signals(old_mask, exc)
         raise
     _DETACHED.append(proc)
+    masked = True
     try:
         if on_start is not None:
             on_start(proc.pid, proc.pid)
+        masked = False
         _restore_signals(old_mask)
         _hand_over(proc, stdin)
+        if ack_timeout is not None:
+            _await_ack(proc, ack_timeout)
     except BaseException:
-        held = _block_signals()
+        held = old_mask if masked else _block_signals()
         try:
             _signal_group(proc.pid, signal.SIGKILL)
             with contextlib.suppress(subprocess.TimeoutExpired, OSError):
@@ -926,7 +957,7 @@ def spawn_detached(
 
 
 def _popen_detached(
-    argv: Sequence[str], env: Mapping[str, str], cwd: str, old_mask: Any
+    argv: Sequence[str], env: Mapping[str, str], cwd: str, old_mask: Any, *, ack: bool
 ) -> subprocess.Popen[bytes]:
     def child_signals() -> None:
         signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
@@ -935,7 +966,7 @@ def _popen_detached(
         list(argv),
         shell=False,
         stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE if ack else subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         env=dict(env),
         cwd=cwd,
@@ -965,6 +996,19 @@ def _hand_over(proc: subprocess.Popen[bytes], data: bytes) -> None:
     finally:
         with contextlib.suppress(OSError):
             proc.stdin.close()
+
+
+def _await_ack(proc: subprocess.Popen[bytes], seconds: float) -> None:
+    assert proc.stdout is not None
+    fd = proc.stdout.fileno()
+    try:
+        ready, _, _ = select.select([fd], [], [], seconds)
+        got = os.read(fd, 1) if ready else b""
+    finally:
+        with contextlib.suppress(OSError):
+            proc.stdout.close()
+    if not got:
+        raise NoAcknowledgement("the detached child did not acknowledge its start")
 
 
 def harden_process() -> bool:
@@ -1647,9 +1691,13 @@ class Gateway:
         env: Mapping[str, str],
         cwd: str,
         stdin: bytes,
+        ack_timeout: float | None = None,
     ) -> Detached:
-        """Start ``argv`` in its own session, outliving this process (the async hook watchdog)."""
-        return self._spawner(argv, env=env, cwd=cwd, stdin=stdin, on_start=self._on_spawn)
+        """Start ``argv`` in its own session, outliving this process (the async hook watchdog);
+        ``ack_timeout`` as for the module's ``spawn_detached``."""
+        return self._spawner(
+            argv, env=env, cwd=cwd, stdin=stdin, on_start=self._on_spawn, ack_timeout=ack_timeout
+        )
 
     def _token_names(self, extra: Collection[str]) -> frozenset[str]:
         """Every variable that may hold a token: the ambient list, each configured

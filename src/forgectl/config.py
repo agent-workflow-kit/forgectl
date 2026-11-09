@@ -63,6 +63,7 @@ MAX_FILE_BYTES = 256 * 1024
 MAX_DROP_INS = 256
 MAX_NODES = 10_000  # per file: bounds parse time, far above any real config
 _MAX_DURATION_SECONDS = Decimal(100 * 365 * 86400)  # as for the --timeout flag: 100 years
+MAX_DURATION = float(_MAX_DURATION_SECONDS)  # the largest duration a config may give
 
 BUILT_IN_HOSTS = {"github.com": "github", "gitlab.com": "gitlab"}
 

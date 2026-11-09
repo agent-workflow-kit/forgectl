@@ -23,6 +23,7 @@ never raise for a hook's failure, they warn.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from collections.abc import Mapping, Sequence
@@ -30,10 +31,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import gateway as gw
+from . import hookwatch
 from .config import Config
 from .errors import HOOK_STDERR_LIMIT, ForgectlError, truncate_utf8
 from .gateway import Gateway
-from .sanitize import sanitize_bytes, sanitize_line, sanitize_text
+from .output import warn
+from .sanitize import sanitize_bytes, sanitize_line
 
 SHELL = "/bin/sh"
 MAX_STDOUT = 64 * 1024
@@ -43,6 +46,14 @@ MAX_DECISION_IDS = 32
 ESCALATE_EXIT = 13
 VETO_EXIT = 11
 DECISION_ID = re.compile(r"[A-Za-z0-9._:@/-]{1,128}")
+ACK_TIMEOUT = 2.0  # seconds the watchdog has to acknowledge its spec
+# Run under -I (no cwd, PYTHONPATH or user site on sys.path), with the directory that holds the
+# running forgectl package put first, so the watchdog imports the same forgectl however it was
+# installed. The directory is an argv item, never an environment variable.
+WATCHDOG_BOOT = (
+    "import sys; sys.path.insert(0, sys.argv[1]); "
+    "from forgectl import hookwatch; sys.exit(hookwatch.main())"
+)
 
 PRE_HOOKS = ("pre-merge", "pre-post")
 POST_HOOKS = ("post-merge", "post-post")
@@ -73,7 +84,12 @@ def _sanitized(value: Any) -> Any:
     if isinstance(value, list | tuple):
         return [_sanitized(v) for v in value]
     if isinstance(value, Mapping):
-        return {str(k): _sanitized(v) for k, v in value.items()}
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            if not isinstance(k, str):
+                raise ValueError(f"hook payload key {k!r} is not a string")
+            out[k] = _sanitized(v)
+        return out
     return value
 
 
@@ -81,14 +97,18 @@ def build_payload(
     hook: str, fields: Mapping[str, Any], decision_ids: Sequence[str] = ()
 ) -> dict[str, Any]:
     """The payload for ``hook``: exactly the fields of its schema, sanitized. ``fields`` is not
-    modified. A missing or extra field is a programming error (``ValueError``): a body or any
-    other key can never ride along."""
+    modified. A missing or extra field, a key that is not a string or a ``decision_ids`` item
+    outside the grammar is a programming error (``ValueError``): a body or any other key can
+    never ride along."""
     if hook not in FIELDS:
         raise ValueError(f"unknown hook {hook!r}")
     names = set(fields)
     if names != FIELDS[hook]:
         missing, extra = sorted(FIELDS[hook] - names), sorted(names - FIELDS[hook])
         raise ValueError(f"{hook} payload fields: missing {missing}, unexpected {extra}")
+    for item in decision_ids:
+        if not isinstance(item, str) or DECISION_ID.fullmatch(item) is None:
+            raise ValueError(f"decision id {item!r} does not match the grammar")
     payload: dict[str, Any] = {
         "tool": "forgectl",
         "hook": hook,
@@ -100,8 +120,15 @@ def build_payload(
 
 
 def serialize(payload: Mapping[str, Any]) -> bytes:
-    """Strict JSON (no NaN, ASCII only) plus a newline, at most ``MAX_PAYLOAD`` bytes."""
-    data = json.dumps(payload, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+    """Strict JSON (no NaN, ASCII only) plus a newline, at most ``MAX_PAYLOAD`` bytes. A value
+    JSON cannot carry (NaN, infinity, an int past Python's digit limit, bytes) is ``internal``,
+    like an oversize payload, so a ``post-`` hook warns instead of raising."""
+    try:
+        data = json.dumps(payload, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+    except (ValueError, TypeError) as exc:
+        raise ForgectlError(
+            "internal", f"hook payload is not serializable ({type(exc).__name__})"
+        ) from None
     out = data.encode("ascii") + b"\n"
     if len(out) > MAX_PAYLOAD:
         raise ForgectlError(
@@ -235,7 +262,7 @@ def _run_sync(
             max_stdout=MAX_STDOUT,
             max_stderr=MAX_STDERR,
         )
-    except gw.ExecutableMissing:
+    except (gw.ExecutableMissing, OSError):  # OSError: E2BIG for an over-long cmd and the like
         return _Ran(entry, "veto", f"{name} could not be started", "", [], None, None)
     stderr = _stderr_text(result.stderr)
     code = result.returncode
@@ -290,13 +317,19 @@ def run_pre_hooks(
     ``vetoed`` at once and later hooks do not run. A 13 escalates and later hooks still run; if
     none vetoes, ``escalated`` is raised, unless ``override_escalation``, which counts 13 as
     allow and lists the entries in ``HookResult.escalated`` so the caller can record the
-    override. ``fields`` must carry exactly the schema's fields (``FIELDS``); its
-    ``override_escalation`` is the caller's to set.
+    override. ``fields`` must carry exactly the schema's fields (``FIELDS``), checked before any
+    hook runs; ``override_escalation`` is filled from the keyword argument, and a value the
+    caller put in ``fields`` that differs is a ``ValueError``. The warnings collected before a
+    veto or an escalation are written to stderr (``output.warn``) before the error is raised.
     """
     if hook not in PRE_HOOKS:
         raise ValueError(f"not a pre hook: {hook!r}")
+    if fields.get("override_escalation", override_escalation) is not override_escalation:
+        raise ValueError("fields['override_escalation'] differs from override_escalation")
+    fields = {**fields, "override_escalation": override_escalation}
     configured = entries(gateway.config.config, hook)
     ids = list(merge_decision_ids((), decision_ids)[0])
+    build_payload(hook, fields, ids)  # the field set is checked even with no hook configured
     result = HookResult(ids)
     escalated_stderr: str | None = None
     object_id = str(fields.get("object_id", ""))
@@ -307,6 +340,7 @@ def run_pre_hooks(
         result.decision_ids = ids
         result.reports.append(HookReport(hook, entry.index, ran.outcome, ran.reason, ran.exit_code))
         if ran.outcome == "veto":
+            _emit(result.warnings)
             raise ForgectlError(
                 "vetoed",
                 ran.reason,
@@ -319,6 +353,7 @@ def run_pre_hooks(
             if escalated_stderr is None:
                 escalated_stderr = ran.stderr
     if result.escalated and not override_escalation:
+        _emit(result.warnings)
         raise ForgectlError(
             "escalated",
             f"{len(result.escalated)} {hook} hook(s) escalated",
@@ -328,6 +363,12 @@ def run_pre_hooks(
             escalated_hooks=list(result.escalated),
         )
     return result
+
+
+def _emit(warnings: Sequence[str]) -> None:
+    """The warnings of a run that ends in an error, which has no place for them."""
+    for text in warnings:
+        warn(text)
 
 
 def run_post_hooks(
@@ -347,6 +388,7 @@ def run_post_hooks(
         raise ValueError(f"not a post hook: {hook!r}")
     configured = entries(gateway.config.config, hook)
     ids = list(merge_decision_ids((), decision_ids)[0])
+    build_payload(hook, fields, ids)  # the field set is checked even with no hook configured
     result = HookResult(ids)
     object_id = str(fields.get("object_id", ""))
     for entry in configured:
@@ -371,13 +413,21 @@ def run_post_hooks(
         if ran.outcome == "allow":
             result.reports.append(HookReport(hook, entry.index, "allow", "", ran.exit_code))
             continue
-        shown = ran.reason + (f": {ran.stderr[:200]}" if ran.stderr else "")
-        result.warnings.append(sanitize_text(shown))
+        shown = ran.reason + (f": {sanitize_line(ran.stderr[:200])}" if ran.stderr else "")
+        result.warnings.append(shown)
         result.reports.append(HookReport(hook, entry.index, "failed", ran.reason, ran.exit_code))
     return result
 
 
 # -- Async -------------------------------------------------------------------------------------
+
+
+def watchdog_argv(package_parent: str | None = None) -> list[str]:
+    """The watchdog's argv: ``python -I -c <boot> <dir>``, where ``dir`` holds the running
+    ``forgectl`` package (``package_parent`` overrides it, for tests)."""
+    if package_parent is None:
+        package_parent = os.path.dirname(os.path.dirname(os.path.abspath(gw.__file__)))
+    return [sys.executable, "-I", "-c", WATCHDOG_BOOT, package_parent]
 
 
 def _start_async(
@@ -391,7 +441,8 @@ def _start_async(
     """Start the watchdog for one async hook; returns a problem text, or None when it started.
 
     The hook's private directory is made here and removed by the watchdog (or here, if the
-    watchdog could not be started)."""
+    spec is invalid or the watchdog did not acknowledge it within ``ACK_TIMEOUT``, in which case
+    the group just started is killed)."""
     try:
         dirs = gw.make_private_dirs(gateway.environ, config=False)
     except (OSError, ForgectlError) as exc:
@@ -415,13 +466,13 @@ def _start_async(
             "state_dir": state_dir,
             "pr": pr,
         }
+        if not hookwatch.valid_spec(spec):
+            gw.remove_tree(dirs.root)
+            return "the watchdog spec is invalid; not run"
         data = json.dumps(spec, ensure_ascii=True, allow_nan=False).encode("ascii")
         watchdog_env = gw.build_environment(gateway.environ, dirs=dirs, backend=None)
         gateway.spawn_detached(
-            [sys.executable, "-I", "-m", "forgectl.hookwatch"],
-            env=watchdog_env,
-            cwd="/",
-            stdin=data,
+            watchdog_argv(), env=watchdog_env, cwd="/", stdin=data, ack_timeout=ACK_TIMEOUT
         )
     except (OSError, ValueError, TimeoutError) as exc:
         gw.remove_tree(dirs.root)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import signal
@@ -201,8 +202,9 @@ def test_build_payload_does_not_modify_its_input_and_sanitizes_untrusted_strings
 
 
 def test_serialize_refuses_nan_and_an_oversize_payload() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ForgectlError) as nan:
         hooks.serialize({"x": float("nan")})
+    assert nan.value.code == "internal"
     big = hooks.build_payload("pre-merge", merge_fields(base_ref="x" * (hooks.MAX_PAYLOAD + 1)))
     with pytest.raises(ForgectlError) as raised:
         hooks.serialize(big)
@@ -271,6 +273,7 @@ def run_pre(
 ) -> hooks.HookResult:
     gateway = make_gateway(forges, spawned, config_with(**{hook.replace("-", "_"): entries_}), env)
     default = merge_fields() if hook == "pre-merge" else pre_post_fields()
+    del default["override_escalation"]  # filled by run_pre_hooks from override_escalation
     return hooks.run_pre_hooks(
         gateway, hook, fields or default, decision_ids=ids or [], override_escalation=override
     )
@@ -486,7 +489,8 @@ def test_a_hook_cannot_change_what_the_caller_was_shown(
     result = run_pre(fake_forges, spawned, [entry(f"echo '{forged}'")], fields=fields)
     assert result.decision_ids == ["ok"]
     assert json.dumps(fields, sort_keys=True) == before
-    assert not hasattr(result, "head_sha")
+    visible = json.dumps(dataclasses.asdict(result))
+    assert "c" * 40 not in visible and "evil" not in visible and result.warnings == []
 
 
 def test_later_hooks_see_earlier_ids_in_decision_ids(
@@ -656,7 +660,11 @@ def test_an_async_hook_outlives_the_command_and_its_watchdog_cleans_up(
     fake_forges: FakeForges, spawned: Spawned, tmp_path: Path
 ) -> None:
     started, done, out = tmp_path / "started", tmp_path / "done", tmp_path / "stdin"
-    cmd = f"cat > {out}; pwd > {started}; echo ignored-stdout; sleep 0.6; touch {done}"
+    fd1 = tmp_path / "fd1"
+    cmd = (
+        f'cat > {out}; pwd > {started}; fd=$(readlink /proc/$$/fd/1); echo "$fd" > {fd1}; '
+        f'echo \'{{"decision_id": "ignored-stdout"}}\'; sleep 0.6; touch {done}'
+    )
     result = run_post(fake_forges, spawned, [entry(cmd, async_=True)])
     assert [r.outcome for r in result.reports] == ["async_started"] and result.warnings == []
     assert not done.exists()  # the command is already back: the hook is detached
@@ -666,7 +674,8 @@ def test_an_async_hook_outlives_the_command_and_its_watchdog_cleans_up(
     cwd = Path(started.read_text().strip())
     assert not cwd.exists() and tmp_leftovers() == []
     assert len(spawned.children) == 1  # exactly the watchdog was recorded
-    assert result.decision_ids == []  # async stdout is discarded
+    assert fd1.read_text().strip() == "/dev/null"  # the hook's stdout is discarded at the source
+    assert "ignored-stdout" not in json.dumps(dataclasses.asdict(result))
 
 
 def test_an_async_hook_has_its_own_private_directory_and_no_token(
@@ -715,17 +724,15 @@ def test_the_watchdog_kills_an_async_hook_at_its_timeout_whole_group_included(
 def test_a_failing_async_hook_is_logged_by_the_watchdog(
     fake_forges: FakeForges, spawned: Spawned, tmp_path: Path
 ) -> None:
-    from forgectl import jsonlog
-
     state = tmp_path / "state"
     state.mkdir(mode=0o700)
     run_post(fake_forges, spawned, [entry("exit 3", async_=True)], state_dir=str(state), pr=PR)
     finish_detached()
     records = [json.loads(line) for line in (state / "log.jsonl").read_text().splitlines()]
+    assert len(records) == 1
     assert records[0]["event"] == "hook_failed" and records[0]["level"] == "warn"
     assert records[0]["details"] == {"hook": "post-merge", "index": 0, "why": "exited 3"}
     assert records[0]["pr"] == PR
-    assert jsonlog.state_dir  # the module the watchdog writes through
 
 
 def test_a_spawn_failure_warns_and_removes_the_private_directory(
@@ -758,11 +765,11 @@ def test_the_watchdog_refuses_a_bad_spec_and_a_directory_it_did_not_make(
         "payload": "{}",
         "timeout": 5,
     }
-    assert hookwatch._valid(spec)
+    assert hookwatch.valid_spec(spec)
     assert hookwatch.run(spec) == 2 and victim.exists()
     for bad in ({**spec, "timeout": 0}, {**spec, "timeout": True}, {**spec, "argv": []},
                 {**spec, "env": {"A": 1}}, [], {**spec, "argv": ["a\0b"]}):  # fmt: skip
-        assert not hookwatch._valid(bad)
+        assert not hookwatch.valid_spec(bad)
     assert not hookwatch._own_private_dir("relative", "relative/cwd")
     link = tmp_path / "forgectl-link"
     link.symlink_to(victim)
@@ -786,3 +793,284 @@ def test_the_watchdog_ends_the_hook_and_removes_the_directory_on_sigterm(
     spawned.children.append((hook_pid, hook_pid))
     spawned.reap_and_assert_gone()
     assert watchdog_pgid == watchdog_pid and tmp_leftovers() == []
+
+
+# -- Round 1 fixes ---------------------------------------------------------------------------------
+
+
+def real_spawner(argv: list[str]) -> Any:
+    """A spawner that starts ``argv`` in place of the watchdog, through the real machinery."""
+    from forgectl import gateway as gw
+
+    def spawn(_argv: Any, **kwargs: Any) -> Detached:
+        return gw.spawn_detached(argv, **kwargs)
+
+    return spawn
+
+
+def test_the_watchdog_imports_forgectl_from_the_running_package_not_from_site(
+    tmp_path: Path,
+) -> None:
+    """R1-1: the watchdog argv keeps ``-I`` and puts the directory holding the running package
+    first on ``sys.path``, so a PYTHONPATH-only or user-site install still finds it."""
+    import forgectl
+    from forgectl import gateway as gw
+
+    argv = hooks.watchdog_argv()
+    assert argv[:3] == [sys.executable, "-I", "-c"]
+    assert argv[-1] == str(Path(forgectl.__file__).resolve().parent.parent)
+    alt = tmp_path / "alt"
+    (alt / "forgectl").mkdir(parents=True)
+    marker = tmp_path / "marker"
+    (alt / "forgectl" / "__init__.py").write_text("")
+    (alt / "forgectl" / "hookwatch.py").write_text(
+        f"def main():\n    open({str(marker)!r}, 'w').write(__file__)\n    return 0\n"
+    )
+    spawned = Spawned()
+    gw.spawn_detached(
+        hooks.watchdog_argv(str(alt)), env=dict(os.environ), cwd="/", stdin=b"", on_start=spawned
+    )
+    assert wait_for(marker)
+    finish_detached()
+    assert marker.read_text() == str(alt / "forgectl" / "hookwatch.py")
+    spawned.reap_and_assert_gone()
+
+
+@pytest.mark.parametrize("child", ["import sys; sys.exit(3)", "import time; time.sleep(30)"])
+def test_a_watchdog_that_never_acknowledges_warns_and_leaves_no_directory(
+    fake_forges: FakeForges, spawned: Spawned, monkeypatch: pytest.MonkeyPatch, child: str
+) -> None:
+    """R1-1: no acknowledgement (the watchdog died, or hangs past the bound) is a warning; the
+    group just started is killed and the private directory removed."""
+    monkeypatch.setattr(hooks, "ACK_TIMEOUT", 0.5)
+    gateway = make_gateway(
+        fake_forges, spawned, config_with(post_merge=[entry("exit 0", async_=True)]),
+        spawner=real_spawner([sys.executable, "-I", "-c", child]),
+    )  # fmt: skip
+    result = hooks.run_post_hooks(gateway, "post-merge", post_merge_fields())
+    assert len(result.warnings) == 1 and "watchdog" in result.warnings[0]
+    assert [r.outcome for r in result.reports] == ["failed"]
+    assert tmp_leftovers() == []
+    finish_detached()
+    spawned.reap_and_assert_gone()
+
+
+def test_the_async_spec_check_is_shared_and_its_bound_is_the_config_maximum(
+    fake_forges: FakeForges, spawned: Spawned, tmp_path: Path
+) -> None:
+    """R1-2: an 8-day (or 100-year) timeout is a valid spec; past the config maximum is not."""
+    from forgectl import hookwatch
+
+    base = {"argv": ["/bin/sh"], "env": {}, "root": "/r", "cwd": "/r/cwd", "payload": "{}"}
+    assert hookwatch.valid_spec({**base, "timeout": 8 * 86400})
+    assert hookwatch.valid_spec({**base, "timeout": 100 * 365 * 86400})
+    assert not hookwatch.valid_spec({**base, "timeout": 100 * 365 * 86400 + 1})
+    done = tmp_path / "done"
+    result = run_post(fake_forges, spawned, [entry(f"touch {done}", 8 * 86400, async_=True)])
+    assert [r.outcome for r in result.reports] == ["async_started"]
+    assert wait_for(done)
+    finish_detached()
+    assert tmp_leftovers() == []
+
+
+def test_an_invalid_spec_is_not_spawned(fake_forges: FakeForges, spawned: Spawned) -> None:
+    """R1-2: ``_start_async`` checks the spec with the watchdog's predicate before spawning."""
+    calls: list[Any] = []
+
+    def recorder(*a: Any, **k: Any) -> Detached:
+        calls.append((a, k))
+        raise AssertionError("spawned")
+
+    gateway = make_gateway(fake_forges, spawned, config_with(), spawner=recorder)
+    bad = hooks.HookEntry("post-merge", 0, "exit 0", 0.0, True)
+    problem = hooks._start_async(gateway, bad, b"{}\n", PR, None, None)
+    assert problem is not None and "not run" in problem
+    assert calls == [] and tmp_leftovers() == []
+
+
+def test_a_spec_refused_after_the_directory_check_removes_the_directory_and_logs(
+    tmp_path: Path,
+) -> None:
+    """R1-2: once root and cwd are the watchdog's own, an early return removes them and logs."""
+    from forgectl import gateway as gw
+    from forgectl import hookwatch
+
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    dirs = gw.make_private_dirs(os.environ, config=False)
+    spec = {
+        "argv": ["/bin/sh", "-c", "exit 0"], "env": {}, "root": dirs.root, "cwd": dirs.cwd,
+        "payload": "{}", "timeout": 0, "state_dir": str(state), "hook": "post-merge", "index": 1,
+    }  # fmt: skip
+    acked: list[int] = []
+    assert hookwatch.start(spec, lambda: acked.append(1)) == 2
+    assert acked == [] and not os.path.exists(dirs.root)
+    (record,) = [json.loads(line) for line in (state / "log.jsonl").read_text().splitlines()]
+    assert record["event"] == "hook_failed" and record["details"]["index"] == 1
+
+
+def test_a_hook_that_cannot_be_started_vetoes_or_warns(
+    fake_forges: FakeForges, spawned: Spawned
+) -> None:
+    """R1-4: an OSError from the spawn (E2BIG for an over-long command) is "could not be
+    started": a veto for a ``pre-`` hook, a warning for a ``post-`` hook."""
+    long = "true " + "x" * 200_000
+    err = veto_of(fake_forges, spawned, [entry(long)])
+    assert "could not be started" in err.message
+    result = run_post(fake_forges, spawned, [entry(long)])
+    assert len(result.warnings) == 1 and "could not be started" in result.warnings[0]
+    assert tmp_leftovers() == []
+
+
+@pytest.mark.parametrize("hook", ["pre-merge", "post-merge"])
+def test_a_wrong_field_set_fails_even_with_no_hooks(
+    fake_forges: FakeForges, spawned: Spawned, hook: str
+) -> None:
+    """R1-5: the field set is checked before the loop, whether or not a hook is configured."""
+    gateway = make_gateway(fake_forges, spawned, config_with())
+    with pytest.raises(ValueError, match="unexpected"):
+        if hook == "pre-merge":
+            hooks.run_pre_hooks(gateway, hook, merge_fields(body="x"))
+        else:
+            hooks.run_post_hooks(gateway, hook, post_merge_fields(body="x"))
+
+
+def test_override_escalation_in_the_payload_is_the_keyword_argument(
+    fake_forges: FakeForges, spawned: Spawned, tmp_path: Path
+) -> None:
+    """R1-6: run_pre_hooks fills the field; a caller value that differs is a ValueError."""
+    out = tmp_path / "stdin"
+    run_pre(fake_forges, spawned, [entry(f"cat > {out}")], override=True)
+    assert json.loads(out.read_text())["override_escalation"] is True
+    gateway = make_gateway(fake_forges, spawned, config_with())
+    with pytest.raises(ValueError, match="override_escalation"):
+        hooks.run_pre_hooks(
+            gateway, "pre-merge", merge_fields(override_escalation=False), override_escalation=True
+        )
+    result = hooks.run_pre_hooks(
+        gateway, "pre-merge", merge_fields(override_escalation=True), override_escalation=True
+    )
+    assert result.decision_ids == []
+
+
+@pytest.mark.parametrize(("last", "code"), [("exit 13", "escalated"), ("exit 1", "vetoed")])
+def test_warnings_are_not_lost_when_a_pre_hook_vetoes_or_escalates(
+    fake_forges: FakeForges, spawned: Spawned, capsys: pytest.CaptureFixture[str], last: str,
+    code: str,
+) -> None:  # fmt: skip
+    """R1-7: the warnings collected so far go out on stderr (``output.warn``) before the error."""
+    with pytest.raises(ForgectlError) as raised:
+        run_pre(fake_forges, spawned, [entry("echo junk"), entry(last)])
+    assert raised.value.code == code
+    err = capsys.readouterr().err
+    assert "forgectl: warning: pre-merge[0]: stdout is not strict JSON; ignored" in err
+
+
+def test_watchdog_reports_a_spawn_failure(tmp_path: Path) -> None:
+    """R1-8: an exception from run_process is "could not be started", logged."""
+    from forgectl import gateway as gw
+    from forgectl import hookwatch
+
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    dirs = gw.make_private_dirs(os.environ, config=False)
+    spec = {
+        "argv": [str(tmp_path / "missing")], "env": {}, "root": dirs.root, "cwd": dirs.cwd,
+        "payload": "{}", "timeout": 5, "state_dir": str(state), "hook": "post-post", "index": 0,
+    }  # fmt: skip
+    assert hookwatch.run(spec) == 0
+    assert not os.path.exists(dirs.root)
+    (record,) = [json.loads(line) for line in (state / "log.jsonl").read_text().splitlines()]
+    assert record["details"]["why"] == "could not be started"
+
+
+@pytest.mark.parametrize(
+    ("cmd", "why"),
+    [
+        ("echo $$ > {pid}; kill -9 $$", "killed by signal 9"),
+        ("echo $$ > {pid}; sleep 60 & echo $! >> {pid}; exit 0", "left its output open"),
+    ],
+)
+def test_watchdog_reports_a_signal_death_and_output_left_open(
+    fake_forges: FakeForges, spawned: Spawned, tmp_path: Path, cmd: str, why: str
+) -> None:
+    """R1-8: a negative return code and ``streams_incomplete`` are failures the watchdog logs."""
+    state, pid = tmp_path / "state", tmp_path / "pid"
+    state.mkdir(mode=0o700)
+    run_post(fake_forges, spawned, [entry(cmd.format(pid=pid), async_=True)], state_dir=str(state))
+    finish_detached()
+    (record,) = [json.loads(line) for line in (state / "log.jsonl").read_text().splitlines()]
+    assert record["details"]["why"] == why
+    pids = [int(p) for p in pid.read_text().split()]
+    orphans = Spawned()
+    orphans.children = [(pids[0], pids[0])]
+    orphans.reap_and_assert_gone()
+    for p in pids:
+        stat = Path(f"/proc/{p}/stat")
+        assert not stat.exists() or stat.read_text().rpartition(")")[2].split()[0] == "Z"
+    assert tmp_leftovers() == []
+
+
+def test_an_oversize_payload_is_internal_for_pre_and_a_warning_for_post(
+    fake_forges: FakeForges, spawned: Spawned, tmp_path: Path
+) -> None:
+    """R1-9: over 1 MiB: exit 1 ``internal`` for a ``pre-`` hook; a warning, hook not run, for a
+    ``post-`` hook."""
+    mark = tmp_path / "ran"
+    huge = "x" * (hooks.MAX_PAYLOAD + 1)
+    fields = merge_fields(base_ref=huge)
+    del fields["override_escalation"]
+    with pytest.raises(ForgectlError) as raised:
+        run_pre(fake_forges, spawned, [entry(f"touch {mark}")], fields=fields)
+    assert raised.value.code == "internal" and raised.value.exit_code == 1
+    gateway = make_gateway(fake_forges, spawned, config_with(post_merge=[entry(f"touch {mark}")]))
+    result = hooks.run_post_hooks(gateway, "post-merge", post_merge_fields(base_ref=huge))
+    assert len(result.warnings) == 1 and "not run" in result.warnings[0]
+    assert not mark.exists()
+
+
+@pytest.mark.parametrize(("size", "vetoed"), [(65536, False), (65537, True)])
+def test_the_stdout_cap_is_64_kib(
+    fake_forges: FakeForges, spawned: Spawned, size: int, vetoed: bool
+) -> None:
+    """R1-9: exactly 65536 bytes on stdout is allowed; 65537 vetoes."""
+    cmd = f"head -c {size} /dev/zero | tr '\\0' ' '"
+    if vetoed:
+        assert "stdout" in veto_of(fake_forges, spawned, [entry(cmd)]).message
+    else:
+        assert run_pre(fake_forges, spawned, [entry(cmd)]).decision_ids == []
+    spawned.reap_and_assert_gone()
+
+
+def test_a_post_warning_with_stderr_stays_one_line(
+    fake_forges: FakeForges, spawned: Spawned
+) -> None:
+    """R1-10: the stderr part of a post warning goes through ``sanitize_line``."""
+    result = run_post(fake_forges, spawned, [entry("printf 'a\\nforgectl: fake\\n' >&2; exit 1")])
+    (warning,) = result.warnings
+    assert "\n" not in warning and "forgectl: fake" in warning
+
+
+@pytest.mark.parametrize(
+    "value", [float("nan"), float("inf"), 10**5000, b"bytes"], ids=["nan", "inf", "int", "bytes"]
+)
+def test_an_unserializable_field_is_internal_so_post_hooks_warn(
+    fake_forges: FakeForges, spawned: Spawned, value: Any
+) -> None:
+    """R1-11: json ValueError/TypeError become ``internal``; a ``post-`` hook warns, not raises."""
+    with pytest.raises(ForgectlError) as raised:
+        hooks.serialize(hooks.build_payload("post-merge", post_merge_fields(observed=value)))
+    assert raised.value.code == "internal"
+    gateway = make_gateway(fake_forges, spawned, config_with(post_merge=[entry("exit 0")]))
+    result = hooks.run_post_hooks(gateway, "post-merge", post_merge_fields(observed=value))
+    assert len(result.warnings) == 1 and "not run" in result.warnings[0]
+
+
+def test_non_string_keys_and_bad_caller_ids_are_programming_errors() -> None:
+    """R1-11: a non-str key and a caller decision id outside the grammar are ValueErrors."""
+    with pytest.raises(ValueError, match="key"):
+        hooks.build_payload("post-merge", post_merge_fields(observed={1: "x"}))
+    with pytest.raises(ValueError, match="decision"):
+        hooks.build_payload("post-merge", post_merge_fields(), ["bad id"])
+    with pytest.raises(ValueError, match="decision"):
+        hooks.build_payload("post-merge", post_merge_fields(), [5])  # type: ignore[list-item]
