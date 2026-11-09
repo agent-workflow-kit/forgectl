@@ -211,6 +211,7 @@ MAX_PAGES = 50  # per list, so a hostile answer that never ends cannot loop for 
 MAX_CHECK_PAGES = 10  # a longer check list is `complete: false`, a host-imposed cap
 MAX_PR_NUMBER = 2**31 - 1  # GraphQL's Int; a larger number cannot be a PR
 MAX_DETAIL = 100
+_MARKER = re.compile(r"<U\+[0-9A-F]{4,6}>")  # a sanitize replacement marker
 
 # -- the host's words, in one table ------------------------------------------------------------
 
@@ -1015,10 +1016,12 @@ def _detail(status: str) -> str:
     ``<U+XXXX>`` marker: it goes back to the marker's start."""
     text = sanitize_line(status)
     if len(text) > MAX_DETAIL:
-        text = text[:MAX_DETAIL]
-        start = text.rfind("<U+")
-        if start != -1 and ">" not in text[start:]:
-            text = text[:start]
+        cut = MAX_DETAIL
+        for marker in _MARKER.finditer(text):
+            if marker.start() < cut < marker.end():
+                cut = marker.start()
+                break
+        text = text[:cut]
     return text or "(empty)"
 
 
