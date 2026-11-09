@@ -22,7 +22,7 @@
             "string",
             "null"
           ],
-          "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254})$",
+          "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_]|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,253}[A-Za-z0-9_-])$",
           "default": null,
           "description": "Your login; null: the authenticated user."
         },
@@ -31,7 +31,7 @@
             "string",
             "null"
           ],
-          "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254})$",
+          "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_]|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,253}[A-Za-z0-9_-])$",
           "default": null,
           "description": "Your login; null: the authenticated user."
         }
@@ -106,7 +106,7 @@
                 "string",
                 "null"
               ],
-              "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254})$",
+              "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_]|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,253}[A-Za-z0-9_-])$",
               "default": null,
               "description": "Your login on this host."
             }
@@ -151,7 +151,7 @@
                 "string",
                 "null"
               ],
-              "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254})$",
+              "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_]|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,253}[A-Za-z0-9_-])$",
               "default": null,
               "description": "Your login on this host."
             }
@@ -197,7 +197,7 @@
                 "string",
                 "null"
               ],
-              "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254})$",
+              "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_]|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,253}[A-Za-z0-9_-])$",
               "default": null,
               "description": "Your login on this host."
             },
