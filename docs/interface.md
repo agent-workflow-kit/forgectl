@@ -775,7 +775,7 @@ If the caller set `GH_CONFIG_DIR` (GitHub) or `GLAB_CONFIG_DIR` (GitLab), stored
 
 Tokens never reach argv, files, logs, audit records, output or hooks. On Linux forgectl sets `PR_SET_DUMPABLE=0`.
 
-Redaction of host- or child-derived text is by the exact value of each token in use and its percent-encoded forms (hex digits in either case); other transformations, such as base64 or JSON escaping, are not caught.
+Redaction of host- or child-derived text is by the exact value of each token in use and its percent-encoded forms: the pass over registered secrets (`hosts.redact_secrets`) matches percent-encoded forms with hex digits in either case, while the gateway's per-call redaction matches the exact value and the uppercase forms `quote` and `quote_plus` produce; other transformations, such as base64 or JSON escaping, are not caught.
 
 ## Environment variables
 
