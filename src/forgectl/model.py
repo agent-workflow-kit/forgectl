@@ -18,6 +18,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
+from .identifiers import RepoRef
+
 # --- literals ----------------------------------------------------------------------------------
 
 BackendName = Literal["github", "gitlab"]
@@ -1103,47 +1105,7 @@ class Identity:
     scopes: tuple[str, ...] | None
 
 
-# --- references and queries (validated upstream by identifiers.py) -----------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class RepoRef:
-    host: str
-    path: str
-
-    @property
-    def repo(self) -> str:
-        return f"{self.host}/{self.path}"
-
-
-@dataclass(frozen=True, slots=True)
-class PrRef:
-    """A PR reference whose parts were already validated.
-
-    TODO(#4): identifiers.py owns the anchored parsers and should produce this type (or replace
-    it); this holds only the number rule, so a backend can never build a path from 0 or a
-    11-digit number.
-    """
-
-    host: str
-    path: str
-    number: int
-
-    def __post_init__(self) -> None:
-        if (
-            not isinstance(self.number, int)
-            or isinstance(self.number, bool)
-            or not 1 <= self.number <= 9_999_999_999
-        ):
-            raise ValueError("a PR number is an integer from 1 to 9999999999")
-
-    @property
-    def repo(self) -> str:
-        return f"{self.host}/{self.path}"
-
-    @property
-    def pr(self) -> str:
-        return f"{self.repo}#{self.number}"
+# --- queries (the references are identifiers.py's `PrRef` and `RepoRef`) -----------------------
 
 
 @dataclass(frozen=True, slots=True)
