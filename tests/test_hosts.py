@@ -11,6 +11,8 @@ import json
 import os
 import sys
 import textwrap
+import threading
+import traceback
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -20,7 +22,7 @@ import pytest
 from forgectl import hosts as hosts_module
 from forgectl.config import Host, LoadedConfig, Me
 from forgectl.errors import ForgectlError
-from forgectl.gateway import Gateway
+from forgectl.gateway import NO_BUS_ADDRESS, Budget, Gateway
 from forgectl.hosts import Hosts, matches_login, redact_secrets, secret_values
 
 from .harness.fixtures import forgectl_env
@@ -151,7 +153,7 @@ VARIABLES = [
 
 
 @pytest.mark.parametrize(("backend", "host", "variable", "prefix"), VARIABLES)
-def test_one_token_variable_per_backend_and_host_on_a_real_call(
+def test_token_variables_exactly_one_per_backend_and_host_and_no_ambient_token(
     fake_forges: FakeForges, backend: str, host: str, variable: str, prefix: str | None
 ) -> None:
     program = "gh" if backend == "github" else "glab"
@@ -169,6 +171,8 @@ def test_one_token_variable_per_backend_and_host_on_a_real_call(
     assert call.token_sent == TOKEN
     assert [n for n in AMBIENT_SENTINELS if n in call.env] == [variable]
     assert call.env[variable] == TOKEN
+    for value in AMBIENT_SENTINELS.values():  # forgectl_env planted every ambient variable
+        assert value not in json.dumps(call.env) and value != call.token_sent
 
 
 def test_an_ambient_token_is_never_used_without_naming_it(fake_forges: FakeForges) -> None:
@@ -209,7 +213,7 @@ def test_token_env_unset_or_empty_is_auth_required_naming_the_variable_and_never
     assert fake_forges.calls() == []  # the stored login was never tried
 
 
-def test_every_read_and_write_target_goes_through_the_same_refusal(
+def test_a_failing_token_env_is_refused_the_same_way_on_every_later_target(
     fake_forges: FakeForges,
 ) -> None:
     cfg = config_of({"github.com": Host(token_env="MY_TOKEN")})
@@ -403,7 +407,19 @@ def test_token_command_too_much_output_fails_and_stops_the_child(
     with pytest.raises(ForgectlError) as raised:
         make_hosts(fake_forges, cfg, spawned=spawned).target("github.com")
     assert raised.value.code == "auth_required"
+    assert "more than 4098 bytes" in raised.value.message
+    assert "status" not in raised.value.message
     spawned.assert_gone()
+
+
+def test_token_command_output_over_the_cap_names_the_size_not_the_kill(
+    fake_forges: FakeForges,
+) -> None:
+    cfg = config_of({"github.com": Host(token_command=printing("x" * 5000))})
+    with pytest.raises(ForgectlError) as raised:
+        make_hosts(fake_forges, cfg).target("github.com")
+    assert "gave more than 4098 bytes" in raised.value.message
+    assert "status" not in raised.value.message
 
 
 def test_token_command_timeout_kills_the_group_and_is_auth_required(
@@ -807,3 +823,254 @@ def test_scopes_that_are_hostile_are_cut_not_trusted(fake_forges: FakeForges) ->
     )
     entry = hosts.identity("github.com")
     assert entry.scopes is not None and len(entry.scopes) <= 64
+
+
+# -- the issue's regression tests ---------------------------------------------------------
+
+AUTH_TOKEN_COMMANDS = [
+    ("github", "github.com", ("gh", "auth", "token", "--hostname", "{host}")),
+    ("gitlab", "gitlab.com", ("glab", "auth", "token")),
+]
+
+
+@pytest.mark.parametrize(("backend", "host", "command"), AUTH_TOKEN_COMMANDS)
+def test_gh_auth_token_hostname_never_returns_an_ambient_token(
+    fake_forges: FakeForges, backend: str, host: str, command: tuple[str, ...]
+) -> None:
+    """design.md: ``gh auth token --hostname`` returns an ambient token for any host (and
+    ``glab auth token`` has no ``--hostname``), so a ``token_command`` runs with none."""
+    ambient = {
+        "GH_TOKEN": "ambient-gh-0001",
+        "GITHUB_TOKEN": "ambient-github-0002",
+        "GITLAB_TOKEN": "ambient-gitlab-0003",
+    }
+    cfg = config_of({host: Host(token_command=command)})
+    hosts = make_hosts(fake_forges, cfg, env=ambient)
+    with pytest.raises(ForgectlError) as raised:
+        hosts.target(host)
+    assert raised.value.code == "auth_required"
+    (call,) = fake_forges.calls()
+    assert call.argv[:2] == ["auth", "token"]
+    for value in ambient.values():
+        assert value not in json.dumps(call.env)
+        assert value not in json.dumps(raised.value.envelope())
+    assert not [n for n in AMBIENT_SENTINELS if n in call.env]
+    assert secret_values() == frozenset()
+
+
+@pytest.mark.parametrize("keyring", [True, False], ids=["keyring-login", "no-keyring-login"])
+@pytest.mark.parametrize(("backend", "host", "command"), AUTH_TOKEN_COMMANDS)
+def test_an_empty_config_dir_with_a_login_in_the_os_keyring(
+    fake_forges: FakeForges,
+    tmp_path: Path,
+    backend: str,
+    host: str,
+    command: tuple[str, ...],
+    keyring: bool,
+) -> None:
+    """A caller-set empty config dir never reaches the keyring over the bus: not on a stored-login
+    call and not from a ``token_command``, which runs in the same environment."""
+    program = "gh" if backend == "github" else "glab"
+    variable = "GH_CONFIG_DIR" if backend == "github" else "GLAB_CONFIG_DIR"
+    fake_forges.default_bus_socket(present=True)
+    if keyring:
+        fake_forges.keyring_login(program, host, "ring-token-0042")
+    (tmp_path / "empty-config").mkdir()
+    env = {
+        variable: str(tmp_path / "empty-config"),
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/x",
+        "XDG_RUNTIME_DIR": str(tmp_path / "run"),
+    }
+    user_answer(fake_forges, program, host)
+    stored = make_hosts(fake_forges, env=env)
+    target = stored.target(host)
+    assert target.token is None
+    if backend == "github":
+        with pytest.raises(ForgectlError):  # gh api reads only file logins
+            stored.gateway.api(target, "GET", ["user"])
+    else:
+        stored.gateway.api(target, "GET", ["user"])  # anonymous
+    with_command = make_hosts(fake_forges, config_of({host: Host(token_command=command)}), env=env)
+    with pytest.raises(ForgectlError) as raised:
+        with_command.target(host)
+    assert raised.value.code == "auth_required"
+    api_call, token_call = fake_forges.calls()
+    assert token_call.argv[:2] == ["auth", "token"]
+    for call in (api_call, token_call):
+        assert call.env["DBUS_SESSION_BUS_ADDRESS"] == NO_BUS_ADDRESS
+        assert "XDG_RUNTIME_DIR" not in call.env
+        assert call.token_sent != "ring-token-0042"
+    assert_call_safe(api_call, host=host, mode="stored", caller_config_dir=True)
+    assert "ring-token-0042" not in json.dumps(raised.value.envelope())
+    assert secret_values() == frozenset()
+
+
+# -- review round 1 -----------------------------------------------------------------------
+
+
+def test_a_token_command_cut_short_by_the_budget_is_a_network_error_and_not_remembered(
+    fake_forges: FakeForges, tmp_path: Path, spawned: Spawned
+) -> None:
+    marker = tmp_path / "ran-once"
+    code = """
+        import os, sys, time
+        if not os.path.exists(sys.argv[1]):
+            open(sys.argv[1], 'w').close()
+            time.sleep(30)
+        print('tok-second-run')
+    """
+    cfg = config_of({"github.com": Host(token_command=py(code, str(marker)))})
+    hosts = make_hosts(fake_forges, cfg, spawned=spawned, timeout=0.8)
+    with pytest.raises(ForgectlError) as raised:
+        hosts.target("github.com")
+    assert raised.value.code == "network_error"
+    assert "time budget" in raised.value.message
+    spawned.assert_gone()
+    hosts.gateway.budget = Budget(20.0)  # a later command's budget: the failure was not kept
+    assert hosts.credential("github.com").token == "tok-second-run"
+
+
+@pytest.mark.parametrize(
+    ("host_cfg", "env"),
+    [
+        (Host(token_command=printing("")), {}),
+        (Host(token_command=("no-such-token-helper",)), {}),
+        (Host(token_env="MY_TOKEN"), {"MY_TOKEN": "bad token"}),
+        (Host(token_env="MY_TOKEN"), {}),
+    ],
+    ids=["command output", "command missing", "token_env value", "token_env unset"],
+)
+def test_every_credential_failure_says_to_set_token_env_or_log_in(
+    fake_forges: FakeForges, host_cfg: Host, env: dict[str, str]
+) -> None:
+    hosts = make_hosts(fake_forges, config_of({"github.com": host_cfg}), env=env)
+    with pytest.raises(ForgectlError) as raised:
+        hosts.target("github.com")
+    assert raised.value.code == "auth_required"
+    assert raised.value.message.endswith(GUIDANCE), raised.value.message
+
+
+GUIDANCE = (
+    "set hosts.github.com.token_env to a variable holding the token, or log in with gh"
+    " and remove the configured credential"
+)
+
+
+@pytest.mark.parametrize(
+    "backwards",  # the output reversed, so no argv, config or test local holds the output
+    ["\nx 13-TUO-LENITNES", "\n\n13-TUO-LENITNES", "\n\xe9-13-TUO-LENITNES"],
+)
+def test_a_token_command_failure_keeps_no_reference_to_the_output(
+    fake_forges: FakeForges, backwards: str
+) -> None:
+    code = """
+        import sys
+        sys.stdout.buffer.write(eval(sys.argv[1])[::-1])
+        sys.stderr.write('RRE-LENITNES'[::-1])
+    """
+    cmd = py(code, repr(backwards.encode("utf-8")))
+    hosts = make_hosts(fake_forges, config_of({"github.com": Host(token_command=cmd)}))
+    for _ in range(2):  # the first failure, then the remembered one
+        with pytest.raises(ForgectlError) as raised:
+            hosts.target("github.com")
+        err = raised.value
+        assert err.__context__ is None and err.__cause__ is None
+        text = "".join(
+            traceback.TracebackException(
+                type(err), err, err.__traceback__, capture_locals=True
+            ).format()
+        )
+        assert "SENTINEL" not in text
+
+
+def test_redaction_merges_overlapping_tokens() -> None:
+    hosts_module.register_secret("abcd")
+    hosts_module.register_secret("cdef")
+    assert redact_secrets("x abcdef y") == "x [redacted] y"
+    assert redact_secrets("abcdcdef") == "[redacted]"
+
+
+def test_redaction_never_mangles_its_own_marker() -> None:
+    hosts_module.register_secret("tok-long-secret")
+    hosts_module.register_secret("dac")  # inside "[redacted]"
+    assert redact_secrets("a tok-long-secret b") == "a [redacted] b"
+
+
+def test_redaction_covers_overlapping_occurrences_of_one_token() -> None:
+    hosts_module.register_secret("abab")
+    assert redact_secrets("ababab") == "[redacted]"
+
+
+def test_redaction_matches_lowercase_percent_encoding() -> None:
+    hosts_module.register_secret("a/b+c")
+    assert redact_secrets("x a%2fb%2bc y a%2Fb%2bc z") == "x [redacted] y [redacted] z"
+    hosts_module.register_secret("Up/Case")
+    assert redact_secrets("up%2fcase") == "up%2fcase"  # only the hex digits ignore case
+
+
+def test_token_command_runs_once_per_host_under_threads(
+    fake_forges: FakeForges, tmp_path: Path
+) -> None:
+    counter = tmp_path / "count"
+    code = "import sys, time; open(sys.argv[1], 'a').write('x'); time.sleep(0.5); print('tok-t')"
+    cfg = config_of({"github.com": Host(token_command=py(code, str(counter)))})
+    hosts = make_hosts(fake_forges, cfg)
+    barrier = threading.Barrier(2)
+    tokens: list[str | None] = []
+
+    def fetch() -> None:
+        barrier.wait()
+        tokens.append(hosts.credential("github.com").token)
+
+    threads = [threading.Thread(target=fetch) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert tokens == ["tok-t", "tok-t"]
+    assert counter.read_text() == "x"
+
+
+@pytest.mark.parametrize("account", ["abc", -5, 0, True, 1.5, "12"])
+def test_a_user_id_that_is_not_a_positive_integer_is_an_upstream_error(
+    fake_forges: FakeForges, account: object
+) -> None:
+    login("gh", "github.com")
+    hosts = make_hosts(fake_forges)
+    body = {"login": "octo", "id": account, "html_url": "https://github.com/octo"}
+    fake_forges.answer("gh", "user", body=body)
+    with pytest.raises(ForgectlError) as raised:
+        hosts.authenticated_user(hosts.target("github.com"))
+    assert raised.value.code == "upstream_error"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"login": "a b", "id": 1, "html_url": "https://evil.example.test/o"},
+        {"id": 1, "html_url": "https://evil.example.test/o"},
+        {"login": "octo", "id": "x", "html_url": "https://evil.example.test/o"},
+    ],
+    ids=["bad login", "missing login", "bad id"],
+)
+def test_a_foreign_answer_is_wrong_host_response_before_its_shape_is_checked(
+    fake_forges: FakeForges, body: dict[str, Any]
+) -> None:
+    cfg = config_of({"github.com": Host(token_env="MY_TOKEN")})
+    hosts = make_hosts(fake_forges, cfg, env={"MY_TOKEN": TOKEN})
+    fake_forges.answer("gh", "user", body=body)
+    entry = hosts.identity("github.com")
+    assert entry.error is not None and entry.error["code"] == "wrong_host_response"
+    assert "rotated" in entry.error["message"]
+
+
+@pytest.mark.parametrize("call", ["target", "identity", "me", "backend", "credential"])
+def test_a_non_ascii_host_is_refused_before_lowercasing(fake_forges: FakeForges, call: str) -> None:
+    cfg = config_of({"kelvin.example.test": Host(backend="github", token_env="MY_TOKEN")})
+    hosts = make_hosts(fake_forges, cfg, env={"MY_TOKEN": TOKEN})
+    kelvin = "Kelvin.example.test"  # KELVIN SIGN lowercases to an ASCII k
+    assert kelvin.lower() == "kelvin.example.test"
+    with pytest.raises(ForgectlError) as raised:
+        getattr(hosts, call)(kelvin)
+    assert raised.value.code == "refused" and raised.value.reason == "unknown_host"
+    assert secret_values() == frozenset() and fake_forges.calls() == []

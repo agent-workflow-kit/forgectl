@@ -221,13 +221,7 @@ class Target:
     None is stored-login mode. The host is lowercased first: every routing and token decision
     uses the lowercase form.
 
-    TODO(#8): hosts.py builds this from config and credentials, and must supply: the token
-    variable per host (``token_variable`` decides it from the host here); the configured name for
-    ``auth_required.details.variable``; the backend for a ``token_command`` (``run_external`` in
-    mode ``token_command`` requires it); which host kinds need an ``api_prefix``; refusing a port
-    on a GitHub host at config load (refused here as ``config_invalid``); lowercase, canonical
-    config host keys; and config's host and ``api_prefix`` patterns aligned with ``_valid_host``
-    and ``_API_PREFIX`` here (port range 1-65535, label length, ``~``, segment count and length).
+    ``hosts.py`` builds this from the config and the host's own credential.
     """
 
     backend: Backend
@@ -1024,6 +1018,12 @@ def _redact(text: str, secret: str | None) -> str:
     return text
 
 
+def redact(text: str, secret: str | None) -> str:
+    """The public name of ``_redact``: ``text`` with ``secret`` and its percent-encoded forms
+    as ``[redacted]``."""
+    return _redact(text, secret)
+
+
 def shown_text(text: str, secret: str | None, limit: int = MAX_MESSAGE) -> str:
     """Host- or child-derived text for a message: redacted first, then sanitized (one line,
     control characters marked), then cut, so a cut can never leave part of a token behind."""
@@ -1050,6 +1050,7 @@ def verify_identity(
     Raises ``wrong_host_response``; ``details.observed`` is the URL redacted of ``secret`` (the
     call's token), sanitized and cut. This detects an accidental redirect, not a hostile host.
     """
+    # TODO(#7): require https in html_url for github.com and *.ghe.com
     ok = False
     shown = ""
     if isinstance(observed, str):

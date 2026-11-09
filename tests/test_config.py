@@ -853,6 +853,56 @@ INVALID: dict[str, tuple[str, str]] = {
     "hook entry a string": ("hooks:\n  pre-merge:\n    - just-a-string\n", "hooks.pre-merge.0"),
     "hook list a map": ("hooks:\n  pre-merge: {cmd: x}\n", "hooks.pre-merge"),
     "hooks a list": ("hooks: [a]\n", "hooks"),
+    # each login under its own backend's grammar, before any process (the schema has the union)
+    "me.github with a GitLab-only dot": ("me: {github: 'dot.name'}\n", "me.github"),
+    "me.gitlab with a bot suffix": ("me: {gitlab: 'octo[bot]'}\n", "me.gitlab"),
+    "built-in host me under its backend": (
+        "hosts:\n  github.com: {me: 'dot.name'}\n",
+        "hosts.github.com.me",
+    ),
+    "declared host me under its backend": (
+        HOST + "    backend: gitlab\n    me: 'octo[bot]'\n",
+        "hosts.h.example.com.me",
+    ),
+    # token_command's program: a bare name or an absolute path, as for gh_bin
+    "token_command relative program": (
+        HOST + "    backend: gitlab\n    token_command: [bin/tool, x]\n",
+        "hosts.h.example.com.token_command",
+    ),
+    "token_command dot-slash program": (
+        HOST + "    backend: gitlab\n    token_command: [./tool]\n",
+        "hosts.h.example.com.token_command",
+    ),
+    "token_command dotdot program": (
+        "hosts:\n  github.com: {token_command: ['..']}\n",
+        "hosts.github.com.token_command",
+    ),
+    # token_env never names a variable the gateway sets or passes to a child
+    "token_env PATH": (
+        "hosts:\n  github.com: {token_env: PATH}\n",
+        "hosts.github.com.token_env",
+    ),
+    "token_env HTTPS_PROXY": (
+        HOST + "    backend: gitlab\n    token_env: HTTPS_PROXY\n",
+        "hosts.h.example.com.token_env",
+    ),
+    "token_env GH_CONFIG_DIR": (
+        "hosts:\n  github.com: {token_env: GH_CONFIG_DIR}\n",
+        "hosts.github.com.token_env",
+    ),
+    # GitHub hosts gh rewrites to another host
+    "github host under github.com": (
+        "hosts:\n  api.github.com: {backend: github}\n",
+        "hosts.api.github.com",
+    ),
+    "github host github.localhost": (
+        "hosts:\n  github.localhost: {backend: github}\n",
+        "hosts.github.localhost",
+    ),
+    "github host under github.localhost": (
+        "hosts:\n  x.github.localhost: {backend: github}\n",
+        "hosts.x.github.localhost",
+    ),
 }
 
 
@@ -895,7 +945,35 @@ VALID: dict[str, str] = {
     "hook defaults": "hooks:\n  pre-merge:\n    - cmd: x\n",
     "post hook async": "hooks:\n  post-post:\n    - cmd: x\n      async: true\n      timeout: 5s\n",
     "empty hook lists": "hooks:\n  pre-merge: []\n  post-merge: []\n",
+    "token_env naming an ambient token variable": "hosts:\n  github.com: {token_env: GH_TOKEN}\n",
+    "token_command absolute program": "hosts:\n  gitlab.com: {token_command: [/usr/bin/tool]}\n",
+    "gitlab host under github.com": "hosts:\n  git.github.com: {backend: gitlab}\n",
+    "github host on another domain": "hosts:\n  github.example.com: {backend: github}\n",
 }
+
+
+def test_token_env_refuses_every_variable_the_gateway_gives_a_child(tmp_path: Path) -> None:
+    """The refused names come from the gateway's own lists; this keeps the literals in step."""
+    from forgectl import gateway as gw
+    from forgectl.config import child_variables
+
+    names = ["PATH", "HOME", "TMPDIR", "GH_CONFIG_DIR", "GLAB_CONFIG_DIR", "XDG_CONFIG_HOME"]
+    names += [*gw._PASSTHROUGH, *gw._BUS_VARIABLES]  # pyright: ignore[reportPrivateUsage]
+    source = {name: str(tmp_path) for name in names} | {"PATH": "/usr/bin"}
+    dirs = gw.PrivateDirs(root=str(tmp_path), cwd=str(tmp_path), config=str(tmp_path))
+    seen: set[str] = set()
+    for backend in ("github", "gitlab", None):
+        targets: list[gw.Target | None] = [None]
+        if backend is not None:
+            host = "ghe.example.test" if backend == "github" else "git.example.test"
+            targets += [gw.Target(backend, host), gw.Target(backend, host, token="t-1")]
+        for target in targets:
+            for drop in [None, "GH_CONFIG_DIR", "GLAB_CONFIG_DIR"]:
+                env = {k: v for k, v in source.items() if k != drop}
+                seen |= set(gw.build_environment(env, dirs=dirs, backend=backend, target=target))
+    given = seen - set(gw.TOKEN_VARIABLES)
+    assert given <= child_variables(), sorted(given - child_variables())
+    assert not child_variables() & set(gw.TOKEN_VARIABLES)  # naming an ambient token is allowed
 
 
 @pytest.mark.parametrize("text", VALID.values(), ids=VALID.keys())
@@ -996,6 +1074,19 @@ STRICTER_THAN_SCHEMA = {
     "repo key host port zero",
     "repo key host port too big",
     "repo key www built-in",
+    "me.github with a GitLab-only dot",  # each login under its own backend's grammar
+    "me.gitlab with a bot suffix",
+    "built-in host me under its backend",
+    "declared host me under its backend",
+    "token_command relative program",  # a bare name or an absolute path
+    "token_command dot-slash program",
+    "token_command dotdot program",
+    "token_env PATH",  # a variable the gateway sets or passes to a child
+    "token_env HTTPS_PROXY",
+    "token_env GH_CONFIG_DIR",
+    "github host under github.com",  # gh rewrites these hosts
+    "github host github.localhost",
+    "github host under github.localhost",
 }
 
 # Refused by both under ECMA-262, whose `$` does not match before a final newline; the Python
