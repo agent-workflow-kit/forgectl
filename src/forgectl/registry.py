@@ -19,6 +19,7 @@ from typing import Any
 
 from .config import LoadedConfig
 from .humanactions import HumanContext
+from .output import RecordStream
 
 _FROM_CONFIG = math.nan  # the timeout default: take it from the config (no real timeout is NaN)
 
@@ -40,7 +41,7 @@ class Invocation:
             object.__setattr__(self, "timeout", self.config.timeout_for(None))
 
 
-Handler = Callable[[Invocation], dict[str, Any]]
+Handler = Callable[[Invocation], dict[str, Any] | RecordStream]
 
 HANDLERS: dict[str, Handler] = {}
 
@@ -48,6 +49,7 @@ HANDLERS: dict[str, Handler] = {}
 HANDLER_MODULES: tuple[str, ...] = (
     "forgectl.reads",
     "forgectl.snapshot_reads",  # snapshot, comments, reviews, ci (#12)
+    "forgectl.exportcmd",
 )
 
 _loaded = False
