@@ -144,9 +144,7 @@ def _dispatch(argv: list[str], tty: Tty | None) -> int:
     try:
         args = parse(argv)
         json_mode = args.json
-        emit_success(
-            _run(args, tty or _tty()), json_mode=json_mode, command=args.command
-        )
+        emit_success(_run(args, tty or _tty()), json_mode=json_mode, command=args.command)
         level = _success_level(args.command, verbose=args.verbose)
         if level is not None:
             _log(level, "command_done", args, {"command": args.command})
