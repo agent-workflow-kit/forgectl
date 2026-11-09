@@ -6,6 +6,8 @@ import json
 import os
 import sys
 from argparse import Namespace
+from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any, TextIO
 
 from .errors import ForgectlError, sanitize_tree
@@ -149,7 +151,51 @@ def write_line(stream: TextIO | None, text: str) -> bool:
     return True
 
 
-def emit_success(data: dict[str, Any], *, json_mode: bool) -> None:
+@dataclass
+class RecordStream:
+    """A result that is a sequence of records (``export``): a JSON line each, or with ``--json``
+    one array. Read lazily, so a large file is never held in memory."""
+
+    records: Iterable[dict[str, Any]]
+
+
+def warn(text: str) -> None:
+    """One ``forgectl: warning:`` line on stderr; never raises."""
+    write_line(sys.stderr, f"forgectl: warning: {sanitize_line(text)}")
+
+
+def _write_stream(stream: TextIO | None, records: Iterable[dict[str, Any]], *, array: bool) -> None:
+    if stream is None:
+        return
+
+    def put(text: str) -> bool:
+        # Only the writes are guarded: an error from producing the records is not a broken pipe.
+        try:
+            stream.write(text)
+            if not array:
+                stream.flush()
+        except (OSError, ValueError):
+            _discard(stream)
+            return False
+        return True
+
+    if array and not put("["):
+        return
+    for index, record in enumerate(records):
+        if not put(("," if array and index else "") + dumps(record) + ("" if array else "\n")):
+            return
+    if array:
+        put("]\n")
+    try:
+        stream.flush()
+    except (OSError, ValueError):
+        _discard(stream)
+
+
+def emit_success(data: dict[str, Any] | RecordStream, *, json_mode: bool) -> None:
+    if isinstance(data, RecordStream):
+        _write_stream(sys.stdout, data.records, array=json_mode)
+        return
     write_line(sys.stdout, dumps(data) if json_mode else format_human(data))
 
 
