@@ -231,6 +231,13 @@ class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
         raise usage(message)
 
+    def _get_option_tuples(self, option_string: str) -> list[Any]:
+        """No prefix matching of options. ``allow_abbrev=False`` stops it only for ``--long``
+        options; a single-dash argument such as ``-https://...`` would still match ``-h`` as a
+        short-option cluster and print help. Only an exact option string (or ``--opt=value``,
+        which argparse resolves before it gets here) is an option."""
+        return []
+
     def _print_message(self, message: str, file: Any = None) -> None:
         """Print help and version text through the stream-safe writer, so a full or closed
         stdout cannot change the exit code or fail at shutdown."""
