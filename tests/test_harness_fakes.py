@@ -11,6 +11,7 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -467,7 +468,7 @@ def test_glab_full_url_endpoint_sends_its_token_to_the_named_host(
     )
     call = only(forges)
     assert call.request["full_url_endpoint"] and call.token_sent  # type: ignore[index]
-    assert call.request["url"].startswith("https://elsewhere.example.test")  # type: ignore[index]
+    assert urlsplit(call.request["url"]).hostname == "elsewhere.example.test"  # type: ignore[index]
 
 
 def test_glab_with_no_credential_is_anonymous(run: Runner, forges: FakeForges) -> None:
