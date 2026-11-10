@@ -41,7 +41,7 @@ The default actor is `human:<me.name>` when stdin is a TTY, else `auto:unknown`.
 
 A run is **interactive** when stdin and stderr are TTYs, the actor is not `auto:` and `--yes` is not given. The dialog is on stderr, also with `--json`. An interactive run takes the first read's head and base as its expected head and base, each only where that flag was not given; a given `--expected-head` or `--expected-base` always wins. Every later step treats them as if given: re-reads, verification, and the `sha` or `commit_id` sent. `comment`, `reply`, `resolve` and `unresolve` have no expected values and pin nothing.
 
-`--expected-head` and `--expected-base` are required unless the run is interactive, for `merge`, `review` and `approve`. Exit 2 without them. `--expected-base` compares with the raw `base.ref`, before sanitizing, so a base with a marked character always refuses a caller's value with `stale_base`, and a human handles it.
+`--expected-head` and `--expected-base` are required unless the run is interactive, for `merge`, `review` and `approve`. Exit 2 without them. `--expected-base` compares with the raw `base.ref`, before sanitizing, so a base whose name has a marked character always refuses a caller's value with `stale_base`, an interactive run's pinned value included; a human merges such a PR on the host.
 
 `--body-file -` or `--file -` means stdin is the body, so such a run is not interactive and needs `--yes`. `-` with stdin a TTY exits 2.
 
@@ -196,10 +196,10 @@ A comment is `{id, author, body, created_at, updated_at, minimized, reply_to, re
 
 | Host | `push_event` | `commit_date` |
 |---|---|---|
-| GitHub | the newest push event on the PR timeline for the current head sha: `HeadRefForcePushedEvent` or `PullRequestCommit` | the head commit's committed date, when the timeline holds no such event for the head sha |
+| GitHub | the time of the newest `HeadRefForcePushedEvent` on the PR timeline to the current head sha, a host time | when the timeline holds no `HeadRefForcePushedEvent` to the current head sha: the committer date of the newest `PullRequestCommit` of the head sha, or else the head commit's committed date; a committer date is set by whoever made the commit, so a backdated commit can make it earlier than the push |
 | GitLab | `created_at` of the newest entry of `/merge_requests/:id/versions` | the head commit's date, when versions are unavailable |
 
-A new push gives a later `pushed_at` on the next snapshot. Nothing is stored between runs.
+A new push gives a later `pushed_at` on the next snapshot when the source is `push_event`; with `commit_date` it can be earlier. Nothing is stored between runs.
 
 ### Activity
 
@@ -314,7 +314,7 @@ Every call to a forge goes through one gateway:
 - **Writes** use the canonical path from the read on GitHub, and the numeric project id on GitLab. A write succeeds only on [its documented answer](#reliability); a `gh` POST turned into a GET therefore never reads as posted.
 - **Local failures.** These are `upstream_error` on a read and `outcome_unknown` on a write, and never returned as data: an answer over the size cap (32 MiB); output still held open by another process after the program exited; a 2xx with a nonzero exit (except `gh api graphql`'s exit 1 with `errors`); only a 1xx status; a body that is not strict UTF-8 JSON (a BOM, NaN, a duplicate key); on a read, a body that is not the documented object or list. An answer still arriving at the deadline is a timeout: `network_error` on a read, `outcome_unknown` on a write. On a write, a list where one object is documented is `host_rejected` and any other body that is not the documented shape is `outcome_unknown`. A GraphQL write that answers a result together with `errors` is `outcome_unknown`.
 - **Rate-limit rule.** A 403 counts as a rate limit when it has a `retry-after` header, or its message matches `rate limit`, `abuse detection` or `too many requests`, ignoring case. Both tables in [Reliability](#reliability) use this rule.
-- **Children** run under the command's budget, each as the leader of its own process group. At the deadline, or when forgectl gets SIGINT, SIGTERM or SIGHUP, the child's group gets SIGTERM and, 2 s later, SIGKILL. A group is signaled only while its leader is not yet reaped, so the group id cannot have been reused. Then forgectl removes the child's temporary directories. SIGHUP is handled as SIGTERM is. A signal during a write: audit `outcome_unknown`, no `post-` hook, exit 12 `outcome_unknown`.
+- **Children** run under the command's budget, each as the leader of its own process group. At the deadline, or when forgectl gets SIGINT, SIGTERM or SIGHUP, the child's group gets SIGTERM and, 2 s later, SIGKILL. A group is signaled only while its leader is not yet reaped, so the group id cannot have been reused. Then forgectl removes the child's temporary directories. SIGHUP is handled as SIGTERM is. A signal after a write was attempted and before its outcome is recorded: audit `outcome_unknown`, no `post-` hook, exit 12 `outcome_unknown`. A signal after the outcome record is written ends the running `post-` hook's group, runs no further `post-` hooks, and the command exits with the recorded outcome (exit 0 for a success, else that outcome's error).
 
 ## Reliability
 
@@ -405,10 +405,10 @@ Every `merge` follows one order:
 
      A wrong `sha` gets 409 on GitLab, which beats the bare 405 that a moved target gets on an `ff` or `rebase_merge` project.
 
-9. **Verify,** polling up to 10 s (1 s, 2 s, 3 s, 4 s): head, base and state; for `--auto`, armed or merged. GitLab's transient `locked` counts as not yet decided. Merged at the sent head and the expected base is success. A merged PR at another head or whose `base.ref` differs from the expected base exits 12 (`merge_unverified`, `details.observed`). Still open after the window is `merge_unverified`, for example a PR that was enqueued, or `outcome_unknown` after step 8's failure answer. A failed verify read is `outcome_unknown`. A success answer from the host is never proof by itself: GitHub returns `merged: true` for an already merged PR with a wrong sha.
+9. **Verify,** polling up to 10 s (1 s, 2 s, 3 s, 4 s): head, base and state; for `--auto`, armed or merged. GitLab's transient `locked` counts as not yet decided. Merged at the sent head and the expected base is success. A merged PR at another head or whose `base.ref` differs from the expected base exits 12 (`merge_unverified`, `details.observed`). Still open or closed after the window is `merge_unverified`, for example a PR that was enqueued, or `outcome_unknown` after step 8's failure answer. A failed verify read is `outcome_unknown`. A success answer from the host is never proof by itself: GitHub returns `merged: true` for an already merged PR with a wrong sha.
 10. **Audit result, `post-merge` hooks, result.**
 
-Once a host write was attempted, every path runs the audit result record and the `post-` hooks, then exits, except after a signal. A refusal before any call does not.
+Once a host write was attempted, every path runs the audit result record and the `post-` hooks, then exits. A signal before the outcome is recorded skips the `post-` hooks and exits 12 `outcome_unknown`; a signal after it stops the remaining `post-` hooks and exits with the recorded outcome. A signal while the result is being printed, or anywhere else after the `attempted` record was written, exits 12 `outcome_unknown`, since the result was not reported, and the audit record is authoritative. Neither exits 128+N. A refusal before any call does not.
 
 `--override-blocks` (human-only) skips only `not_ready`. It never skips `stale_head`, `stale_base`, `not_open` or `no_head_match`.
 
@@ -427,7 +427,7 @@ GitLab has no per-merge method; the method is a project setting, and forgectl va
 
 `squash=false` on a merge call does nothing, so forgectl does not send it. `merge` or `rebase` on an MR with `squash_on_merge: true` exits 20 (`method_not_allowed`). forgectl never calls `/rebase`: it would change the head.
 
-Output and audit `method` is what merged. On GitLab it is derived from `squash_on_merge` and `squash_commit_sha` (not `squash`) and the project's `merge_method`, so it is reported with no flag as well.
+Output `method` is what merged: null when nothing has merged yet, and null for `already_merged`, where someone else merged and what merged is unknown (the `post-merge` payload's `method` too). Audit `inputs.method` is the method sent, if any. On GitLab it is derived from `squash_on_merge` and `squash_commit_sha` (not `squash`) and the project's `merge_method`, so it is reported with no flag as well.
 
 forgectl never deletes a branch. The host's own setting decides (`delete_branch_on_merge`, GitLab's remove-source-branch), and only that retargets a PR stacked on the branch: deleting the ref afterward closes it on GitHub and strands it on GitLab.
 
@@ -673,7 +673,7 @@ Exit 20 has `code: refused`, with `reason` required. There are no tool-specific 
 
 `unsupported_host_version` applies to the rows marked so in [Host versions](#host-versions).
 
-A declined dialog exits 13 `confirmation_required`, message `declined`, with a log line and no audit record. A signal with no write attempted exits 128+N with no envelope, the one exception to this table.
+A declined dialog exits 13 `confirmation_required`, message `declined`, with a log line and no audit record. A signal with no write attempted exits 128+N with no envelope, the one exception to this table. Once a write was attempted, a signal never exits 128+N: while the outcome is unknown it exits 12 `outcome_unknown`; after the outcome record is written it ends the `post-` hooks and exits with that outcome. A signal while the result is being printed exits 12 `outcome_unknown` too, and the audit record says what happened. If the unknown-outcome record itself cannot be written, the exit is 12 `audit_failed`.
 
 ## Output by exit code
 
@@ -828,7 +828,7 @@ forgectl stores no long-lived objects, so it has no labels of its own. Conventio
 
 `browse [--focus <pr>] [--result-file PATH] [--interval D]` needs the extra `forgectl[tui]`; without it, exit 2 with the install command.
 
-`browse` is read-only: a dashboard of your open PRs and MRs on GitHub and GitLab, a detail pane with facts, CI, reviews, comments and diff, and one action, `o` open in a browser. The browser runs with forgectl's environment minus every configured `token_env` variable and the [ambient token list](#credentials), as a hook does. Posting stays with the tools that own drafts. Merging is a separate follow-up ([Merge from `browse`](#merge-from-browse-follow-up)). Forge text renders with Textual markup disabled. GitLab rows rely on the GitLab path being verified against a self-managed instance (#35).
+`browse` is read-only: a dashboard of your open PRs and MRs on GitHub and GitLab, a detail pane with facts, CI, reviews, comments and diff, and one action, `o` open in a browser. The browser opener is started with only a short list of variables (`PATH` without relative entries, `HOME`, the locale, display and desktop-session variables, `BROWSER`, `TMPDIR` and the proxy variables) and `/` as its working directory, so no token variable ever reaches it. It runs detached in its own session and outside the gateway's deadline kill: forgectl signals no process it did not start, never kills the opener, and `browse` does not wait on it, only reports a non-zero exit. Posting stays with the tools that own drafts. Merging is a separate follow-up ([Merge from `browse`](#merge-from-browse-follow-up)). Forge text renders with Textual markup disabled. GitLab rows rely on the GitLab path being verified against a self-managed instance (#35).
 
 ### List
 
@@ -858,7 +858,7 @@ The default list is the union of requested-from-you and authored-by-you, as two 
 
 ### Result file
 
-`--result-file` writes `{"intent": "open"|"back", "selected": [...], "merged": [...]}` on exit (`schemas/cli/browse-result.json`). `selected` holds zero or one `pr`; `merged` lists the PRs merged from `browse`, and stays empty until the merge follow-up. `enter` opens the detail pane and `intent` stays `back` on exit; `intent: open` means `o` was used. `o` opens only the built `url`; a check's `url` is shown, opened only when `http` or `https`. Keys: `q` quit, `?` help, `/` filter, `enter` open, `r` refresh selected, `R` refresh all, `o` open in a browser; the keys for sort order and filters are listed in `?`.
+`--result-file` writes `{"intent": "open"|"back", "selected": [...], "merged": [...]}` on exit (`schemas/cli/browse-result.json`). `selected` holds zero or one `pr`; `merged` lists the PRs merged from `browse`, and stays empty until the merge follow-up. `enter` opens the detail pane and `intent` stays `back` on exit; `intent: open` means `o` was used. `o` opens only the built `url`; a check's `url` is shown, opened only when `http` or `https`. Keys: `q` quit, `?` help, `/` filter, `enter` open, `r` refresh selected, `R` refresh all, `o` open in a browser; the keys for sort order and filters are listed in `?`. The result file is written only when `browse` exits 0; on any other exit an existing file is left unchanged and must be ignored by callers.
 
 ### Merge from `browse` (follow-up)
 
@@ -883,7 +883,7 @@ Either file may contain empty lines: forgectl adds a newline first when an appen
 
 **Two records per write.** Before a host write, forgectl appends a record with `result: attempted` and an `attempt_id`; after, a second record with the same id and the outcome. `attempted` is written once per run, before its first write, whichever step that is. A record with no outcome means forgectl died in between. If that first append fails, exit 12 (`audit_unavailable`), with nothing sent. If the second fails, exit 12 (`audit_failed`) with the outcome in `details`, so a caller does not retry.
 
-**Fields.** `merge_unverified` is recorded as `merged_unexpected` when the PR merged at another head or base, with `observed: {head_sha, base_ref}` in the outcome record, else as `outcome_unknown`; `observed` is null otherwise. A post's `quick_action_ran` as itself; `approved_stale_head` as `approved`, since the approval exists. `config_hash` is the sha256 hex digest of the canonical JSON of the effective config, after files, environment overrides and defaults but not flags: every key present, each with its default when unset (null only where the default is null, such as `me.name`), keys sorted, compact separators (`,` and `:`), non-ASCII characters as `\u` escapes, encoded as UTF-8, durations as JSON numbers of seconds always written with a fraction part, as Python's float repr does (`60.0`, `0.009`), keys spelled as in the schema (such as `pre-merge` and a hook's `async`), and `me.name` as configured (null when unset, not the OS username). `config_path` is null for the default. `actor_source` is `flag`, `tty` or `default`. `human:` with `stdin_tty: false` is expected from a dashboard, and is checkable, not refused. `inputs.base_ref` and `observed.base_ref` are cut to their first 1024 characters when written. `ts` must be a real instant: `export` skips, as malformed, a record whose `ts` matches the schema pattern but names no real time (such as a leap second `23:59:60`, an offset of `+24:00` or a date that does not exist).
+**Fields.** `merge_unverified` is recorded as `merged_unexpected` when the PR merged at another head or base, with `observed: {head_sha, base_ref}` in the outcome record, else as `outcome_unknown`; `observed` is null otherwise. A post's `quick_action_ran` as itself; `approved_stale_head` as `approved`, since the approval exists. `config_hash` is the sha256 hex digest of the canonical JSON of the effective config, after files, environment overrides and defaults but not flags: every key present, each with its default when unset (null only where the default is null, such as `me.name`), keys sorted, compact separators (`,` and `:`), non-ASCII characters as `\u` escapes, encoded as UTF-8, durations as JSON numbers of seconds always written with a fraction part, as Python's float repr does (`60.0`, `0.009`), keys spelled as in the schema (such as `pre-merge` and a hook's `async`), and `me.name` as configured (null when unset, not the OS username). `config_path` is null for the default. `host_login` is null when the write path did not read the account's login. `actor_source` is `flag`, `tty` or `default`. `human:` with `stdin_tty: false` is expected from a dashboard, and is checkable, not refused. `inputs.base_ref` and `observed.base_ref` are cut to their first 1024 characters when written. `ts` must be a real instant: `export` skips, as malformed, a record whose `ts` matches the schema pattern but names no real time (such as a leap second `23:59:60`, an offset of `+24:00` or a date that does not exist).
 
 **Log** (`schemas/log.json`): `ts`, `level`, `event`, `pr`, `host`, `details`. `error` for exit 1; `warn` for refusals, vetoes, escalations, exit 12 and an unmatched instance note; `info` otherwise; `debug` for `--verbose`. Reads log only at `--verbose` or on failure, so polling does not grow the file. A log write failure warns only, and never changes the exit code. `export` prints each record with its untrusted fields (`base_ref`, `host_login`, `observed.base_ref`) sanitized, and skips, with a warning that does not repeat the line, any line that is not valid against `schemas/audit.json`. URLs are recorded without userinfo. Secrets never appear in either file.
 

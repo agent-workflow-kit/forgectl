@@ -400,7 +400,9 @@ class GitLabBackend:
 
     # -- show ----------------------------------------------------------------------------------
 
-    def get_pr(self, ref: PrRef) -> m.PrRead:
+    def get_pr(self, ref: PrRef, readiness: m.Readiness | None = None) -> m.PrRead:
+        # ``readiness`` is taken for the protocol and not used yet: the readiness loop is the
+        # injected ``until_known`` (show's). TODO(#22): GitLab merge passes its own readiness.
         raw_number: Any = ref.number
         if (
             isinstance(raw_number, bool)
@@ -1173,5 +1175,7 @@ class GitLabBackend:
     def whoami(self, host: str) -> m.Identity:
         raise _not_yet("whoami", 19)  # TODO(#19): GitLab whoami
 
+    def merge(self, pr: m.PR, *, sha: str, method: str | None) -> m.MergeAnswer:
+        raise _not_yet("merge", 22)  # TODO(#22): GitLab merge
 
 __all__ = ["MAX_PAGES", "READINESS_UNKNOWN", "GitLabBackend", "UntilKnown"]

@@ -5,7 +5,7 @@ record with the same ``attempt_id`` after it. Leaving the ``with`` block with no
 exception, a signal) records ``outcome_unknown``, so every attempt ends in a record.
 
 A first append that fails is exit 12 ``audit_unavailable`` (nothing was sent); a second that
-fails is exit 12 ``audit_failed`` with the outcome in ``details``.
+fails is exit 12 ``audit_failed`` with the outcome's result in ``details``.
 
 Records are validated by ``audit_problem`` before they are written, a hand check that a test
 compares with ``schemas/audit.json``; jsonschema is test-only.
@@ -24,7 +24,7 @@ from types import TracebackType
 from typing import Any, Literal
 
 from . import jsonlog
-from .errors import ForgectlError
+from .errors import ForgectlError, SignalExit, mark_write_attempted
 from .jsonlog import PATTERNS, JsonlError, matches, parse_ts
 from .sanitize import sanitize_line, sanitize_text
 
@@ -242,12 +242,15 @@ def check_writable(directory: Path) -> None:
         raise _unavailable(err) from None
 
 
-_HELD_SIGNALS = frozenset({signal.SIGINT, signal.SIGTERM})
+#: The signals cli.py turns into ``SignalExit`` (SIGHUP does not exist on Windows).
+_HELD_SIGNALS = frozenset(
+    getattr(signal, name) for name in ("SIGINT", "SIGTERM", "SIGHUP") if hasattr(signal, name)
+)
 
 
 @contextmanager
 def _signals_held() -> Iterator[None]:
-    """Hold SIGINT and SIGTERM while a record is appended and its flag set.
+    """Hold SIGINT, SIGTERM and SIGHUP while a record is appended and its flag set.
 
     A signal that arrives meanwhile stays pending and is delivered when the old mask is
     restored, so its handler's exception is raised from that restore: after the record is on
@@ -279,6 +282,14 @@ class Attempt:
         self.attempt_id = new_attempt_id()
         self._begun = False
         self._finished = False
+        #: ``audit_failed`` when the outcome append failed, kept so a signal delivered as the
+        #: append returns does not lose it.
+        self.finish_error: ForgectlError | None = None
+
+    @property
+    def finished(self) -> bool:
+        """Whether the outcome append ran (written, or failed as ``finish_error``)."""
+        return self._finished
 
     def _record(
         self,
@@ -316,6 +327,7 @@ class Attempt:
             return
         record = self._record("attempted")
         with _signals_held():
+            mark_write_attempted()  # before the append: a signal after it can land anywhere
             try:
                 jsonlog.append(self._dir, AUDIT_FILE, record)
             except JsonlError as err:
@@ -329,7 +341,9 @@ class Attempt:
         ids: Iterable[str] | None = None,
         observed: Mapping[str, str] | None = None,
     ) -> None:
-        """Append the outcome, once. Exit 12 ``audit_failed`` if it cannot be written."""
+        """Append the outcome, once. Exit 12 ``audit_failed`` if it cannot be written, with the
+        result in ``details.outcome``. A signal held during the append is raised as it returns,
+        before that error; ``finish_error`` keeps it."""
         if not self._begun:
             raise RuntimeError("finish() before begin()")
         if self._finished:
@@ -344,11 +358,13 @@ class Attempt:
             try:
                 jsonlog.append(self._dir, AUDIT_FILE, record)
             except JsonlError as err:
-                raise ForgectlError(
+                self.finish_error = ForgectlError(
                     "audit_failed",
                     f"the outcome could not be recorded in audit.jsonl: {err}",
-                    details={"outcome": record},
-                ) from None
+                    details={"outcome": result},
+                )
+        if self.finish_error is not None:
+            raise self.finish_error
 
     def __enter__(self) -> Attempt:
         return self
@@ -359,10 +375,19 @@ class Attempt:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> Literal[False]:
-        if not self._begun or self._finished:
+        if not self._begun:
+            return False
+        if isinstance(exc, SignalExit):
+            exc.write_attempted = True  # cli exits 12 outcome_unknown, not 128+N
+        if self._finished:
             return False
         try:
             self.finish("outcome_unknown")
+        except SignalExit as late:  # held during the append, it replaces the one in flight
+            late.write_attempted = True
+            if self.finish_error is not None:  # the append failed: audit_failed carries it
+                raise self.finish_error from None
+            raise
         except ForgectlError:
             if exc is None or isinstance(exc, Exception):
                 raise  # audit_failed carries the outcome; a signal in flight is not replaced
