@@ -126,8 +126,9 @@ def _parse(text: str) -> datetime:
 @dataclass
 class Limits:
     """The lowest `ratelimit-remaining` seen across this module's own reads (UNVERIFIED header
-    names: GitLab documents `RateLimit-Remaining` and `RateLimit-Reset`, an epoch time). Reads
-    that go through `show` or the backend's table code are not counted.
+    names: GitLab documents `RateLimit-Remaining` and `RateLimit-Reset`, an epoch time). The
+    headers of `show`'s MR and /reviewers reads are counted (via `adopt`); its approvals and
+    project approvals reads are not.
     TODO(#9): count every read of the command once the gateway records response headers."""
 
     host: str
@@ -694,6 +695,9 @@ def snapshot(backend: GitLabBackend, ref: PrRef, now: Now | None = None) -> m.Sn
     clock = now or utc_now
 
     def once() -> m.Snapshot:
+        # the reviewer table is show's single reading (#117): an approvals/reviewer change at the
+        # same head after it is not re-read or retried; check_head still catches a head or
+        # identity move
         read, parts = backend._read_pr(ref)
         r = _reader(backend, ref, clock)
         r.adopt(parts)
@@ -760,6 +764,9 @@ def reviews(backend: GitLabBackend, ref: PrRef, now: Now | None = None) -> m.Rev
     clock = now or utc_now
 
     def once() -> m.ReviewsResult:
+        # the reviewer table is show's single reading (#117): an approvals/reviewer change at the
+        # same head after it is not re-read or retried; check_head still catches a head or
+        # identity move
         read, parts = backend._read_pr(ref)
         r = _reader(backend, ref, clock)
         r.adopt(parts)

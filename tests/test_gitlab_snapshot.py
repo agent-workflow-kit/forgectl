@@ -886,7 +886,7 @@ def test_the_table_is_read_once_and_the_snapshot_uses_show_s(
     state = approvals_sequence(fake, [base, changed])
     out = rig.snapshot()
     assert state["n"] == 1
-    assert [e["login"] for e in out["latest_by_reviewer"]] != []
+    assert [e["login"] for e in out["latest_by_reviewer"]] == ["user-2"]  # the base table
     assert out["approvals"] == 1  # `show`'s reading, not the later `changed` one
 
 
@@ -1514,4 +1514,4 @@ def test_the_readiness_recheck_still_rereads_the_mr(fake: FakeGitLab, tmp_path: 
     out = rig.snapshot()
     assert out["pr"] == "gitlab.com/user-9/proj#7"
     assert fake.count(REVIEWERS) == 1 and fake.count(APPROVALS) == 1
-    assert fake.count(mr_path()) >= 3  # the recheck, then the closing read
+    assert fake.count(mr_path()) == 3  # computing read, ready read, closing read
