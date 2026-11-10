@@ -1,0 +1,19 @@
+{
+  "approvals": 1,
+  "approvals_at_head": null,
+  "complete": true,
+  "head_sha": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+  "latest_by_reviewer": [
+    {
+      "at": null,
+      "can_push": null,
+      "commit_sha": null,
+      "id": "12",
+      "login": "user-2",
+      "state": "approved"
+    }
+  ],
+  "pr": "gitlab.com/user-9/proj#7",
+  "review_decision": "approved",
+  "reviews": []
+}
