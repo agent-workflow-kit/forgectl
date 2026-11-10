@@ -716,7 +716,8 @@ def _compare_one(
 ) -> _Compared | None | str:
     """``/repository/compare`` of the target project, ``straight=false``; None on a 404, ``_CUT``
     past forgectl's read cap. With ``parse``, the ``diffs`` entries are checked inside the
-    retried call."""
+    retried call, and only when this answer can still make the status ``ahead``: it has commits,
+    no ``compare_timeout``, no ``compare_same_ref`` and fewer entries than GitLab's cap."""
     project_id, canonical = mr
 
     def check(response: Response) -> _Compared | None:
@@ -740,15 +741,13 @@ def _compare_one(
                 raise _bad("commit")
         diffs = _list(data.get("diffs"), "diffs")
         capped = len(diffs) >= COMPARE_FILE_CAP
+        same_ref = _flag(data.get("compare_same_ref"), "compare_same_ref")
+        timeout = _flag(data.get("compare_timeout"), "compare_timeout")
         files = None
-        if parse and not capped:
+        if parse and commits and not (capped or same_ref or timeout):
             files = parse_files(diffs, "diffs", limit=COMPARE_FILE_CAP)
         return _Compared(
-            commits=len(commits),
-            same_ref=_flag(data.get("compare_same_ref"), "compare_same_ref"),
-            timeout=_flag(data.get("compare_timeout"), "compare_timeout"),
-            files=files,
-            capped=capped,
+            commits=len(commits), same_ref=same_ref, timeout=timeout, files=files, capped=capped
         )
 
     try:
@@ -789,11 +788,16 @@ def compare_result(gl: GitLabBackend, ref: PrRef, from_sha: str, to_sha: str) ->
 
     if from_sha == to_sha:
         return result("identical", "")
-    forward = _compare_one(gl, target, mr, from_sha, to_sha, parse=True)
-    if forward is None:
-        return result("unavailable", None)
+    # Backward first: only a backward answer that is not cut, with no commits and no same-ref
+    # flag, leaves `ahead` possible, and only then are the forward diffs parsed.
     backward = _compare_one(gl, target, mr, to_sha, from_sha, parse=False)
     if backward is None:
+        return result("unavailable", None)
+    can_be_ahead = (
+        isinstance(backward, _Compared) and not backward.commits and not backward.same_ref
+    )
+    forward = _compare_one(gl, target, mr, from_sha, to_sha, parse=can_be_ahead)
+    if forward is None:
         return result("unavailable", None)
     if any(isinstance(c, _Compared) and c.timeout for c in (forward, backward)):
         raise _too_large("GitLab timed out computing this comparison")

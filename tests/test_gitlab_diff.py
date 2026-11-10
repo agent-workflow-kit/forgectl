@@ -763,9 +763,9 @@ def test_compare_ahead_has_the_assembled_diff(fake: FakeGitLab, tmp_path: Path) 
 def test_compare_asks_both_ways_in_the_target_project(fake: FakeGitLab, tmp_path: Path) -> None:
     compare(fake, tmp_path, cmp_doc("2", ["2"]), cmp_doc("1", []))
     sent = [c.endpoint for c in fake.calls if c.path == COMPARE]
-    assert sent == [
-        f"{COMPARE}?from={FROM}&to={TO}&straight=false",
+    assert sent == [  # backward first: it decides whether the forward diffs are parsed
         f"{COMPARE}?from={TO}&to={FROM}&straight=false",
+        f"{COMPARE}?from={FROM}&to={TO}&straight=false",
     ]
 
 
@@ -1159,4 +1159,25 @@ def test_a_cut_forward_answer_with_no_backward_commits_is_too_large(
     fake: FakeGitLab, tmp_path: Path
 ) -> None:
     error = raises(lambda: cut_compare(fake, tmp_path, "forward", cmp_doc("1", [])))
+    assert (error.code, error.reason) == ("refused", "too_large")
+
+
+# -- round 2 review ----------------------------------------------------------------------------
+
+MALFORMED = entry("a", "plain text\n")
+
+
+def test_a_diverged_comparison_never_parses_its_forward_diffs(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    forward = cmp_doc("2", ["2"], [MALFORMED])
+    result = compare(fake, tmp_path, forward, cmp_doc("1", ["1"]))
+    assert (result.status, result.diff) == ("diverged", None)
+
+
+def test_a_timed_out_comparison_with_a_malformed_entry_is_too_large(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    forward = cmp_doc("2", ["2"], [MALFORMED], compare_timeout=True)
+    error = raises(lambda: compare(fake, tmp_path, forward, cmp_doc("1", [])))
     assert (error.code, error.reason) == ("refused", "too_large")
