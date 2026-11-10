@@ -38,7 +38,8 @@ DEFAULT_CONCURRENCY = 4  # snapshots in flight at once; `browse.concurrency` set
 DEFAULT_FULL_REFRESH_EVERY = 5  # `browse.full_refresh_every`
 
 # The help is data, one logical line per entry; the widgets wrap it to the terminal width. Adding a
-# key is one new row here (and its Binding). A test compares these keys with BrowseApp.BINDINGS.
+# key is one new row here (and its Binding). A test compares these keys with BrowseApp.BINDINGS;
+# a binding whose Textual key name differs from its label needs a KEY_LABELS entry in that test.
 HELP_KEYS: list[tuple[str, str]] = [
     ("q", "quit"),
     ("?", "this help"),
@@ -83,7 +84,7 @@ HELP_LEGEND: list[tuple[str, str]] = [
 
 HELP_NOTES = [
     "browse is read-only: no merge, no post.",
-    "Press any key to close this help.",
+    "Press any other key to close this help; arrows, PgUp and PgDn scroll.",
 ]
 
 
@@ -120,13 +121,27 @@ def in_thread[T](fn: Callable[..., T], *args: Any) -> asyncio.Future[T]:
     return future
 
 
+HELP_SCROLL_KEYS = {
+    "up": "scroll_up", "k": "scroll_up", "down": "scroll_down", "j": "scroll_down",
+    "pageup": "scroll_page_up", "pagedown": "scroll_page_down",
+    "home": "scroll_home", "end": "scroll_end",
+}  # fmt: skip
+
+
+def _key_column_width() -> int:
+    """One key column width for every help table, from the longest key label."""
+    return max(1, *(cell_len(key) for key, _ in (*HELP_KEYS, *HELP_LEGEND)))
+
+
 def _help_table(rows: list[tuple[str, str]], table_id: str) -> Grid:
-    """A two-column table: a fixed key column, a description column that wraps."""
+    """A two-column table: a key column sized from the data, a description column that wraps."""
     cells: list[Static] = []
     for key, description in rows:
         cells.append(Static(safe.plain(key), classes="help-key", markup=False))
         cells.append(Static(safe.plain(description), classes="help-desc", markup=False))
-    return Grid(*cells, id=table_id, classes="help-table")
+    grid = Grid(*cells, id=table_id, classes="help-table")
+    grid.styles.grid_columns = f"{_key_column_width() + 1} 1fr"  # +1: a gap before the text
+    return grid
 
 
 class HelpScreen(ModalScreen[None]):
@@ -140,7 +155,11 @@ class HelpScreen(ModalScreen[None]):
 
     def on_key(self, event: Key) -> None:
         event.stop()
-        self.dismiss(None)
+        action = HELP_SCROLL_KEYS.get(event.key)
+        if action is None:
+            self.dismiss(None)
+        else:
+            getattr(self.query_one("#help"), action)(animate=False)
 
 
 class BrowseApp(App[None]):
@@ -156,7 +175,7 @@ class BrowseApp(App[None]):
     #bar, #status { height: 1; }
     HelpScreen { align: center middle; }
     #help {
-        width: 90%; max-width: 100; height: auto; max-height: 100%;
+        width: 90%; min-width: 30; max-width: 100; height: auto; max-height: 100%;
         border: round $primary; padding: 1 2; background: $surface;
     }
     .help-table { grid-size: 2; grid-columns: 10 1fr; grid-rows: auto; height: auto; }

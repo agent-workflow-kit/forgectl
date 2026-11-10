@@ -19,7 +19,7 @@ from textual.widgets import Input, OptionList, Static
 
 from forgectl.errors import ForgectlError
 from forgectl.tui import render
-from forgectl.tui.app import BrowseApp
+from forgectl.tui.app import BrowseApp, HelpScreen
 from forgectl.tui.opener import BrowserOpener
 
 from .harness.schemas import validate
@@ -192,7 +192,7 @@ def help_text_of(app: BrowseApp) -> str:
     )
 
 
-def test_help_lists_the_keys_and_any_key_closes_it() -> None:
+def test_help_lists_the_keys_and_other_keys_close_it() -> None:
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         await pilot.press("question_mark")
         await pilot.pause()
@@ -218,8 +218,15 @@ def test_every_binding_is_in_the_help() -> None:
     from forgectl.tui.app import HELP_KEYS
 
     documented = {key for key, _ in HELP_KEYS}
-    bound = {KEY_LABELS.get(b.key, b.key) for b in BrowseApp.BINDINGS if isinstance(b, Binding)}
-    assert bound <= documented, bound - documented
+    # An unusual Textual key name (not a single character) needs an entry in KEY_LABELS.
+    bound = {
+        KEY_LABELS.get(key, key)
+        for b in BrowseApp.BINDINGS
+        if isinstance(b, Binding)
+        for key in b.key.split(",")
+    }
+    # `enter` is handled by the list widget, not a BrowseApp binding.
+    assert documented - {"enter"} == bound, (documented - {"enter"}) ^ bound
 
 
 def test_help_source_has_no_hard_line_breaks() -> None:
@@ -249,12 +256,16 @@ def test_help_reflows_to_the_terminal_width(width: int) -> None:
                 assert len({d.region.x for d in descs}) == 1
                 for key, desc in zip(keys, descs, strict=True):
                     content = as_content(desc.content)
-                    assert desc.region.right <= box.region.right
+                    assert desc.region.right <= box.content_region.right
+                    lines = content.wrap(desc.region.width)
+                    shown = " ".join(" ".join(line.plain for line in lines).split())
+                    assert shown == " ".join(content.plain.split())
                     assert desc.region.height == len(content.wrap(desc.region.width))
                     assert desc.region.y == key.region.y
-            if width == 200:  # wide: the long entry is not wrapped at a narrower fixed width
-                long = app.screen.query("#help-keys .help-desc").results(Static)
-                assert min(w.region.height for w in long) == 1
+            if width == 200:  # the box is capped at 100 columns, so wrapping stops growing
+                for desc in app.screen.query("#help-keys .help-desc").results(Static):
+                    content = as_content(desc.content)
+                    assert desc.region.height == len(content.wrap(desc.region.width))
 
     asyncio.run(go())
 
@@ -269,6 +280,37 @@ def test_help_wraps_more_on_a_narrow_terminal() -> None:
             return sum(w.region.height for w in app.screen.query(".help-desc").results(Static))
 
     assert asyncio.run(heights(80)) > asyncio.run(heights(200))
+
+
+def test_help_descriptions_keep_a_usable_width_on_a_narrow_terminal() -> None:
+    async def go() -> None:
+        app = BrowseApp(basic_source(), FakeOpener(), concurrency=0)
+        async with app.run_test(size=(30, 80)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            for desc in app.screen.query(".help-desc").results(Static):
+                assert desc.region.width >= 10
+
+    asyncio.run(go())
+
+
+def test_help_key_column_fits_the_longest_key() -> None:
+    from forgectl.tui import app as app_module
+
+    longest = max(len(k) for k, _ in (*app_module.HELP_KEYS, *app_module.HELP_LEGEND))
+
+    async def go() -> None:
+        app = BrowseApp(basic_source(), FakeOpener(), concurrency=0)
+        async with app.run_test(size=(100, 80)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            widths = {k.region.width for k in app.screen.query(".help-key").results(Static)}
+            assert len(widths) == 1
+            assert widths.pop() >= longest
+
+    asyncio.run(go())
 
 
 def test_help_scrolls_when_the_screen_is_short() -> None:
@@ -286,6 +328,24 @@ def test_help_scrolls_when_the_screen_is_short() -> None:
             box.scroll_end(animate=False)
             await pilot.pause()
             assert box.region.contains_region(last.region)
+
+    asyncio.run(go())
+
+
+def test_help_keys_scroll_it_and_do_not_close_it() -> None:
+    async def go() -> None:
+        app = BrowseApp(basic_source(), FakeOpener(), concurrency=0)
+        async with app.run_test(size=(80, 12)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            await pilot.press("pagedown")
+            await pilot.pause()
+            assert isinstance(app.screen, HelpScreen)
+            assert app.screen.query_one("#help").scroll_y > 0
+            await pilot.press("x")
+            await pilot.pause()
+            assert not app.screen.query("#help")
 
     asyncio.run(go())
 
