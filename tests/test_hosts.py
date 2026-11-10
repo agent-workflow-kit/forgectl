@@ -1074,3 +1074,55 @@ def test_a_non_ascii_host_is_refused_before_lowercasing(fake_forges: FakeForges,
         getattr(hosts, call)(kelvin)
     assert raised.value.code == "refused" and raised.value.reason == "unknown_host"
     assert secret_values() == frozenset() and fake_forges.calls() == []
+
+
+# -- viewer (me for `activity`, #57) ---------------------------------------------------------
+
+
+def test_viewer_is_the_authenticated_account_and_is_read_once(fake_forges: FakeForges) -> None:
+    login("gh", "github.com")
+    hosts = make_hosts(fake_forges)
+    user_answer(fake_forges, "gh", "github.com", "octo")
+    first = hosts.viewer("github.com")
+    assert (first.login, first.id) == ("octo", "12")
+    assert hosts.viewer("GitHub.com") is first
+    assert len([c for c in fake_forges.calls("gh") if c.argv[-1] == "user"]) == 1
+
+
+def test_a_configured_me_for_another_login_wins_and_has_no_id(fake_forges: FakeForges) -> None:
+    login("gh", "github.com")
+    hosts = make_hosts(fake_forges, config_of({"github.com": Host(me="someone-else")}))
+    user_answer(fake_forges, "gh", "github.com", "octo")
+    me = hosts.viewer("github.com")
+    assert (me.login, me.id) == ("someone-else", None)
+
+
+def test_a_configured_me_that_is_the_account_keeps_the_id(fake_forges: FakeForges) -> None:
+    login("gh", "github.com")
+    hosts = make_hosts(fake_forges, config_of({"github.com": Host(me="OCTO")}))
+    user_answer(fake_forges, "gh", "github.com", "octo")
+    me = hosts.viewer("github.com")
+    assert (me.login, me.id) == ("octo", "12")
+
+
+def test_a_failed_viewer_read_is_not_remembered(fake_forges: FakeForges) -> None:
+    login("gh", "github.com")
+    hosts = make_hosts(fake_forges)
+    fake_forges.answer("gh", "user", status=401, body={"message": "Bad credentials"}, times=1)
+    with pytest.raises(ForgectlError):
+        hosts.viewer("github.com")
+    user_answer(fake_forges, "gh", "github.com", "octo")
+    assert hosts.viewer("github.com").login == "octo"
+
+
+def test_ignore_authors_comes_from_the_config(fake_forges: FakeForges) -> None:
+    from forgectl.config import Activity
+
+    base = config_of()
+    cfg = LoadedConfig(
+        config=base.config.model_copy(update={"activity": Activity(ignore_authors=("a*", "b"))}),
+        config_hash="x",
+        config_path=None,
+    )
+    assert make_hosts(fake_forges, cfg).ignore_authors() == ("a*", "b")
+    assert make_hosts(fake_forges).ignore_authors() == ()

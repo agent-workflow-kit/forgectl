@@ -1,4 +1,10 @@
 {
+  "activity": {
+    "awaiting_my_reply": 3,
+    "comments_total": 6,
+    "others_since_push": 5,
+    "unresolved_threads": 4
+  },
   "additions": 120,
   "approvals": 1,
   "approvals_at_head": 1,

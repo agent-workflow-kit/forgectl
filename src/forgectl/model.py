@@ -933,6 +933,33 @@ _UNKNOWN_PUSH: dict[str, Any] = {"pushed_at": None, "pushed_at_source": None}
 
 
 @dataclass(frozen=True, slots=True)
+class Activity:
+    """The derived `activity` block of `snapshot` (interface: Activity); see ``activity.derive``.
+
+    ``others_since_push`` is ``None`` when the push time of the head is unknown.
+    """
+
+    comments_total: int
+    unresolved_threads: int
+    others_since_push: int | None
+    awaiting_my_reply: int
+
+    def __post_init__(self) -> None:
+        counts = (self.comments_total, self.unresolved_threads, self.awaiting_my_reply)
+        for n in (*counts, self.others_since_push):
+            if n is not None and (isinstance(n, bool) or not isinstance(n, int) or n < 0):
+                raise ValueError("an activity count is a non-negative integer or null")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "comments_total": self.comments_total,
+            "unresolved_threads": self.unresolved_threads,
+            "others_since_push": self.others_since_push,
+            "awaiting_my_reply": self.awaiting_my_reply,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class Snapshot:
     pr: PR
     review_requests: tuple[ReviewRequest, ...]
@@ -950,6 +977,9 @@ class Snapshot:
     #: GitHub: `backends/github_snapshot.read_head_push` (the PR timeline, #12).
     #: TODO(#16): fill `Snapshot.head_push` from the host (GitLab: the MR versions).
     head_push: PushTime | None = None
+    #: Required, by keyword: built by ``activity.derive`` from this snapshot's own parts, so every
+    #: backend gives it (GitHub: github_snapshot; GitLab: the #16 backend calls the same module).
+    activity: Activity = field(kw_only=True)
 
     def __post_init__(self) -> None:
         unknown = set(self.incomplete) - INCOMPLETE_PARTS
@@ -983,6 +1013,7 @@ class Snapshot:
                 ],
                 "threads": [t.to_dict() for t in sorted(self.threads, key=lambda t: t.sort_key)],
                 "ci": self.ci.to_dict(),
+                "activity": self.activity.to_dict(),
                 "rate_limit": self.rate_limit.to_dict(),
                 "complete": not incomplete,
                 "incomplete": sorted(incomplete),

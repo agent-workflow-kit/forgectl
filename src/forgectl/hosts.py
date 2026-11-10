@@ -25,6 +25,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from .activity import Viewer
 from .errors import ForgectlError, refused
 from .gateway import (
     MAX_TOKEN,
@@ -218,6 +219,7 @@ class Hosts:
     def __init__(self, gateway: Gateway) -> None:
         self.gateway = gateway
         self._credentials: dict[str, Credential | _Failure] = {}
+        self._viewers: dict[str, Viewer] = {}
         self._lock = threading.Lock()  # select-and-store: a token_command runs once per host
 
     @property
@@ -353,6 +355,32 @@ class Hosts:
                 f"{key}: not a valid {backend} login",
                 details={"key": key},
             ) from None
+
+    def ignore_authors(self) -> tuple[str, ...]:
+        """``activity.ignore_authors``: the config list alone decides who is ignored."""
+        return tuple(self._config.activity.ignore_authors)
+
+    def viewer(
+        self, host: str, *, call: Callable[[Callable[[], User]], User] | None = None
+    ) -> Viewer:
+        """Me on ``host`` for ``activity``: the authenticated account, read once per ``Hosts``
+        (one command run) however many snapshots follow. A configured ``me`` that names another
+        login than the authenticated one wins and has no id. A failed read raises and is not
+        remembered, so the next snapshot tries again."""
+        host = _ascii_host(host)
+        with self._lock:
+            known = self._viewers.get(host)
+        if known is None:
+            target = self.target(host)
+            user = (call or _once)(lambda: self.authenticated_user(target))
+            configured = self.me(host)
+            if configured is not None and not matches_login(configured, user.login):
+                known = Viewer(login=configured, id=None)
+            else:
+                known = Viewer(login=user.login, id=user.id)
+            with self._lock:
+                known = self._viewers.setdefault(host, known)
+        return known
 
     # identity ---------------------------------------------------------------------------
 
