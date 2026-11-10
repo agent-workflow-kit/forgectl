@@ -902,10 +902,11 @@ _RFC3339 = re.compile(
 class PushTime:
     """When the current head was last pushed and how that was determined (interface: Push time).
 
-    ``push_event`` is a host push event for the head sha; ``commit_date`` is the head commit's
-    date, which can precede the push. An unknown time is not a ``PushTime``: ``Snapshot.head_push``
-    is ``None`` and both serialized fields are null, so a time without a source cannot be
-    expressed. The model reads no clock, so it cannot say a time lies in the future.
+    ``push_event`` is a host push event for the head sha; ``commit_date`` is a commit's
+    committer date (the head commit's, or a PR commit's), which can precede the push. An
+    unknown time is not a ``PushTime``: ``Snapshot.head_push`` is ``None`` and both serialized
+    fields are null, so a time without a source cannot be expressed. The model reads no clock,
+    so it cannot say a time lies in the future.
     """
 
     at: str

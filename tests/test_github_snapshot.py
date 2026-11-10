@@ -1065,10 +1065,15 @@ def test_ordinary_commits_after_the_last_event_give_the_newest_commit_time(
     make: Callable[..., Rig],
 ) -> None:
     docs = push_doc(force("2026-10-02T08:30:00Z", OTHER), commit("2026-10-02T09:15:00Z"))
-    assert pushed(snap(make, ForgectlPush=docs)) == ("2026-10-02T09:15:00Z", "push_event")
+    assert pushed(snap(make, ForgectlPush=docs)) == ("2026-10-02T09:15:00Z", "commit_date")
 
 
-def test_the_newer_of_event_and_commit_wins(make: Callable[..., Rig]) -> None:
+def test_a_backdated_commit_is_a_commit_date_never_a_push_event(make: Callable[..., Rig]) -> None:
+    docs = push_doc(commit("2025-01-01T00:00:00Z"))
+    assert pushed(snap(make, ForgectlPush=docs)) == ("2025-01-01T00:00:00Z", "commit_date")
+
+
+def test_a_force_push_event_wins_over_an_older_commit(make: Callable[..., Rig]) -> None:
     docs = push_doc(commit("2026-10-02T07:00:00Z"), force("2026-10-02T08:30:00Z"))
     assert pushed(snap(make, ForgectlPush=docs)) == ("2026-10-02T08:30:00Z", "push_event")
 
@@ -1154,6 +1159,64 @@ def test_the_push_search_is_capped(make: Callable[..., Rig]) -> None:
     }
     rig = make(standard(ForgectlPush=first, ForgectlPushPage=endless(forever)))
     assert pushed(rig.snapshot()) == ("2026-10-02T07:30:00Z", "commit_date")
+    assert rig.router.ops.count("ForgectlPushPage") == github_snapshot.MAX_PUSH_PAGES - 1
+
+
+def _older_page(*nodes: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "data": {
+            "node": {
+                "timelineItems": {
+                    "pageInfo": {"hasPreviousPage": False, "startCursor": "x"},
+                    "nodes": list(nodes),
+                }
+            }
+        }
+    }
+
+
+def _with_older_pages(doc: dict[str, Any]) -> dict[str, Any]:
+    doc["data"]["repository"]["pullRequest"]["timelineItems"]["pageInfo"] = {
+        "hasPreviousPage": True,
+        "startCursor": "Y3Vyc29yOjk=",
+    }
+    return doc
+
+
+def test_a_force_push_on_an_older_page_wins_over_a_head_commit_on_the_first(
+    make: Callable[..., Rig],
+) -> None:
+    first = _with_older_pages(push_doc(commit("2026-10-02T09:00:00Z")))
+    page = _older_page(force("2026-10-02T08:00:00Z"))
+    rig = make(standard(ForgectlPush=first, ForgectlPushPage=page))
+    assert pushed(rig.snapshot()) == ("2026-10-02T08:00:00Z", "push_event")
+    assert rig.router.ops.count("ForgectlPushPage") == 1
+
+
+def test_a_head_commit_with_no_force_push_on_older_pages_is_its_commit_date(
+    make: Callable[..., Rig],
+) -> None:
+    first = _with_older_pages(push_doc(commit("2026-10-02T09:00:00Z")))
+    page = _older_page(commit("2026-10-01T09:00:00Z", OTHER), force("2026-10-01T10:00:00Z", OTHER))
+    rig = make(standard(ForgectlPush=first, ForgectlPushPage=page))
+    assert pushed(rig.snapshot()) == ("2026-10-02T09:00:00Z", "commit_date")
+    assert rig.router.ops.count("ForgectlPushPage") == 1
+
+
+def test_a_head_commit_is_kept_when_the_push_search_is_capped(make: Callable[..., Rig]) -> None:
+    first = _with_older_pages(push_doc(commit("2026-10-02T09:00:00Z")))
+    forever = {
+        "data": {
+            "node": {
+                "timelineItems": copy.deepcopy(
+                    first["data"]["repository"]["pullRequest"]["timelineItems"]
+                )
+                | {"nodes": [commit("2026-10-01T09:00:00Z", OTHER)]}
+            }
+        }
+    }
+    rig = make(standard(ForgectlPush=first, ForgectlPushPage=endless(forever)))
+    assert pushed(rig.snapshot()) == ("2026-10-02T09:00:00Z", "commit_date")
     assert rig.router.ops.count("ForgectlPushPage") == github_snapshot.MAX_PUSH_PAGES - 1
 
 
@@ -1774,7 +1837,7 @@ def test_r1_6_a_push_time_within_five_minutes_of_the_reading_is_kept(
     make: Callable[..., Rig],
 ) -> None:
     out = snap(make, ForgectlPush=push_doc(commit("2026-10-02T12:05:05Z")))
-    assert pushed(out) == ("2026-10-02T12:05:05Z", "push_event")
+    assert pushed(out) == ("2026-10-02T12:05:05Z", "commit_date")
 
 
 def test_r1_7_a_malformed_push_page_one_then_a_good_one_recovers(make: Callable[..., Rig]) -> None:
