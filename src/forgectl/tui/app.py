@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any
 
 from rich.cells import cell_len
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
@@ -53,7 +54,15 @@ HELP_KEYS: list[tuple[str, str]] = [
     ),
     ("left", "scroll the list sideways by one column (or h); the PR and note columns stay"),
     ("right", "scroll the list sideways by one column the other way (or l)"),
-    ("s", "switch the order: by repo (default) or needs-attention first"),
+    (
+        "H",
+        "move to the column header: left and right pick a column, enter or space sorts by it "
+        "(again reverses), escape returns to the list; a click on a header cell sorts too",
+    ),
+    (
+        "s",
+        "switch the order: by repo (default) or needs-attention first (also drops a column sort)",
+    ),
     ("a", "filter: authored by me"),
     ("v", "filter: review requested from me"),
     ("f", "filter: CI failing"),
@@ -83,6 +92,7 @@ HELP_LEGEND: list[tuple[str, str]] = [
         "r threads awaiting my reply",
     ),
     ("age", "since the last push / since the last update"),
+    ("▲ ▼", "header: the list is sorted by this column, ascending or descending"),
 ]
 
 HELP_NOTES = [
@@ -171,6 +181,43 @@ class HelpScreen(ModalScreen[None]):
             getattr(self.query_one("#help"), action)(animate=False)
 
 
+class HeaderBar(Static, can_focus=True):
+    """The column header. It takes focus with ``H``: left and right move the column cursor,
+    enter or space sorts by that column, escape gives the focus back to the list. A click on a
+    cell sorts by it. The text is drawn by ``BrowseApp``."""
+
+    BINDINGS = [
+        Binding("left", "cursor(-1)", "left", show=False),
+        Binding("h", "cursor(-1)", "left", show=False),
+        Binding("right", "cursor(1)", "right", show=False),
+        Binding("l", "cursor(1)", "right", show=False),
+        Binding("enter", "sort", "sort", show=False),
+        Binding("space", "sort", "sort", show=False),
+        Binding("escape", "leave", "list", show=False),
+    ]
+
+    def action_cursor(self, direction: int) -> None:
+        self.app.header_move(direction)  # type: ignore[attr-defined]
+
+    def action_sort(self) -> None:
+        self.app.header_sort()  # type: ignore[attr-defined]
+
+    def action_leave(self) -> None:
+        self.app.header_leave()  # type: ignore[attr-defined]
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        offset = event.get_content_offset(self)  # relative to the text, past the padding
+        if offset is not None:
+            self.app.header_click(offset.x)  # type: ignore[attr-defined]
+
+    def on_focus(self) -> None:
+        self.app.call_after_refresh(self.app._paint_header)  # type: ignore[attr-defined]
+
+    def on_blur(self) -> None:
+        self.app.call_after_refresh(self.app._paint_header)  # type: ignore[attr-defined]
+
+
 class RowList(OptionList):
     """The list of rows. Left and right scroll the table sideways while it has focus; up and
     down still move the highlight. The table itself is drawn by ``BrowseApp``."""
@@ -223,6 +270,7 @@ class BrowseApp(App[None]):
         Binding("escape", "close", "close"),
         Binding("o", "open", "open"),
         Binding("s", "sort", "order"),
+        Binding("H", "header_focus", "header"),
         Binding("a", "toggle_filter('authored')", "authored"),
         Binding("v", "toggle_filter('requested')", "requested"),
         Binding("f", "toggle_filter('ci-failing')", "ci failing"),
@@ -272,7 +320,11 @@ class BrowseApp(App[None]):
         self._rows: list[Row] = []
         self._visible: list[Row] = []
         self._states: dict[str, columns.RowState] = {}
-        self._order_mode = columns.SORT_REPO
+        self._order_mode = columns.SORT_REPO  # the preset `s` cycles
+        # The one sort state (a column sort replaces the preset while it is set). Set it with
+        # ``set_sort``. todo(#105): the query line's ORDER BY sets this same tuple.
+        self._sort: columns.SortState = ()
+        self._cursor = "pr"  # the header cursor's column
         self._list_filters: set[str] = set()
         self._shown_prs: list[str] = []  # the PRs in the option list, in order
         self._snap_token = 0  # a newer list load stops the snapshot pool of an older one
@@ -310,7 +362,7 @@ class BrowseApp(App[None]):
         with Horizontal(id="main"):
             with Vertical(id="left"):
                 yield Input(placeholder="filter", id="filter")
-                yield Static(safe.plain(""), id="header", markup=False)
+                yield HeaderBar(safe.plain(""), id="header", markup=False)
                 yield RowList(id="list")
             with VerticalScroll(id="detail"):
                 yield Static(safe.plain(""), id="facts", markup=False)
@@ -497,7 +549,7 @@ class BrowseApp(App[None]):
         kept = self._highlighted_row()
         needle = self._filter.strip().lower()
         try:
-            ordered = columns.order(self._rows, self._states, self._order_mode)
+            ordered = columns.order(self._rows, self._states, self._order_mode, self._sort)
             visible = [
                 r
                 for r in ordered
@@ -507,7 +559,7 @@ class BrowseApp(App[None]):
             now = self.clock()
             parts = [columns.cells(r, self._state(r), now) for r in visible]
             width = min(columns.PR_MAX_WIDTH, max((cell_len(p[0]) for p in parts), default=0))
-            width = max(width, cell_len(columns.COLUMNS[0].header))
+            width = max(width, cell_len(columns.COLUMNS[0].header) + 1)  # room for an arrow
             self._pr_width = width
             self._painted_view = self._view_width()
             self._hoffset = columns.clamp_offset(self._hoffset, width, self._painted_view)
@@ -541,7 +593,7 @@ class BrowseApp(App[None]):
         self._paint_bar()
 
     def _paint_bar(self) -> None:
-        parts = [f"{len(self._visible)}/{len(self._rows)} PRs", f"order: {self._order_mode}"]
+        parts = [f"{len(self._visible)}/{len(self._rows)} PRs", f"order: {self._order_text()}"]
         rates = self._rates.text(self.clock())
         if rates:  # early, so a narrow terminal clips the later parts first
             parts.append(rates)
@@ -580,7 +632,9 @@ class BrowseApp(App[None]):
         rest = [p for p in shown if p not in taken]
         seen = set(shown)
         hidden_rows = [r for r in self._rows if r.pr not in seen]
-        hidden = [r.pr for r in columns.order(hidden_rows, self._states, self._order_mode)]
+        hidden = [
+            r.pr for r in columns.order(hidden_rows, self._states, self._order_mode, self._sort)
+        ]
         return first + rest + hidden
 
     def _start_snapshots(
@@ -694,7 +748,11 @@ class BrowseApp(App[None]):
         moves = columns.matches(row, old, self._list_filters) != columns.matches(
             row, new, self._list_filters
         )
-        if self._order_mode == columns.SORT_ATTENTION:
+        if self._sort:
+            moves = moves or columns.sort_values(self._sort, row, old) != columns.sort_values(
+                self._sort, row, new
+            )
+        elif self._order_mode == columns.SORT_ATTENTION:
             moves = moves or columns.attention_rank(old) != columns.attention_rank(new)
         if moves:
             self._apply_filter()
@@ -725,8 +783,66 @@ class BrowseApp(App[None]):
         return olist.scrollable_content_region.width if olist.size.width > 0 else 10_000
 
     def _paint_header(self) -> None:
-        line = columns.header_line(self._pr_width, self._hoffset, self._view_width())
-        self.query_one("#header", Static).update(safe.plain(line))
+        view = self._view_width()
+        line = columns.header_line(self._pr_width, self._hoffset, view, self._sort)
+        content = safe.plain(line)
+        header = self.query_one("#header", HeaderBar)
+        if header.has_focus:  # the cursor: the highlighted column name
+            span = columns.column_span(self._cursor, self._pr_width, self._hoffset, view)
+            if span is not None:
+                content = content.stylize("reverse", span[0], span[1])
+        header.update(content)
+
+    # -- sorting ---------------------------------------------------------------------------
+
+    def _order_text(self) -> str:
+        return columns.sort_text(self._sort) or self._order_mode
+
+    def set_sort(self, sort: columns.SortState) -> None:
+        """The one way to change the sort (the header, and later the query's ORDER BY): rebuild
+        the list, keep the highlighted PR, and name the order in the status."""
+        self._sort = sort
+        self._apply_filter()
+        self._status(f"order: {self._order_text()}")
+
+    def _sortable_cursor(self) -> str:
+        return self._cursor if self._cursor in columns.SORTABLE else columns.SORTABLE[0]
+
+    def action_header_focus(self) -> None:
+        self._cursor = self._sort[0].column if self._sort else self._sortable_cursor()
+        self._hoffset = columns.reveal_offset(
+            self._cursor, self._pr_width, self._hoffset, self._view_width()
+        )
+        self.query_one("#header", HeaderBar).focus()
+        self._redraw()
+
+    def header_move(self, direction: int) -> None:
+        ids = columns.SORTABLE
+        index = ids.index(self._sortable_cursor()) + direction
+        self._cursor = ids[max(0, min(index, len(ids) - 1))]
+        self._hoffset = columns.reveal_offset(
+            self._cursor, self._pr_width, self._hoffset, self._view_width()
+        )
+        self._redraw()
+
+    def header_sort(self) -> None:
+        self.set_sort(columns.toggle_sort(self._sort, self._sortable_cursor()))
+
+    def header_leave(self) -> None:
+        self.query_one("#list", OptionList).focus()
+        self._paint_header()
+
+    def header_click(self, x: int) -> None:
+        """A click at cell ``x`` of the header text (0 is its left edge)."""
+        column = columns.column_at(x, self._pr_width, self._hoffset, self._view_width())
+        self.query_one("#list", OptionList).focus()  # the keyboard stays with the list
+        if column is None:
+            return
+        if column not in columns.SORTABLE:
+            self._status(f"{column} cannot be sorted")
+            return
+        self._cursor = column
+        self.set_sort(columns.toggle_sort(self._sort, column))
 
     def _redraw(self) -> None:
         """Draw the header and the rows again for the current offset and view width, from the
@@ -878,10 +994,13 @@ class BrowseApp(App[None]):
         self.exit()
 
     def action_sort(self) -> None:
-        modes = columns.SORT_MODES
-        self._order_mode = modes[(modes.index(self._order_mode) + 1) % len(modes)]
+        if self._sort:  # back to the preset a column sort replaced, without advancing
+            self._sort = ()
+        else:
+            modes = columns.SORT_MODES
+            self._order_mode = modes[(modes.index(self._order_mode) + 1) % len(modes)]
         self._apply_filter()
-        self._status(f"order: {self._order_mode}")
+        self._status(f"order: {self._order_text()}")
 
     def action_toggle_filter(self, name: str) -> None:
         self._list_filters ^= {name}

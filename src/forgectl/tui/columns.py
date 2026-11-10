@@ -231,14 +231,14 @@ class Column:
 
 
 # The one place that says what the columns are, in what order and how wide. Sort keys and click
-# targets (todo(#104)) and colors (todo(#105)) attach here.
+# targets and colors (todo(#102)) attach here.
 COLUMNS = (
     Column("pr", "PR", 0, None),
     Column("note", "note", 10, 12),  # [refreshing], [stale: code], [changed]; pinned
     Column("badge", "badge", 1, 26),
-    Column("ci", "CI", 2, 2),
+    Column("ci", "CI", 2, 3),  # a glyph; wide enough for the sort arrow beside the header
     Column("approvals", "appr", 3, 5),
-    Column("review", "rev", 4, 3),
+    Column("review", "rev", 4, 4),
     Column("comments", "comments", 5, 20),
     Column("age", "age", 6, 9),
     Column("title", "title", 7, 40),
@@ -407,12 +407,184 @@ def row_line(
     return view(cut_row(parts, pr_width), pr_width, offset, view_width)
 
 
-def header_line(pr_width: int, offset: int = 0, view_width: int | None = None) -> str:
-    """The column names, laid out exactly like ``row_line``."""
-    return view(_cut([c.header for c in COLUMNS], pr_width), pr_width, offset, view_width)
+def header_line(
+    pr_width: int, offset: int = 0, view_width: int | None = None, sort: SortState = ()
+) -> str:
+    """The column names, laid out exactly like ``row_line``. A sorted column's name is followed
+    by an arrow for its direction. Constant text only: no forge text reaches the header."""
+    # todo(#105): with several keys, show each key's position beside its arrow
+    arrows = {k.column: DESC_GLYPH if k.descending else ASC_GLYPH for k in sort}
+    texts = [c.header + arrows.get(c.id, "") for c in COLUMNS]
+    cut = [fit(t, w) for t, w in zip(texts, _widths(pr_width), strict=True)]
+    return view(
+        (SEPARATOR.join(cut[:PINNED]), SEPARATOR.join(cut[PINNED:])), pr_width, offset, view_width
+    )
+
+
+def column_span(
+    column_id: str, pr_width: int, offset: int, view_width: int
+) -> tuple[int, int] | None:
+    """The cells ``[start, end)`` of the list area a column shows at, clipped to the view, or
+    None when none of it is in view. The inverse of ``column_at``."""
+    rows = layout(pr_width)
+    index = next((i for i, (c, _, _) in enumerate(rows) if c.id == column_id), None)
+    if index is None:
+        return None
+    _, start, width = rows[index]
+    low = 0
+    if index >= PINNED:
+        low = pinned_width(pr_width) + len(SEPARATOR)
+        shift = low - rows[PINNED][1] - clamp_offset(offset, pr_width, view_width)
+        start += shift
+    first, last = max(start, low), min(start + width, view_width)
+    return (first, last) if first < last else None
+
+
+def reveal_offset(column_id: str, pr_width: int, offset: int, view_width: int) -> int:
+    """The offset that brings a scrolling column into view (its left edge when it is wider than
+    the room); a pinned column leaves the offset as it is."""
+    rows = layout(pr_width)
+    index = next((i for i, (c, _, _) in enumerate(rows) if c.id == column_id), None)
+    current = clamp_offset(offset, pr_width, view_width)
+    if index is None or index < PINNED:
+        return current
+    _, start, width = rows[index]
+    left = start - rows[PINNED][1]
+    room = _scroll_room(pr_width, view_width)
+    if left < current or width > room:
+        return clamp_offset(left, pr_width, view_width)
+    if left + width > current + room:
+        return clamp_offset(left + width - room, pr_width, view_width)
+    return current
 
 
 # -- ordering ----------------------------------------------------------------------------------
+
+ASC_GLYPH = "▲"
+DESC_GLYPH = "▼"
+
+
+@dataclass(frozen=True)
+class SortKey:
+    column: str  # a ``Column.id``
+    descending: bool = False
+
+
+# The one sort state: an ordered list of keys, most significant first; empty means the preset
+# order. The header (click and cursor) sets it, and ``order`` applies it, in one place.
+# todo(#105): the ORDER BY of the query line reads and writes this same tuple, with several keys.
+SortState = tuple[SortKey, ...]
+
+SORTABLE = tuple(c.id for c in COLUMNS if c.id != "note")  # the note is a status, not data
+
+
+def toggle_sort(sort: SortState, column: str) -> SortState:
+    """Activate a column: the same single column flips its direction, any other column becomes
+    the only key, ascending. A column that cannot be sorted leaves the sort as it is."""
+    if column not in SORTABLE:
+        return sort
+    if len(sort) == 1 and sort[0].column == column:
+        return (SortKey(column, not sort[0].descending),)
+    # todo(#105): a multi-key sort is built in the query form, not by header activation
+    return (SortKey(column),)
+
+
+def sort_text(sort: SortState) -> str:
+    return ", ".join(f"{k.column} {'desc' if k.descending else 'asc'}" for k in sort)
+
+
+CI_RANK = {"failing": 0, "pending": 1, "passing": 2, "none": 3}
+REVIEW_RANK = {"changes_requested": 0, "review_required": 1, "approved": 2, "none": 3}
+
+
+def _instant(value: Any) -> float | None:
+    when = parse_time(value)
+    return None if when is None else when.timestamp()
+
+
+def _number(row: Row) -> int:
+    n = row.item.get("number")
+    if isinstance(n, int) and not isinstance(n, bool):
+        return n
+    digits = row.pr.rsplit("#", 1)[-1]
+    return int(digits) if digits.isdigit() else 0
+
+
+def _value(column: str, row: Row, state: RowState) -> Any:
+    """The parsed value a column sorts by, or None when it is unknown (no snapshot yet, or the
+    snapshot did not report it). Never the displayed text."""
+    item = row.item
+    s = state.summary if state.status == LOADED else None
+    if column == "pr":
+        return (repo_of(row).casefold(), _number(row))
+    if column == "title":
+        return safe.line(item.get("title")).casefold()
+    if column == "author":
+        return _login(item.get("author")).casefold()
+    if column == "roles":
+        return "+".join(sorted(row.roles)).casefold()
+    if column == "badge":
+        return badge_cell(item, s).casefold()
+    if column == "age":
+        # the update time as the cell shows it (the snapshot's is fresher), then the push
+        updated = _instant(s.updated_at) if s else None
+        if updated is None:
+            updated = _instant(item.get("updated_at"))
+        if updated is None:
+            return None
+        pushed = _instant(s.pushed_at) if s else None
+        # youngest first when ascending: the key is minus the instant
+        return (-updated, float("inf") if pushed is None else -pushed)
+    if s is None:
+        return None
+    if column == "ci":
+        return CI_RANK.get(s.ci_state or "")
+    if column == "review":
+        return REVIEW_RANK.get(s.review_decision or "")
+    if column == "approvals":
+        return s.approvals
+    if column == "comments":
+        parts = (s.unresolved_threads, s.others_since_push, s.awaiting_my_reply, s.comments_total)
+        if all(p is None for p in parts):
+            return None
+        return tuple(-1 if p is None else p for p in parts)  # a count not reported is below 0
+    return None
+
+
+def sort_values(sort: SortState, row: Row, state: RowState) -> tuple[Any, ...]:
+    """The raw value of each key for a row; two equal tuples sort the row to the same place."""
+    return tuple(_value(k.column, row, state) for k in sort)
+
+
+class _Reversed:
+    """Wraps a value so that it compares the other way round (a descending key)."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+    def __lt__(self, other: _Reversed) -> bool:
+        return bool(other.value < self.value)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _Reversed) and self.value == other.value
+
+    def __hash__(self) -> int:
+        return hash(self.value)
+
+
+def sort_key(sort: SortState, row: Row, state: RowState) -> tuple[Any, ...]:
+    """The key of a row under ``sort``. An unknown value is after every known one whatever the
+    direction, and rows that tie end on the PR (repo, then number as an integer)."""
+    key: list[Any] = []
+    for k, value in zip(sort, sort_values(sort, row, state), strict=True):
+        if value is None:
+            key.append((1, 0))
+        else:
+            key.append((0, _Reversed(value) if k.descending else value))
+    key.append((repo_of(row).casefold(), _number(row), row.pr))
+    return tuple(key)
 
 
 def attention_rank(state: RowState) -> int:
@@ -443,10 +615,15 @@ def _newest_first(row: Row) -> tuple[int, float]:
     return (1, 0.0) if when is None else (0, -when.timestamp())
 
 
-def order(rows: list[Row], states: dict[str, RowState], mode: str) -> list[Row]:
-    """``repo``: grouped by repo, newest update first within a repo. ``attention``: needs
-    attention first, then by repo and newest update. Ties end on ``pr``. Stable sorts. Updates
+def order(
+    rows: list[Row], states: dict[str, RowState], mode: str, sort: SortState = ()
+) -> list[Row]:
+    """A column ``sort``, when there is one, replaces the preset ``mode``. Otherwise ``repo``:
+    grouped by repo, newest update first within a repo. ``attention``: needs attention first,
+    then by repo and newest update. Ties end on ``pr``. Stable sorts. Updates
     compare as instants; a null or unparsable time sorts after every real one."""
+    if sort:
+        return sorted(rows, key=lambda r: sort_key(sort, r, states.get(r.pr) or RowState()))
     ordered = sorted(rows, key=lambda r: r.pr)
     ordered.sort(key=_newest_first)
     ordered.sort(key=repo_of)
