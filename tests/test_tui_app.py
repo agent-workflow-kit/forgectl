@@ -8,6 +8,7 @@ import re
 import stat
 import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -596,7 +597,7 @@ def test_repeated_enter_and_r_on_the_same_pr_load_it_once() -> None:
         await wait_until(pilot, lambda: ("snapshot", PR1) in source.calls)
         await pilot.press("enter", "r", "enter", "r")
         await pilot.pause()
-        assert "already loading" in status_of(app)
+        assert "already running" in status_of(app)
         source.gate.set()
         await settle(app, pilot)
 
@@ -823,19 +824,208 @@ def test_r_refreshes_the_pr_in_the_visible_pane_not_the_highlighted_row() -> Non
     assert [c for c in source.calls if c[0] == "snapshot"] == [("snapshot", PR1)] * 2
 
 
-def test_r_after_escape_opens_the_highlighted_row_not_the_hidden_pr() -> None:
+def test_r_with_the_pane_closed_refreshes_only_the_row() -> None:
     source = basic_source()
+    seen: dict[str, Any] = {}
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down")
+        await settle(app, pilot)
+        olist = app.query_one("#list", OptionList)
+        seen["highlighted"] = olist.highlighted
+        seen["mark"] = len(source.calls)
+        await pilot.press("r")
+        await settle(app, pilot)
+        seen["after"] = list(source.calls[seen["mark"] :])
+        seen["shown"] = app.query_one("#detail").display
+        seen["focus"] = app.focused.id if app.focused else None
+        seen["highlighted_after"] = olist.highlighted
+
+    drive(source, script, concurrency=2)
+    assert len(seen["after"]) == 1
+    assert seen["after"][0][0] == "snapshot"
+    assert seen["shown"] is False
+    assert seen["focus"] == "list"
+    assert seen["highlighted_after"] == seen["highlighted"]
+
+
+def test_r_with_the_pane_open_reloads_the_row_and_the_detail() -> None:
+    source = basic_source()
+    seen: dict[str, Any] = {}
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down", "enter")
+        await settle(app, pilot)
+        seen["mark"] = len(source.calls)
+        await pilot.press("r")
+        await settle(app, pilot)
+        seen["after"] = list(source.calls[seen["mark"] :])
+        seen["shown"] = app.query_one("#detail").display
+
+    drive(source, script, concurrency=2)
+    assert seen["after"] == [("snapshot", PR1), ("diff", PR1)]
+    assert seen["shown"] is True
+
+
+def test_r_after_escape_refreshes_the_highlighted_row_and_keeps_the_pane_closed() -> None:
+    source = basic_source()
+    seen: dict[str, Any] = {}
 
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         await pilot.press("down", "enter")  # PR1
         await settle(app, pilot)
-        await pilot.press("escape", "up", "r")  # pane hidden, PR2 highlighted
+        await pilot.press("escape", "up")  # pane hidden, PR2 highlighted
+        seen["mark"] = len(source.calls)
+        await pilot.press("r")
         await settle(app, pilot)
-        assert app.query_one("#detail").display is True
-        assert "Theirs" in content_of(app, "#facts").plain
+        seen["after"] = list(source.calls[seen["mark"] :])
+        seen["shown"] = app.query_one("#detail").display
 
-    drive(source, script)
-    assert [c for c in source.calls if c[0] == "snapshot"] == [("snapshot", PR1), ("snapshot", PR2)]
+    drive(source, script, concurrency=2)
+    assert seen["after"] == [("snapshot", PR2)]
+    assert seen["shown"] is False
+
+
+def test_r_with_an_empty_list_does_nothing_and_says_so() -> None:
+    source = FakeSource()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert "nothing to refresh" in status_of(app)
+        assert app.query_one("#detail").display is False
+
+    drive(source, script, concurrency=2)
+    assert [c[0] for c in source.calls] == ["prs"] * 2
+
+
+class _FailingRefresh(FakeSource):
+    """Snapshots answer until ``fail`` is set, then fail."""
+
+    fail = False
+
+    def snapshot(self, pr: str) -> dict[str, Any]:
+        if self.fail:
+            self.calls.append(("snapshot", pr))
+            raise ForgectlError("upstream_error", "down")
+        return super().snapshot(pr)
+
+
+def test_a_failed_row_refresh_marks_the_row_stale_and_does_not_open_the_pane() -> None:
+    base = basic_source()
+    source = _FailingRefresh(
+        authored=base.authored,
+        requested=base.requested,
+        snapshots=base.snapshots,
+        diffs=base.diffs,
+    )
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down")
+        await settle(app, pilot)
+        source.fail = True
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert any("[stale: upstream_error]" in p.plain for p in list_prompts(app))
+        assert app.query_one("#detail").display is False
+        assert app.focused is not None and app.focused.id == "list"
+
+    drive(source, script, concurrency=2)
+
+
+_SENTINEL_TIME = datetime(2000, 1, 2, 3, 4, 5)
+
+
+def test_row_only_r_does_not_move_the_refreshed_time() -> None:
+    source = basic_source()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down")
+        await settle(app, pilot)
+        app._last_refresh = _SENTINEL_TIME
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert app._last_refresh == _SENTINEL_TIME
+
+    drive(source, script, concurrency=2)
+
+
+def test_a_failing_row_only_r_does_not_move_the_refreshed_time() -> None:
+    base = basic_source()
+    source = _FailingRefresh(
+        authored=base.authored,
+        requested=base.requested,
+        snapshots=base.snapshots,
+        diffs=base.diffs,
+    )
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down")
+        await settle(app, pilot)
+        source.fail = True
+        app._last_refresh = _SENTINEL_TIME
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert app._last_refresh == _SENTINEL_TIME
+
+    drive(source, script, concurrency=2)
+
+
+def test_r_says_so_when_snapshots_are_off() -> None:
+    source = basic_source()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down", "r")
+        await settle(app, pilot)
+        assert "not refreshed" in status_of(app)
+
+    drive(source, script, concurrency=0)
+
+
+def test_r_says_so_when_the_row_is_not_listed() -> None:
+    source = basic_source()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down")
+        await settle(app, pilot)
+        app._unlisted = {PR1, PR2}
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert "not refreshed" in status_of(app)
+
+    drive(source, script, concurrency=2)
+
+
+def test_r_with_the_pane_closed_while_its_detail_loads_reads_the_pr_once() -> None:
+    source = gated_basic("snapshot")
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down", "enter")
+        await wait_until(pilot, lambda: ("snapshot", PR1) in source.calls)
+        await pilot.press("escape", "r")
+        await pilot.pause()
+        assert "already running" in status_of(app)
+        source.gate.set()
+        await settle(app, pilot)
+
+    drive(source, script, concurrency=0)
+    assert source.calls.count(("snapshot", PR1)) == 1
+
+
+def test_r_during_a_running_refresh_does_not_start_another_read() -> None:
+    source = gated_basic("snapshot")
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await wait_until(pilot, lambda: any(c[0] == "snapshot" for c in source.calls))
+        await pilot.press("r")
+        await pilot.pause()
+        assert "already running" in status_of(app)
+        source.gate.set()
+        await settle(app, pilot)
+
+    drive(source, script, wait=False, concurrency=1)
+    snaps = [c for c in source.calls if c[0] == "snapshot"]
+    assert sorted(snaps) == [("snapshot", PR1), ("snapshot", PR2)]
 
 
 def test_R_without_a_pane_reloads_only_the_lists() -> None:
