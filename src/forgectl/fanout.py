@@ -167,13 +167,11 @@ MAX_LIMIT = 1000  # `--limit` and both backends' search cap
 
 def list_visible(backend: Any, query: m.PrQuery, hidden: tuple[str, ...]) -> m.PrPage:
     """``backend.list_prs`` without the PRs of ``config.hidden_repos``, which are dropped before
-    the limit counts. The backend is given a skip predicate, so a hidden PR costs no further
-    request; the filter here is a safety net. The first ask is ``limit + 1`` (at most
-    ``MAX_LIMIT``), so a hidden item past the limit cannot make the list incomplete. If hidden
-    items were still dropped and left no more than ``limit`` kept ones on an incomplete page,
-    the backend is asked once more for twice as many (at most ``MAX_LIMIT``); the backend's own
-    ``complete`` then stands, and hiding alone never makes it false. A query for one hidden repo
-    is an empty complete page without a call."""
+    the limit counts. The backend is given a skip predicate and applies it while paging, so a
+    hidden PR costs no further request and never takes a place among the ``limit + 1`` visible
+    items it fills; the filter here is a safety net. The ask is ``limit + 1`` (at most
+    ``MAX_LIMIT``), so a hidden item past the limit cannot make the list incomplete, and there is
+    never a second ask. A query for one hidden repo is an empty complete page without a call."""
     if not hidden:
         return backend.list_prs(query)
     if query.repo is not None and matches_any(query.repo.id, hidden):
@@ -189,14 +187,6 @@ def list_visible(backend: Any, query: m.PrQuery, hidden: tuple[str, ...]) -> m.P
     ask = min(query.limit + 1, MAX_LIMIT)
     page = backend.list_prs(replace(query, limit=ask), skip=skip)
     kept = tuple(i for i in page.items if not skip(i.repo))
-    if (
-        len(kept) != len(page.items)
-        and not page.complete
-        and len(kept) <= query.limit
-        and ask < MAX_LIMIT
-    ):
-        page = backend.list_prs(replace(query, limit=min(ask * 2, MAX_LIMIT)), skip=skip)
-        kept = tuple(i for i in page.items if not skip(i.repo))
     # more kept items than the limit: the caller's merge cuts them, so the list is not whole
     return m.PrPage(
         items=kept,

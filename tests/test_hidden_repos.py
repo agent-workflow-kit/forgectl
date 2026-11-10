@@ -32,6 +32,7 @@ from .test_github_show import TOKEN as SHOW_TOKEN
 from .test_github_show import recording as show_recording
 from .test_gitlab_lists import mrs as gl_mrs
 from .test_gitlab_lists_cli import config as gl_config
+from .test_gitlab_lists_cli import items_for
 from .test_gitlab_lists_cli import route as gl_route
 from .test_gitlab_lists_cli import script as gl_script
 from .test_lists_cli import TOKEN_A, prs
@@ -121,8 +122,9 @@ def item(repo: str, n: int = 1) -> Any:
 
 
 class Stub:
-    """A backend over a fixed newest-first list: the first ``limit`` items, complete when none
-    were cut (the contract of ``Backend.list_prs``)."""
+    """A backend over a fixed newest-first list: the first ``limit`` items that ``skip`` does not
+    accept, complete when none were cut (the contract of ``Backend.list_prs``). With ``complete``
+    set it ignores ``skip`` and the page size, as a faulty backend would."""
 
     def __init__(self, items: list[Any], *, complete: bool | None = None) -> None:
         self.items = items
@@ -135,8 +137,9 @@ class Stub:
         self.skips.append(skip)
         if self.complete is not None:  # a host that ignores the page size
             return m.PrPage(items=tuple(self.items), complete=self.complete, rate_limit=RATE)
-        cut = len(self.items) > query.limit
-        return m.PrPage(items=tuple(self.items[: query.limit]), complete=not cut, rate_limit=RATE)
+        wanted = [i for i in self.items if skip is None or not skip(i.repo)]
+        cut = len(wanted) > query.limit
+        return m.PrPage(items=tuple(wanted[: query.limit]), complete=not cut, rate_limit=RATE)
 
 
 def shown(repos: list[str], hidden: tuple[str, ...]) -> list[str]:
@@ -190,14 +193,7 @@ def test_hidden_items_do_not_consume_the_limit() -> None:
     assert [i.repo for i in page.items[:100]] == ["github.com/u/new"] * 100
     assert len(page.items) > 100  # the caller's merge cuts to the limit and says incomplete
     assert page.complete is False
-    assert stub.asked == [101, 202]  # limit + 1, then one widening
-
-
-def test_a_backlog_the_one_widening_cannot_clear_leaves_the_backend_answer() -> None:
-    stub = Stub(many(150, 300))
-    page = list_visible(stub, m.PrQuery(limit=100), ("github.com/u/old",))
-    assert stub.asked == [101, 202] and len(page.items) == 52
-    assert page.complete is False  # the backend's own: it cut the list
+    assert stub.asked == [101]  # limit + 1, once: the backend does the skipping
 
 
 def test_all_hidden_and_nothing_more_is_complete_and_empty() -> None:
@@ -222,13 +218,6 @@ def test_nothing_hidden_in_the_page_asks_once() -> None:
     assert stub.asked == [101]
 
 
-def test_the_widening_stops_at_the_search_cap() -> None:
-    stub = Stub(many(2000, 5))
-    page = list_visible(stub, m.PrQuery(limit=600), ("github.com/u/old",))
-    assert stub.asked == [601, 1000]
-    assert page.items == () and page.complete is False  # past the cap: honest, not complete
-
-
 def test_a_hidden_item_past_the_limit_does_not_make_the_list_incomplete() -> None:
     stub = Stub([item("github.com/u/new", 1), item("github.com/u/old", 2)])
     page = list_visible(stub, m.PrQuery(limit=1), ("github.com/u/old",))
@@ -249,18 +238,17 @@ def test_the_first_ask_is_capped_at_the_maximum() -> None:
     assert stub.asked == [1000]
 
 
-@pytest.mark.parametrize("complete", [False, True])
-def test_a_host_that_ignores_the_page_size_is_asked_at_most_twice(complete: bool) -> None:
-    stub = Stub(many(500, 3), complete=complete)  # always the same short, hidden-heavy answer
-    page = list_visible(stub, m.PrQuery(limit=100), ("github.com/u/old",))
-    assert len(stub.asked) <= 2
-    assert page.complete is complete  # the backend's own answer, never invented
-
-
-def test_an_unrelated_incompleteness_is_asked_twice_at_most_and_kept_as_is() -> None:
-    stub = Stub(many(0, 5), complete=False)  # nothing hidden: no widening, real reason stays
+def test_an_unrelated_incompleteness_is_asked_once_and_kept_as_is() -> None:
+    stub = Stub(many(0, 5), complete=False)  # nothing hidden: the real reason stays
     page = list_visible(stub, m.PrQuery(limit=100), ("github.com/u/old",))
     assert stub.asked == [101] and page.complete is False
+
+
+def test_the_safety_net_drops_a_hidden_item_the_backend_let_through() -> None:
+    stub = Stub(many(500, 3), complete=True)  # a backend that ignored `skip`
+    page = list_visible(stub, m.PrQuery(limit=100), ("github.com/u/old",))
+    assert stub.asked == [101]  # never asked again
+    assert len(page.items) == 3 and page.complete is True
 
 
 def test_the_backend_is_given_a_skip_for_hidden_repos() -> None:
@@ -379,7 +367,7 @@ def test_hidden_items_do_not_consume_the_limit_on_the_cli(
     out = json.loads(done.stdout)
     assert [i["number"] for i in out["items"]] == [12]
     assert out["complete"] is True
-    assert len(fake_forges.calls("gh")) == 1
+    assert len(fake_forges.calls("gh")) == 1  # hidden items cost no second call
 
 
 def test_a_named_pr_is_unaffected_by_hiding(
@@ -434,6 +422,27 @@ def test_gitlab_prs_never_lists_a_hidden_repo(
     out = json.loads(done.stdout)
     schemas.validate_cli_output("prs", out)
     assert out["items"] == [] and out["complete"] is True
+
+
+def test_gitlab_hidden_items_cost_one_host_call(
+    run_forgectl: Run, fake_forges: FakeForges, tmp_path: Path
+) -> None:
+    gl_script(fake_forges)
+    everything = items_for("gitlab.com", "")
+    mrs = [i for i in everything if i["author"]["username"] == "user-1" and i["state"] == "opened"]
+    mrs[0]["web_url"] = mrs[0]["web_url"].replace("user-9/proj", "user-8/old")
+    gl_route(fake_forges, "merge_requests", mrs)
+    cfg = gl_config(tmp_path, "hidden_repos: ['gitlab.com/user-8/*']\n")
+    done = run_forgectl(
+        ["prs", "--json", "--config", str(cfg), "--host", "gitlab.com", "--author", "user-1"],
+        env={"GL_TOKEN": TOKEN_A, "GH_TOKEN": TOKEN_A},
+    )
+    assert done.returncode == 0, done.stderr
+    out = json.loads(done.stdout)
+    assert out["complete"] is True
+    assert all(i["repo"] != "gitlab.com/user-8/old" for i in out["items"]) and out["items"]
+    listed = [c for c in fake_forges.calls("glab") if c.argv[-1].startswith("merge_requests?")]
+    assert len(listed) == 1
 
 
 def test_gitlab_nested_group_is_matched_by_a_group_glob(tmp_path: Path) -> None:
