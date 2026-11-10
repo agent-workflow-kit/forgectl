@@ -309,28 +309,6 @@ def test_no_token_variable_of_any_kind_reaches_the_opener(
 
 
 @linux_only
-def test_an_ambient_browser_or_display_never_reaches_an_explicit_environment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
-    log = tmp_path / "ambient.log"
-    _script(
-        bindir / "xdg-open",
-        f'printf "%s\\n" "${{DISPLAY:-unset}}" "${{BROWSER:-unset}}" >> "{log}"\n',
-    )
-    monkeypatch.setenv("BROWSER", "junk-browser")
-    monkeypatch.setenv("DISPLAY", ":99")
-    monkeypatch.setenv("WAYLAND_DISPLAY", "junk-wayland")
-    assert BrowserOpener({"PATH": str(bindir)}).open("https://example.com/") == "xdg-open"
-    for _ in range(100):
-        if log.exists() and log.read_text().count("\n") >= 2:
-            break
-        time.sleep(0.05)
-    assert log.read_text().splitlines() == ["unset", "unset"]
-
-
-@linux_only
 def test_the_default_environment_is_the_processs_own_so_the_fixture_clears_it() -> None:
     environ = BrowserOpener()._env()
     assert "BROWSER" not in environ

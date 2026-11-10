@@ -6,7 +6,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -31,7 +31,7 @@ def fake_modules(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     monkeypatch.setattr(registry, "HANDLERS", {})
     monkeypatch.setattr(registry, "_loaded", False)
     monkeypatch.setattr(registry, "HANDLER_MODULES", MODULES)
-    monkeypatch.setattr(registry.importlib, "import_module", fake_import)
+    monkeypatch.setattr(registry, "importlib", SimpleNamespace(import_module=fake_import))
     return imported
 
 
@@ -67,7 +67,7 @@ def test_a_failed_import_does_not_poison_later_calls(
             raise ImportError("cannot import fake.two")
         return good(name)
 
-    monkeypatch.setattr(registry.importlib, "import_module", flaky)
+    monkeypatch.setattr(registry, "importlib", SimpleNamespace(import_module=flaky))
     with pytest.raises(ImportError, match="fake.two"):
         registry.load_handlers()
     with pytest.raises(ImportError, match="fake.two"):  # retried, not silently half-loaded
