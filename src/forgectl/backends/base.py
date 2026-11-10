@@ -7,8 +7,9 @@ never truncate silently: a list a host cut off sets its `complete` flag to false
 Errors are raised as `forgectl.errors` types; the protocol does not catch them. Retries, the
 deadline, and merging results across hosts belong to `reads.py`, not to an adapter.
 
-The protocol covers reads only (Stage 1); the writes (`merge`, posts, `resolve`) are added in a
-later stage.
+The protocol covers every read and, so far, the one write `merge` (Stage 3); the posts and
+`resolve` are added with their issues. A write is never retried: it reaches the host once, and a
+caller decides from a later read what happened.
 """
 
 from __future__ import annotations
@@ -35,6 +36,10 @@ READ_METHODS: tuple[str, ...] = (
 )
 
 
+#: Every write an adapter provides (`merge` so far); the protocol test keeps this too.
+WRITE_METHODS: tuple[str, ...] = ("merge",)
+
+
 def not_implemented(command: str) -> ForgectlError:
     """What an adapter raises for a read its own issue has not added yet (an `internal` error,
     never a traceback). Each such method carries a `TODO(#N)` naming the issue that fills it."""
@@ -50,10 +55,11 @@ class Backend(Protocol):
         """`prs` on this backend's hosts."""
         ...
 
-    def get_pr(self, ref: PrRef) -> m.PrRead:
+    def get_pr(self, ref: PrRef, readiness: m.Readiness | None = None) -> m.PrRead:
         """`show`: the PR object, with `blocked_by` computed by `model.compute_blocked_by`, and
         the `CI` from the same read, so `merge` and `pre-merge` never re-read CI at a possibly
-        different head."""
+        different head. ``readiness`` says how long a value the host is still computing is read
+        again (default: `show`'s; `merge` passes its own)."""
         ...
 
     def snapshot(self, ref: PrRef) -> m.Snapshot:
@@ -90,4 +96,11 @@ class Backend(Protocol):
 
     def whoami(self, host: str) -> m.Identity:
         """The authenticated account on `host`."""
+        ...
+
+    def merge(self, pr: m.PR, *, sha: str, method: str | None) -> m.MergeAnswer:
+        """The merge call for ``pr`` (as just read, so the write goes to its canonical path),
+        carrying ``sha`` for the host to enforce and ``method`` where the host takes one. Never
+        retried. A 2xx is ``accepted``, which proves nothing; the caller verifies by reading.
+        A failure that may have landed is `outcome_unknown`, raised as such."""
         ...

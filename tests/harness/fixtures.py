@@ -136,6 +136,16 @@ def reap_new_children(before: set[int]) -> list[int]:
 
 
 @pytest.fixture(autouse=True)
+def no_leaked_write_flag() -> Iterator[None]:
+    """The process-level "a write was attempted" flag never leaks between tests."""
+    from forgectl.errors import reset_write_attempted
+
+    reset_write_attempted()
+    yield
+    reset_write_attempted()
+
+
+@pytest.fixture(autouse=True)
 def no_leaked_children() -> Iterator[None]:
     """Fail a test that leaves a child of this process behind (torn down after ``procs``)."""
     before = direct_children()
@@ -246,7 +256,13 @@ def isolation(
     for name in ("posix_spawn", "posix_spawnp", "execve"):
         if hasattr(os, name):
             monkeypatch.setattr(os, name, wrap_spawn(getattr(os, name)))
-    yield iso
+    # Files tests create by hand must not depend on the caller's umask: the audit and log files
+    # are refused when group- or world-writable.
+    previous_umask = os.umask(0o077)
+    try:
+        yield iso
+    finally:
+        os.umask(previous_umask)
 
 
 @pytest.fixture
