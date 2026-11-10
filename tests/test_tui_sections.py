@@ -7,7 +7,7 @@ from textual.pilot import Pilot
 from textual.widgets import Input, OptionList, Static
 
 from forgectl.tui import render, sections
-from forgectl.tui.app import HELP, BrowseApp
+from forgectl.tui.app import HELP_KEYS, BrowseApp
 
 from .test_tui_app import (
     PR1,
@@ -267,7 +267,8 @@ def test_a_refresh_repaints_an_open_section_with_the_new_data() -> None:
 
 
 def test_the_help_lists_the_number_keys() -> None:
-    assert "1-6" in HELP and "toggle a detail section" in HELP
+    rows = dict(HELP_KEYS)
+    assert "toggle a detail section" in rows["1-6"]
 
 
 def test_the_pane_keeps_its_scroll_position_when_a_section_below_collapses() -> None:
