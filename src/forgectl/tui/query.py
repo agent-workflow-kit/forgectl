@@ -675,9 +675,9 @@ def _empty_text(value: Any) -> bool:
 def _leaf(c: Cond, get: Getter) -> bool | None:
     kind = FIELDS[c.field]
     got = get(c.field)
-    # no value is a missing one; for text an empty string is the same (a loaded snapshot with no
-    # blocker has known-empty text, which is not unknown)
-    empty = got is None or (kind == TEXT and _empty_text(got))
+    # no value is a missing one; for blocker an empty string is the same (a loaded snapshot with
+    # no blocker has known-empty text, which is not unknown); other text keeps its empty string
+    empty = got is None or (c.field == "blocker" and _empty_text(got))
     if c.op == IS_NULL:
         return empty
     if c.op == NOT_NULL:
@@ -834,6 +834,8 @@ def toggle_term(q: Query, term: Cond) -> Query:
     if isinstance(where, And):
         rest = tuple(c for c in where.children if not (isinstance(c, Cond) and _same(c, term)))
         if len(rest) != len(where.children):
+            if not rest:
+                return Query(None, q.order)
             return Query(rest[0] if len(rest) == 1 else And(rest), q.order)
     if where is None:
         return Query(term, q.order)

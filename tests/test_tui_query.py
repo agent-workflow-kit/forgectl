@@ -729,6 +729,17 @@ def test_a_loaded_snapshot_with_no_blocker_is_known_empty() -> None:
     assert _eval("blocker IS NULL", blocked) is False
 
 
+def test_an_empty_title_is_still_a_value_for_is_null() -> None:
+    row = Row({"pr": f"{GH}#1", "title": "", "author": {"login": "x"}})
+    got = filtering.evaluate(ok("title IS NULL").where, row, _state(None), NOW)
+    assert got is False
+
+
+def test_toggling_a_duplicated_term_off_leaves_no_filter() -> None:
+    q = ok("ci = failing AND ci = failing")
+    assert query.toggle_term(q, query.PRESETS["ci-failing"]).where is None
+
+
 def test_an_unloaded_row_has_an_unknown_blocker_and_is_the_only_one_counted() -> None:
     loading = columns.RowState()
     assert _eval("blocker != x", loading) is None

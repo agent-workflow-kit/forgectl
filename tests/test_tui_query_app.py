@@ -703,7 +703,8 @@ def test_a_quick_key_that_would_not_fit_leaves_the_query_as_it_was() -> None:
 def test_the_panel_controls_stay_on_the_screen_on_a_small_terminal() -> None:
     for size in ((80, 10), (60, 15), (40, 12)):
 
-        async def script(app: BrowseApp, pilot: Pilot[None], width: int = size[0]) -> None:
+        async def script(app: BrowseApp, pilot: Pilot[None], size: tuple[int, int] = size) -> None:
+            width = size[0]
             parsed = query.parse("ci = failing AND title LIKE 'a*' ORDER BY age DESC, ci")
             assert isinstance(parsed, query.Query)
             app.set_query(parsed)
@@ -714,6 +715,13 @@ def test_the_panel_controls_stay_on_the_screen_on_a_small_terminal() -> None:
             for widget in controls:
                 region = widget.region
                 assert region.x >= 0 and region.right <= width, (width, widget.id, region)
+            panel = app.screen.query_one("#qpanel")
+            assert panel.max_scroll_y > 0, size  # the controls do not all fit: it must scroll
+            for widget in controls:
+                widget.scroll_visible(animate=False, immediate=True)
+                await pause(pilot)
+                inside = panel.scrollable_content_region.contains_region(widget.region)
+                assert inside, (size, widget.id, widget.region, panel.region)
 
         drive_sized(script, size)
 
@@ -757,10 +765,10 @@ def test_the_panel_count_includes_the_text_filter_and_follows_arriving_snapshots
         await open_panel(app, pilot)
         await type_line(app, pilot, "ci = pending")
         report = content_of_screen(app, "#q-report")
-        assert report.startswith("0 of 4 PRs match (with the / text filter); 1 hidden")
+        assert report.startswith("0 of 1 PRs match (with the / text filter); 1 hidden")
         source.gate.set()
         await app.workers.wait_for_complete()
         await pause(pilot)
-        assert content_of_screen(app, "#q-report") == "1 of 4 PRs match (with the / text filter)"
+        assert content_of_screen(app, "#q-report") == "1 of 1 PRs match (with the / text filter)"
 
     drive(script, source, wait=False)

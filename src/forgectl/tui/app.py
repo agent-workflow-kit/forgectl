@@ -938,12 +938,11 @@ class BrowseApp(App[None]):
 
     def _panel_report(self, where: ql.Node | None) -> str:
         now = self.clock()
-        total = len(self._rows)
         needle = self._filter.strip().lower()  # the `/` text filter, as on screen
         rows = [r for r in self._rows if not needle or needle in render.row_haystack(r)]
         shown = sum(1 for r in rows if filtering.matches(where, r, self._state(r), now))
         undecided = filtering.unknown_count(where, rows, self._states, now)
-        text = f"{shown} of {total} PRs match" + (" (with the / text filter)" if needle else "")
+        text = f"{shown} of {len(rows)} PRs match" + (" (with the / text filter)" if needle else "")
         if undecided:
             text += f"; {undecided} hidden because their snapshot has not loaded"
         return text

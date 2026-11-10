@@ -71,6 +71,7 @@ class QueryScreen(ModalScreen[None]):
     .q-head { text-style: bold; margin-top: 1; }
     #q-title { text-style: bold; }
     #q-status { height: auto; }
+    #q-sort, #q-filters { height: auto; }
     .q-row { height: auto; }
     .q-row Select { width: 1fr; min-width: 8; }
     .q-row Input { width: 2fr; min-width: 8; }
