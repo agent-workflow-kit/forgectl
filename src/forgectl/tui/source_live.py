@@ -8,24 +8,31 @@ itself; the handlers reach the forges through the gateway, as for the CLI.
 
 Only the three read commands can be run from here, so no write handler is reachable.
 
-Thread safety, for the progressive loading of #58: a ``LiveSource`` holds no per-call state.
-``snapshot(pr)`` and ``diff(pr)`` may be called from any number of worker threads at once; each
-call parses its own arguments and builds its own gateway, so one call failing (any exception) does
-not touch another. The config is loaded once, under a lock, and shared read-only.
+Thread safety, for the progressive loading of #58: ``prs``, ``snapshot(pr)`` and ``diff(pr)`` may
+be called from any number of worker threads at once. A ``LiveSource`` keeps only the registry of
+the calls in flight (under one lock, for ``close``) and its closed flag; each call parses its own
+arguments, builds its own gateway and tracks its own process groups, so one call failing (any
+exception) does not touch another. The config is loaded once, under a lock, and shared read-only.
 
 Cancelling: ``cancelled`` (a callable the caller owns, for example
 ``lambda: token != self._token``) is checked before the call starts and again before every host
-call (``gh``, ``glab``) the handler makes, through the gateway. When it is true the call raises
-``Cancelled`` and sends nothing more; a host call already running is not interrupted, it ends by
-itself. ``snapshot`` and ``diff`` may therefore raise ``Cancelled``; it is not an error to show,
-so a caller must catch it before it treats an exception as a failure.
+call (``gh``, ``glab``, a ``token_command``) the handler makes, and between the slices of a retry
+wait, through the gateway. When it is true the call raises ``Cancelled`` and sends nothing more; a
+host call already running is not interrupted, it ends by itself (only ``close`` ends it).
+``snapshot`` and ``diff`` may therefore raise ``Cancelled``; it is not an error to show, so a
+caller must catch it before it treats an exception as a failure. ``prs`` takes no ``cancelled``
+but is refused after ``close`` and ended by it like the others.
 
 Closing: ``close()``, called when the app exits, makes every later and every running call
 cancelled, SIGKILLs the process group of each host call in flight (only groups this source saw
-start, whose leader is still unreaped) and waits up to ``CLOSE_WAIT`` seconds for the calls to
-return. Each call removes its own private temp dir as it unwinds, so no group and no dir is left
-for the daemon worker threads, which the interpreter would otherwise stop mid-call. The app keeps
-its concurrency slot until the worker returned, so a cancelled read still counts toward the bound.
+start and that are still tracked: the gateway runner reports a group untracked, under the same
+lock ``close`` holds while killing, just before it reaps the leader, so a reaped group is never
+signaled; where ``os.waitid`` exists a reaped leader is also checked directly) and waits up to
+``CLOSE_WAIT`` seconds for the calls to return. Only the read paths are tracked: a detached child
+(a hook watchdog) is never started from here and never touched. Each call removes its own private
+temp dir as it unwinds, so no group and no dir is left for the daemon worker threads, which the
+interpreter would otherwise stop mid-call. The app keeps its concurrency slot until the worker
+returned, so a cancelled read still counts toward the bound.
 
 Failures are logged as the CLI logs them (``log.jsonl``), by the in-process runner.
 """
@@ -139,7 +146,9 @@ def in_process_runner(
 def _kill_group(pid: int, pgid: int) -> None:
     """SIGKILL the group of a child this process started, if its leader is not reaped yet.
 
-    The leader is ours, so ``waitid(WNOWAIT)`` answers for exactly that PID without reaping it:
+    The caller only passes tracked groups (see ``_Call``), which is what guards a reaped leader
+    on every platform. Where ``os.waitid`` exists the leader is checked as well: it is ours, so
+    ``waitid(WNOWAIT)`` answers for exactly that PID without reaping it, and
     ``ChildProcessError`` means it is gone and its number may belong to another process now.
     """
     if hasattr(os, "waitid"):
@@ -152,7 +161,9 @@ def _kill_group(pid: int, pgid: int) -> None:
 
 
 class _Call:
-    """The process groups of one read that are alive now."""
+    """The process groups of one read that are alive now: added at launch, removed (under the
+    source lock) just before the gateway reaps the leader, so a group listed here has an
+    unreaped leader."""
 
     def __init__(self) -> None:
         self.groups: set[tuple[int, int]] = set()
@@ -210,7 +221,7 @@ class LiveSource:
             argv.append(f"--review-requested-from={review_requested_from}")
         argv += [f"--state={state}", f"--limit={limit}"]
         try:
-            return self._run(argv)
+            return self._tracked(argv, None, "prs")
         except ForgectlError as err:
             if err.code == "partial_results" and isinstance(err.output, dict):
                 return {**err.output, "complete": False}
@@ -227,6 +238,13 @@ class LiveSource:
     def _one(self, command: str, pr: str, cancelled: Callable[[], bool] | None) -> dict[str, Any]:
         if not is_pr(pr):  # also keeps an option-looking value out of the argument list
             raise ForgectlError("invalid_pr", f"{command}: not a PR in the form host/path#N")
+        return self._tracked([command, pr], cancelled, pr)
+
+    def _tracked(
+        self, argv: list[str], cancelled: Callable[[], bool] | None, subject: str
+    ) -> dict[str, Any]:
+        """Run one read inside a ``CallScope`` that this source can cancel and kill (``prs``,
+        ``snapshot`` and ``diff`` all come through here)."""
 
         def stop() -> bool:
             if self._closed:
@@ -246,19 +264,25 @@ class LiveSource:
                 if self._closed:  # closed between the last check and the start of the child
                     _kill_group(pid, pgid)
 
+        def reaped(pid: int, pgid: int) -> None:
+            with self._cond:  # close() holds this lock while it signals: never after the reap
+                call.groups.discard((pid, pgid))
+
         def done() -> None:
             with self._cond:
                 call.groups.clear()  # the leader is reaped: the numbers may be reused
 
         with self._cond:
             if self._closed:
-                raise Cancelled(pr)
+                raise Cancelled(subject)
             self._calls.append(call)
-        token = CALL_SCOPE.set(CallScope(cancelled=stop, on_spawn=spawned, on_done=done))
+        token = CALL_SCOPE.set(
+            CallScope(cancelled=stop, on_spawn=spawned, on_done=done, on_reap=reaped)
+        )
         try:
             if stop():  # before the first host call, whatever the runner is
-                raise Cancelled(pr)
-            return self._run([command, pr])
+                raise Cancelled(subject)
+            return self._run(argv)
         finally:
             CALL_SCOPE.reset(token)
             with self._cond:

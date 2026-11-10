@@ -19,8 +19,8 @@ import pytest
 
 from forgectl.config import LoadedConfig
 from forgectl.errors import Cancelled, ForgectlError
-from forgectl.gateway import Gateway, ProcessResult, Target
-from forgectl.tui.source_live import LiveSource
+from forgectl.gateway import CALL_SCOPE, CallScope, Gateway, ProcessResult, Target, run_process
+from forgectl.tui.source_live import LiveSource, _kill_group
 
 PR = "github.com/acme/widgets#1"
 GH = Target("github", "github.com", token="fake-token-0001")
@@ -36,6 +36,13 @@ def environ_for(tmp_path: Path) -> dict[str, str]:
     tmp = tmp_path / "tmp"
     tmp.mkdir(exist_ok=True)
     return {"PATH": str(exe), "HOME": str(tmp_path), "TMPDIR": str(tmp)}
+
+
+def child_env(tmp_path: Path) -> dict[str, str]:
+    """The environment of a child these tests start: a private HOME and XDG_CONFIG_HOME."""
+    home = tmp_path / "child-home"
+    home.mkdir(exist_ok=True)
+    return {"PATH": os.environ.get("PATH", ""), "HOME": str(home), "XDG_CONFIG_HOME": str(home)}
 
 
 def answer(argv: Any, **_kw: Any) -> ProcessResult:
@@ -70,9 +77,16 @@ def test_a_cancel_observed_between_host_calls_stops_the_next_call(tmp_path: Path
 
 
 def test_cancelled_is_not_turned_into_an_internal_error(tmp_path: Path) -> None:
-    source = LiveSource(reads(tmp_path, answer, 2))
-    with pytest.raises(Cancelled):
-        source.diff(PR, cancelled=lambda: True)
+    calls: list[int] = []
+
+    def runner(argv: Any, **kw: Any) -> ProcessResult:
+        calls.append(1)
+        return answer(argv, **kw)
+
+    source = LiveSource(reads(tmp_path, runner, 2))
+    with pytest.raises(Cancelled):  # the pre-check passes; the gateway raises after the first call
+        source.diff(PR, cancelled=lambda: len(calls) >= 1)
+    assert len(calls) == 1
 
 
 def test_an_uncancelled_read_makes_every_call(tmp_path: Path) -> None:
@@ -118,7 +132,9 @@ def test_close_ends_the_process_group_and_removes_the_temp_dir(tmp_path: Path) -
 
     def runner(argv: Any, *, on_start: Callable[[int, int], None] | None, **_kw: Any) -> Any:
         proc = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+            env=child_env(tmp_path),
         )
         children.append(proc)
         try:
@@ -189,7 +205,9 @@ def test_a_spawn_after_close_is_killed_at_once(
     def runner(argv: Any, *, on_start: Callable[[int, int], None] | None, **_kw: Any) -> Any:
         source.close()  # between the check that passed and the spawn
         proc = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+            env=child_env(tmp_path),
         )
         holder["proc"] = proc
         try:
@@ -256,3 +274,225 @@ def test_the_source_is_closed_when_the_app_fails(monkeypatch: pytest.MonkeyPatch
 
 def test_a_source_without_close_is_fine(monkeypatch: pytest.MonkeyPatch) -> None:
     run_browse_with(monkeypatch, object())
+
+
+def sleeper_runner(
+    tmp_path: Path, started: threading.Event, children: list[subprocess.Popen[bytes]]
+) -> Callable[..., Any]:
+    def runner(argv: Any, *, on_start: Callable[[int, int], None] | None, **_kw: Any) -> Any:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+            env=child_env(tmp_path),
+        )
+        children.append(proc)
+        try:
+            assert on_start is not None
+            on_start(proc.pid, proc.pid)
+            started.set()
+            code = proc.wait(timeout=30)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        return ProcessResult(pid=proc.pid, pgid=proc.pid, returncode=code, stdout=b"", stderr=b"")
+
+    return runner
+
+
+def test_close_ends_a_group_started_during_the_pr_list_load(tmp_path: Path) -> None:
+    started = threading.Event()
+    children: list[subprocess.Popen[bytes]] = []
+    runner = sleeper_runner(tmp_path, started, children)
+
+    def run(argv: list[str]) -> dict[str, Any]:
+        gateway = Gateway(
+            LoadedConfig.defaults(), timeout=30, environ=environ_for(tmp_path), runner=runner
+        )
+        gateway.api(GH, "GET", ["x"])
+        return {}
+
+    source = LiveSource(run)
+    thread = threading.Thread(target=lambda: _swallow(source.prs), daemon=True)
+    thread.start()
+    assert started.wait(10)
+    source.close()
+    thread.join(10)
+    assert not thread.is_alive()  # close() waited for the list load, then it unwound
+    assert children[0].returncode == -signal.SIGKILL
+
+
+def _swallow(fn: Callable[[], Any]) -> None:
+    try:
+        fn()
+    except Exception:
+        pass
+
+
+def test_a_pr_list_load_started_after_close_is_cancelled_without_a_call(tmp_path: Path) -> None:
+    calls: list[int] = []
+
+    def runner(argv: Any, **kw: Any) -> ProcessResult:
+        calls.append(1)
+        return answer(argv, **kw)
+
+    source = LiveSource(reads(tmp_path, runner, 1))
+    source.close()
+    with pytest.raises(Cancelled):
+        source.prs()
+    assert calls == []
+
+
+def scoped_gateway(
+    tmp_path: Path, runner: Callable[..., ProcessResult], scope: CallScope
+) -> tuple[Gateway, Any]:
+    token = CALL_SCOPE.set(scope)
+    try:
+        return Gateway(
+            LoadedConfig.defaults(), timeout=30, environ=environ_for(tmp_path), runner=runner
+        ), token
+    finally:
+        CALL_SCOPE.reset(token)
+
+
+def test_run_external_reports_done_after_the_runner_returns(tmp_path: Path) -> None:
+    events: list[str] = []
+    scope = CallScope(on_done=lambda: events.append("done"))
+
+    def runner(argv: Any, **kw: Any) -> ProcessResult:
+        events.append("ran")
+        return answer(argv, **kw)
+
+    gateway, _ = scoped_gateway(tmp_path, runner, scope)
+    gateway.run_external(["gh"], timeout=5, mode="hook")
+    assert events == ["ran", "done"]
+
+
+def test_run_external_reports_done_when_the_runner_raises(tmp_path: Path) -> None:
+    events: list[str] = []
+    scope = CallScope(on_done=lambda: events.append("done"))
+
+    def runner(argv: Any, **kw: Any) -> ProcessResult:
+        raise RuntimeError("boom")
+
+    gateway, _ = scoped_gateway(tmp_path, runner, scope)
+    with pytest.raises(RuntimeError):
+        gateway.run_external(["gh"], timeout=5, mode="hook")
+    assert events == ["done"]
+
+
+def test_a_cancelled_read_starts_no_token_command(tmp_path: Path) -> None:
+    calls: list[int] = []
+
+    def runner(argv: Any, **kw: Any) -> ProcessResult:
+        calls.append(1)
+        return answer(argv, **kw)
+
+    gateway, _ = scoped_gateway(tmp_path, runner, CallScope(cancelled=lambda: True))
+    with pytest.raises(Cancelled):
+        gateway.run_external(["gh"], timeout=5, mode="token_command", backend="github")
+    assert calls == []
+
+
+def test_a_cancelled_api_call_resolves_no_executable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gateway, _ = scoped_gateway(tmp_path, answer, CallScope(cancelled=lambda: True))
+
+    def boom(*_a: Any, **_k: Any) -> str:
+        raise AssertionError("the token lookup started after the cancel")
+
+    monkeypatch.setattr(gateway, "_executable", boom)
+    with pytest.raises(Cancelled):
+        gateway.api(GH, "GET", ["x"])
+
+
+def test_kill_group_does_nothing_for_a_child_that_is_already_reaped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "pass"], start_new_session=True, env=child_env(tmp_path)
+    )
+    proc.wait()  # reaped: its number may be anyone's now
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
+    _kill_group(proc.pid, proc.pid)
+    assert sent == []
+
+
+def test_run_process_reports_the_reap_before_it_reaps(tmp_path: Path) -> None:
+    seen: list[str] = []
+
+    def on_reap(pid: int, pgid: int) -> None:
+        try:
+            os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            seen.append("unreaped")
+        except ChildProcessError:
+            seen.append("reaped")
+
+    run_process(
+        [sys.executable, "-c", "pass"],
+        env=child_env(tmp_path),
+        cwd=str(tmp_path),
+        timeout=20,
+        on_reap=on_reap,
+    )
+    assert seen == ["unreaped"]  # the tracker can drop the group while the number is reserved
+
+
+def test_a_reaped_group_is_dropped_from_the_tracking_by_the_reap_hook(tmp_path: Path) -> None:
+    """close() signals only tracked groups: after the reap hook, nothing is left to signal."""
+    source = LiveSource(lambda argv: {})
+    call_seen: list[set[tuple[int, int]]] = []
+
+    def runner(argv: Any, *, on_start: Any, on_reap: Any = None, **_kw: Any) -> ProcessResult:
+        on_start(4242, 4242)
+        call_seen.append({(4242, 4242)})
+        assert on_reap is not None
+        on_reap(4242, 4242)
+        return answer(argv)
+
+    def run(argv: list[str]) -> dict[str, Any]:
+        Gateway(
+            LoadedConfig.defaults(), timeout=30, environ=environ_for(tmp_path), runner=runner
+        ).api(GH, "GET", ["x"])
+        return {}
+
+    source = LiveSource(run)
+    sent: list[int] = []
+    import forgectl.tui.source_live as live
+
+    original = live._kill_group
+    live._kill_group = lambda pid, pgid: sent.append(pid)  # type: ignore[assignment]
+    try:
+        # a close() racing in after the reap hook must find nothing to signal
+        orig_run = source._runner
+
+        def racing(argv: list[str]) -> dict[str, Any]:
+            out = orig_run(argv)
+            source.close()
+            return out
+
+        source._runner = racing
+        source.snapshot(PR)
+    finally:
+        live._kill_group = original
+    assert sent == []
+
+
+def test_a_detached_spawn_is_not_tracked_by_the_read_scope(tmp_path: Path) -> None:
+    from forgectl.gateway import Detached
+
+    got: list[Any] = []
+
+    def spawner(argv: Any, *, on_start: Any, **_kw: Any) -> Detached:
+        got.append(on_start)
+        return Detached(1, 1)
+
+    token = CALL_SCOPE.set(CallScope(on_spawn=lambda pid, pgid: None))
+    try:
+        gateway = Gateway(LoadedConfig.defaults(), environ=environ_for(tmp_path), spawner=spawner)
+    finally:
+        CALL_SCOPE.reset(token)
+    gateway.spawn_detached(["x"], env={}, cwd=str(tmp_path), stdin=b"")
+    assert got == [None]
