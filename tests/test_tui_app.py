@@ -18,7 +18,7 @@ from textual.pilot import Pilot
 from textual.widgets import Input, OptionList, Static
 
 from forgectl.errors import ForgectlError
-from forgectl.tui import render
+from forgectl.tui import render, sections
 from forgectl.tui.app import BrowseApp
 from forgectl.tui.opener import BrowserOpener
 
@@ -56,8 +56,11 @@ def drive(
     focus: str | None = None,
     wait: bool = True,
     concurrency: int = 0,  # 0: no per-row snapshots, so these tests count only their own reads
+    **app_args: Any,
 ) -> BrowseApp:
-    app = BrowseApp(source, opener or FakeOpener(), focus=focus, concurrency=concurrency)
+    app = BrowseApp(
+        source, opener or FakeOpener(), focus=focus, concurrency=concurrency, **app_args
+    )
 
     async def go() -> None:
         async with app.run_test(size=(140, 50)) as pilot:
@@ -143,12 +146,15 @@ def test_enter_opens_the_detail_pane_with_facts_ci_reviews_comments_and_diff() -
         await pilot.press("down", "enter")  # second row: PR1
         await settle(app, pilot)
         assert app.query_one("#detail").display is True
-        facts = content_of(app, "#facts").plain
-        assert "Mine" in facts and "the body" in facts and "CI: failing" in facts
+        assert "Mine" in content_of(app, "#facts").plain
+        assert "the body" in content_of(app, "#description").plain
+        assert "CI: failing" in content_of(app, "#ci").plain
         checks = app.query_one("#checks", OptionList)
         assert "build" in as_content(checks.get_option_at_index(0).prompt).plain
-        rest = content_of(app, "#rest").plain
-        assert "please rename" in rest and "+new line" in rest and "Reviews" in rest
+        assert "please rename" in content_of(app, "#comments").plain
+        assert "Reviews" in content_of(app, "#head-reviews").plain
+        await pilot.press("3")  # the diff starts collapsed
+        assert "+new line" in content_of(app, "#changes").plain
 
     app = drive(source, script)
     assert app.result() == {"intent": "back", "selected": [PR1], "merged": []}
@@ -242,6 +248,7 @@ def test_there_is_no_write_action() -> None:
         "v",
         "f",
         "n",
+        *"123456",  # the detail sections: view only
     }
     assert not hasattr(app, "action_merge")
     assert opener.opened == []
@@ -387,8 +394,8 @@ def test_hostile_titles_render_inert_in_the_list_the_detail_and_the_screen(title
         await settle(app, pilot)
         contents = [
             list_prompts(app)[0],
-            content_of(app, "#facts"),
-            content_of(app, "#rest"),
+            *[content_of(app, f"#{name}") for name in sections.NAMES],
+            *[content_of(app, f"#head-{name}") for name in sections.NAMES],
             as_content(app.query_one("#checks", OptionList).get_option_at_index(0).prompt),
         ]
         for content in contents:
@@ -457,7 +464,9 @@ def test_huge_fields_are_bounded() -> None:
         await settle(app, pilot)
         assert len(list_prompts(app)[0].plain) < 1_000
         assert len(content_of(app, "#facts").plain) < 25_000
-        assert len(content_of(app, "#rest").plain) < 2_000_000
+        await pilot.press("3")
+        for name in ("description", "comments", "changes"):
+            assert len(content_of(app, f"#{name}").plain) < 2_000_000
 
     drive(source, script)
 
@@ -671,19 +680,18 @@ def test_the_rest_of_the_pane_has_one_total_budget() -> None:
     snap = make_snapshot(1)
     snap["threads"] = threads
     started = time.monotonic()
-    rest = render.rest_text(snap, None)
+    body = render.comments_text(snap)
     assert time.monotonic() - started < 2.0
-    body, _, _ = rest.partition("\n\nDiff\n")
     footer = body.rsplit("\n", 1)[-1]
     assert footer.strip().startswith("...") and footer.endswith("more not shown")
-    assert len(body) <= render.REST_BUDGET + len(footer) + 1
+    assert len(body) <= render.REST_BUDGET // 2 + len(footer) + 1
 
     source = FakeSource(authored=[make_item(1)], snapshots={PR1: snap})
 
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         await pilot.press("enter")
         await settle(app, pilot)
-        shown = content_of(app, "#rest").plain
+        shown = content_of(app, "#comments").plain
         assert "more not shown" in shown and len(shown) < render.REST_BUDGET + 1_000
 
     started = time.monotonic()

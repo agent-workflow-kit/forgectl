@@ -249,10 +249,15 @@ class Activity(_Model):
     ignore_authors: ArgList0 = ()
 
 
+DetailSection = Literal["facts", "description", "changes", "ci", "comments", "reviews"]
+DetailSections = Annotated[tuple[DetailSection, ...], BeforeValidator(_as_tuple)]
+
+
 class Browse(_Model):
     refresh_interval: IntervalOrOff = 120.0  # seconds between automatic refreshes; 0 is off
     full_refresh_every: Annotated[int, Field(strict=True, ge=1, le=1000)] = 5
     concurrency: Annotated[int, Field(strict=True, ge=1, le=16)] = 4  # snapshot reads at once
+    detail_collapsed: DetailSections = ("changes",)  # detail pane sections that start collapsed
 
 
 class Hooks(_Model):

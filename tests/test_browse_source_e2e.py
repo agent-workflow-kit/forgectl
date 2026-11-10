@@ -203,7 +203,7 @@ def test_browse_lists_both_hosts_and_enter_shows_the_snapshot(
     two_hosts_one_failing(forged)
     snapshot_and_diff_fakes(forged)
     source = LiveSource(config_path=str(config))
-    app = BrowseApp(source, FakeOpener(), focus=PR)
+    app = BrowseApp(source, FakeOpener(), focus=PR, detail_collapsed=())
 
     async def go() -> None:
         async with app.run_test(size=(140, 50)) as pilot:
@@ -212,7 +212,7 @@ def test_browse_lists_both_hosts_and_enter_shows_the_snapshot(
             status = str(app.query_one("#status", Static).content)
             assert app.query_one("#detail").display is True, status
             assert "user-7/example-repo#7" in str(app.query_one("#facts", Static).content)
-            assert "src/app.py" in str(app.query_one("#rest", Static).content)  # the diff
+            assert "src/app.py" in str(app.query_one("#changes", Static).content)  # the diff
 
     asyncio.run(go())
 
@@ -237,7 +237,9 @@ def test_enter_on_a_row_shows_the_snapshot_and_the_diff(forged: FakeForges, conf
     # listed here; the GitLab reads are covered by their own backend tests.
     two_hosts_one_failing(forged)
     snapshot_and_diff_fakes(forged)
-    app = BrowseApp(LiveSource(config_path=str(config)), FakeOpener(), focus=None)
+    app = BrowseApp(
+        LiveSource(config_path=str(config)), FakeOpener(), focus=None, detail_collapsed=()
+    )
 
     async def go() -> None:
         async with app.run_test(size=(140, 50)) as pilot:
@@ -249,7 +251,7 @@ def test_enter_on_a_row_shows_the_snapshot_and_the_diff(forged: FakeForges, conf
             status = str(app.query_one("#status", Static).content)
             assert app.query_one("#detail").display is True, status
             assert "user-7/example-repo#7" in str(app.query_one("#facts", Static).content)
-            assert "src/app.py" in str(app.query_one("#rest", Static).content)
+            assert "src/app.py" in str(app.query_one("#changes", Static).content)
 
     asyncio.run(go())
 

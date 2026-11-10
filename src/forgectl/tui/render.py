@@ -61,6 +61,7 @@ def check_label(check: dict[str, Any]) -> str:
 
 
 def facts_text(snap: dict[str, Any]) -> str:
+    """Title and the one-line facts; the description and the CI line are sections of their own."""
     head = _d(snap.get("head"))
     base = _d(snap.get("base"))
     blockers = []
@@ -69,7 +70,6 @@ def facts_text(snap: dict[str, Any]) -> str:
             detail = f" ({safe.line(b['detail'])})" if b.get("detail") else ""
             blockers.append(f"{safe.line(b.get('code'))}{detail}")
     labels = ", ".join(safe.line(x, 100) for x in (snap.get("labels") or [])[:50])
-    ci = _d(snap.get("ci"))
     lines = [
         safe.line(snap.get("title")),
         f"{safe.line(snap.get('pr'))}   {safe.line(snap.get('url'), URL_MAX_LENGTH)}",
@@ -84,14 +84,21 @@ def facts_text(snap: dict[str, Any]) -> str:
         f"{safe.line(snap.get('changed_files'))} files",
         f"labels: {labels or '(none)'}",
         f"updated: {safe.line(snap.get('updated_at'))}",
-        "",
-        safe.text(snap.get("body")),
-        "",
-        f"CI: {safe.line(ci.get('state', 'none'))}"
-        + ("" if ci.get("complete", True) else " (list cut off)")
-        + ("" if ci.get("for_current_head", True) else " (checks are for an older commit)"),
     ]
     return "\n".join(lines)
+
+
+def description_text(snap: dict[str, Any]) -> str:
+    return safe.text(snap.get("body"))
+
+
+def ci_text(snap: dict[str, Any]) -> str:
+    ci = _d(snap.get("ci"))
+    return (
+        f"CI: {safe.line(ci.get('state', 'none'))}"
+        + ("" if ci.get("complete", True) else " (list cut off)")
+        + ("" if ci.get("for_current_head", True) else " (checks are for an older commit)")
+    )
 
 
 def checks_of(snap: dict[str, Any]) -> list[dict[str, Any]]:
@@ -132,10 +139,9 @@ class _Budget:
             self.lines.extend(lines)
 
 
-def rest_text(snap: dict[str, Any], diff: dict[str, Any] | None) -> str:
-    """Reviews and comments within ``REST_BUDGET``, then the diff (bounded by its own limit)."""
-    out = _Budget(REST_BUDGET)
-    out.note("Reviews")
+def reviews_text(snap: dict[str, Any]) -> str:
+    """The reviews within half of ``REST_BUDGET``."""
+    out = _Budget(REST_BUDGET // 2)
     latest = [x for x in (snap.get("latest_by_reviewer") or []) if isinstance(x, dict)]
     reviews = [x for x in (snap.get("reviews") or []) if isinstance(x, dict)]
     for entry in latest[:MAX_REVIEWS]:
@@ -149,7 +155,15 @@ def rest_text(snap: dict[str, Any], diff: dict[str, Any] | None) -> str:
         out.add(head, *([_indent(safe.text(body, COMMENT_LIMIT))] if body else []))
     if not latest and not reviews:
         out.note("  (none)")
-    out.note("", "Comments")
+    lines = out.lines
+    if out.full:
+        lines.append(f"  ... {out.skipped} more not shown")
+    return "\n".join(lines)
+
+
+def comments_text(snap: dict[str, Any]) -> str:
+    """The comment threads within half of ``REST_BUDGET``."""
+    out = _Budget(REST_BUDGET // 2)
     threads = [t for t in (snap.get("threads") or []) if isinstance(t, dict)]
     for thread in threads[:MAX_THREADS]:
         comments = [c for c in (thread.get("comments") or []) if isinstance(c, dict)]
@@ -182,12 +196,35 @@ def rest_text(snap: dict[str, Any], diff: dict[str, Any] | None) -> str:
     lines = out.lines
     if out.full:
         lines.append(f"  ... {out.skipped} more not shown")
-    lines += ["", "Diff"]
-    if diff is None:
-        lines.append("  (not loaded)")
-    else:
-        lines.append(safe.diff(diff.get("diff")))
     return "\n".join(lines)
+
+
+def changes_text(diff: dict[str, Any] | None) -> str:
+    """The diff (bounded by its own limit), or a note that it is not loaded."""
+    return "  (not loaded)" if diff is None else safe.diff(diff.get("diff"))
+
+
+def _count(value: Any) -> str:
+    """A number for a header: never forge text. Anything that is not an int shows as ``?``."""
+    return str(value) if isinstance(value, int) and not isinstance(value, bool) else "?"
+
+
+def counts_of(snap: dict[str, Any], checks: list[dict[str, Any]]) -> dict[str, str]:
+    """The header count of each section that has one, numbers only."""
+    failing = sum(1 for c in checks if c.get("state") == "failing")
+    threads = [t for t in (snap.get("threads") or []) if isinstance(t, dict)]
+    comments = sum(
+        len([c for c in (t.get("comments") or []) if isinstance(c, dict)]) for t in threads
+    )
+    reviews = [x for x in (snap.get("reviews") or []) if isinstance(x, dict)]
+    ci = f"{len(checks)}" + (f", {failing} failing" if failing else "")
+    return {
+        "changes": f"+{_count(snap.get('additions'))} -{_count(snap.get('deletions'))}, "
+        f"{_count(snap.get('changed_files'))} files",
+        "ci": ci,
+        "comments": str(comments),
+        "reviews": str(len(reviews)),
+    }
 
 
 @dataclass
@@ -196,9 +233,9 @@ class Detail:
 
     url: str | None
     checks: list[dict[str, Any]]
-    facts: str
     check_labels: list[str]
-    rest: str
+    texts: dict[str, str]  # the body of each section, by name (``sections.NAMES``)
+    counts: dict[str, str]  # the header count of a section, numbers only; absent: none
 
 
 def check_labels_of(checks: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
@@ -226,9 +263,16 @@ def detail_of(snap: dict[str, Any], diff: dict[str, Any] | None) -> Detail:
     return Detail(
         url=url if isinstance(url, str) else None,
         checks=checks,
-        facts=facts_text(snap),
         check_labels=labels,
-        rest=rest_text(snap, diff),
+        texts={
+            "facts": facts_text(snap),
+            "description": description_text(snap),
+            "changes": changes_text(diff),
+            "ci": ci_text(snap),
+            "comments": comments_text(snap),
+            "reviews": reviews_text(snap),
+        },
+        counts=counts_of(snap, checks_of(snap)),
     )
 
 
