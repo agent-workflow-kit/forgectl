@@ -61,6 +61,9 @@ def items_for(host: str, prefix: str) -> list[dict[str, Any]]:
 
 def script(forges: FakeForges, host: str = "gitlab.com", prefix: str = "") -> None:
     route(forges, ROUTE, items_for(host, prefix))
+    project = lists("project")
+    project["web_url"] = f"https://{host}{prefix}/user-9/proj"
+    route(forges, "projects/user-9%2Fproj", project)
     source = lists("source_project")
     source["web_url"] = f"https://{host}{prefix}/user-8/proj"
     route(forges, "projects/202", source)

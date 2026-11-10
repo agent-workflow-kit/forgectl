@@ -13,6 +13,11 @@ state, draft flag, author or reviewers no longer match is dropped and the list i
 item older than the ``updated_since`` floor, or out of ``updated_at`` order, is
 ``upstream_error``, never kept silently.
 
+A project list is tied to the project asked for by one ``GET /projects/:path``: its id and the
+path of its verified ``web_url`` must be every item's, so a list that is another project's, or
+whose paths differ under one id, is ``upstream_error``. The author's bot flag and the head project
+are read only for the items that are returned.
+
 ``access`` reads the project, resolves the user, then ``members/all/:id``: only a clear answer is
 a yes or a no (a 401 or 403 is null with ``no_permission_to_read``), and an answer that is not the
 documented shape is an error, never write access.
@@ -24,8 +29,9 @@ Every GitLab behavior relied on here and not yet seen on a real host is marked `
 from __future__ import annotations
 
 import re
-import weakref
+import urllib.parse
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -44,6 +50,7 @@ from .gitlab import (
     _int_id,
     _list,
     _obj,
+    _opt_int_id,
     _project_path,
     _req_line,
     _required_time,
@@ -144,33 +151,56 @@ def build_request(
 
 # -- prs ---------------------------------------------------------------------------------------
 
-#: Source-project reads of `head.repo`, per backend instance (one command): the answer for a
-#: (host, project, source project) is read once, whatever the number of pages.
-_HEADS: weakref.WeakKeyDictionary[GitLabBackend, dict[tuple[str, int, int | None], Any]] = (
-    weakref.WeakKeyDictionary()
-)
+#: One command's source-project reads of `head.repo`: the answer for a (host, project, source
+#: project) is read once, whatever the number of pages. It is made per `list_prs` call, so a
+#: backend that lives on does not answer a later command from an old read.
+_HeadCache = dict[tuple[str, int, int | None], tuple[str | None, bool | None]]
 
 
 def _head(
-    backend: GitLabBackend, target: Target, mr: Mapping[str, Any], project_id: int, canonical: str
+    backend: GitLabBackend,
+    target: Target,
+    cache: _HeadCache,
+    parsed: _Parsed,
+    mr: Mapping[str, Any],
+    canonical: str,
 ) -> tuple[str | None, bool | None]:
-    cache = _HEADS.setdefault(backend, {})
-    source = mr.get("source_project_id")
-    key = (target.host, project_id, source if isinstance(source, int) else None)
+    key = (target.host, parsed.project_id, parsed.source_project_id)
     if key not in cache:
-        cache[key] = backend._head_repo(target, mr, project_id, canonical)
-    found: tuple[str | None, bool | None] = cache[key]
-    return found
+        cache[key] = backend._head_repo(target, mr, parsed.project_id, canonical)
+    return cache[key]
 
 
 class _Parsed:
-    """One listed MR, and what the filters need to check it."""
+    """One listed MR read without any side read: the item holds a null ``is_bot`` and head repo
+    until ``_finish`` fills them for an item that is returned."""
 
-    __slots__ = ("item", "project_id", "reviewers")
+    __slots__ = (
+        "author_user",
+        "canonical",
+        "item",
+        "mr",
+        "project_id",
+        "reviewers",
+        "source_project_id",
+    )
 
-    def __init__(self, item: m.PrListItem, project_id: int, reviewers: frozenset[str] | None):
+    def __init__(
+        self,
+        item: m.PrListItem,
+        mr: Mapping[str, Any],
+        author_user: Any,
+        project_id: int,
+        canonical: str,
+        source_project_id: int | None,
+        reviewers: frozenset[str] | None,
+    ):
         self.item = item
+        self.mr = mr
+        self.author_user = author_user
         self.project_id = project_id
+        self.canonical = canonical
+        self.source_project_id = source_project_id
         self.reviewers = reviewers
 
 
@@ -182,6 +212,8 @@ def _reviewers(raw: Any) -> frozenset[str] | None:
 
 
 def _parse(backend: GitLabBackend, target: Target, raw: Any) -> _Parsed:
+    """Every field is read and checked here; the two reads of other resources (the author's bot
+    flag, the head project) wait until the item is known to be returned."""
     mr = _obj(raw, "list item")
     number = _int_id(mr.get("iid"), "iid")
     if number > _MAX_NUMBER:
@@ -190,15 +222,11 @@ def _parse(backend: GitLabBackend, target: Target, raw: Any) -> _Parsed:
     project_id = _int_id(mr.get("project_id"), "project_id")
     if mr.get("target_project_id") is not None and mr["target_project_id"] != project_id:
         raise _bad("target_project_id")
+    source_project_id = _opt_int_id(mr.get("source_project_id"), "source_project_id")
     author_user = _user(mr.get("author"), "author")
-    author = m.Author(
-        login=author_user.login,
-        id=str(author_user.id),
-        is_bot=backend._is_bot(target, author_user),
-    )
+    author = m.Author(login=author_user.login, id=str(author_user.id), is_bot=None)
     status = mr.get("detailed_merge_status")
     draft = _flag(mr.get("draft", mr.get("work_in_progress", False)), "draft")
-    head_repo, is_fork = _head(backend, target, mr, project_id, canonical)
     host_path = f"{target.host}/{canonical}"
     item = m.PrListItem(
         pr=f"{host_path}#{number}",
@@ -214,13 +242,84 @@ def _parse(backend: GitLabBackend, target: Target, raw: Any) -> _Parsed:
         head=m.Head(
             sha=_sha(mr.get("sha"), "sha"),
             ref=_req_line(mr.get("source_branch"), "source_branch"),
-            repo=None if head_repo is None else f"{target.host}/{head_repo}",
-            is_fork=is_fork,
+            repo=None,
+            is_fork=None,
         ),
         base_ref=_req_line(mr.get("target_branch"), "target_branch"),
         updated_at=_required_time(mr.get("updated_at"), "updated_at"),
     )
-    return _Parsed(item, project_id, _reviewers(mr.get("reviewers")))
+    return _Parsed(
+        item,
+        mr,
+        author_user,
+        project_id,
+        canonical,
+        source_project_id,
+        _reviewers(mr.get("reviewers")),
+    )
+
+
+def _finish(
+    backend: GitLabBackend, target: Target, cache: _HeadCache, parsed: _Parsed
+) -> m.PrListItem:
+    """The item with its side reads done: the author's bot flag and the head project."""
+    item = parsed.item
+    head_repo, is_fork = _head(backend, target, cache, parsed, parsed.mr, parsed.canonical)
+    return replace(
+        item,
+        author=replace(item.author, is_bot=backend._is_bot(target, parsed.author_user)),
+        head=replace(
+            item.head,
+            repo=None if head_repo is None else f"{target.host}/{head_repo}",
+            is_fork=is_fork,
+        ),
+    )
+
+
+def _project_web_path(backend: GitLabBackend, target: Target, web_url: Any) -> str:
+    """The path of a project's own ``web_url``: on this host (exactly), ``https``, nothing but
+    the project path (a trailing slash aside), inside the host's prefix. The host is compared
+    exactly; the caller compares the path, which GitLab does not treat as case sensitive."""
+    verify_identity(web_url, host=target.host, secret=target.token)
+    backend._https(web_url, "project web_url")
+    assert isinstance(web_url, str)
+    if not web_url.isascii() or any(c.isspace() or not c.isprintable() for c in web_url):
+        raise _bad("project web_url")
+    parts = urllib.parse.urlsplit(web_url)
+    path = parts.path
+    if (
+        parts.query
+        or parts.fragment
+        or "?" in web_url
+        or "#" in web_url
+        or ";" in path
+        or "%" in path
+        or not path.startswith("/")
+    ):
+        raise _bad("project web_url")
+    path = path[1:].removesuffix("/")
+    prefix = target.api_prefix.strip("/")
+    if prefix:
+        if not path.startswith(prefix + "/"):
+            raise backend._wrong_host(target, "a path outside the host's prefix", web_url)
+        path = path[len(prefix) + 1 :]
+    return _project_path(path, "project web_url")
+
+
+def _tie_to_project(
+    backend: GitLabBackend, target: Target, requested: str, scope: set[tuple[int, str]]
+) -> None:
+    """A project list is of the project asked for: one read of it gives its id and its own path
+    (a rename is followed here, as the read of the path is the host's answer), and every listed
+    item must name that id and that path, whatever the case of the path."""
+    project = _obj(backend._get(target, ["projects", requested], sub=False).data, "project")
+    path = _project_web_path(backend, target, project.get("web_url"))
+    project_id = _int_id(project.get("id"), "project id")
+    for item_project, canonical in scope:
+        if item_project != project_id or m.ascii_lower(canonical) != m.ascii_lower(path):
+            raise ForgectlError(
+                "upstream_error", "gitlab: a project list holds an item of another project"
+            )
 
 
 def _matches(parsed: _Parsed, query: m.PrQuery) -> bool:
@@ -266,6 +365,7 @@ def list_prs(backend: GitLabBackend, query: m.PrQuery) -> m.PrPage:
     more = False
     newest: datetime | None = None  # the previous item's time, for the order check
     scope_project: int | None = None
+    scope: set[tuple[int, str]] = set()  # (project id, path) of every item the host listed
     page = 1
     for _ in range(MAX_PAGES):
         response = backend._get(
@@ -294,6 +394,7 @@ def list_prs(backend: GitLabBackend, query: m.PrQuery) -> m.PrPage:
                     raise ForgectlError(
                         "upstream_error", "gitlab: an item of another project in a project list"
                     )
+                scope.add((parsed.project_id, parsed.canonical))
             if parsed.item.pr_id in seen:
                 dropped = True  # the list moved between pages: something may be missing
                 continue
@@ -312,11 +413,17 @@ def list_prs(backend: GitLabBackend, query: m.PrQuery) -> m.PrPage:
         if not more or len(items) >= need:
             break
         page += 1
+    if query.repo is not None and scope:
+        _tie_to_project(backend, target, _repo_path(query.repo.path), scope)
     ordered = sort_items(p.item for p in items)
     cut = len(ordered) > query.limit
+    # side reads only for what is returned: the order key is in the item, so the same ones win
+    cache: _HeadCache = {}
+    by_pr = {p.item.pr: p for p in items}
+    returned = tuple(_finish(backend, target, cache, by_pr[i.pr]) for i in ordered[: query.limit])
     rate = backend._gateway.lowest_rate(target.host)  # from the response headers
     return m.PrPage(
-        items=tuple(ordered[: query.limit]),
+        items=returned,
         complete=not (cut or dropped or more),
         rate_limit=m.RateLimit(
             host=target.host,
@@ -348,8 +455,7 @@ def _level(member: Mapping[str, Any]) -> Level:
 def _effective(backend: GitLabBackend, member: Mapping[str, Any]) -> bool:
     """Whether the membership is in force: active user and seat, not expired. The level of
     one that is not counts for nothing."""
-    probe = {**member, "access_level": 30}
-    return backend._member_can_push(probe)
+    return backend._member_in_force(member)
 
 
 def _answer(
@@ -375,13 +481,20 @@ def access(backend: GitLabBackend, repo: RepoRef, user: str) -> m.AccessResult:
     target = backend._hosts.target(repo.host)
     if target.backend != "gitlab":
         raise ForgectlError("internal", "the gitlab backend was given another backend's host")
-    prefixed = backend._prefixed(target, path)
-    project = _obj(backend._get(target, ["projects", path], sub=False).data, "project")
-    verify_identity(project.get("web_url"), host=target.host, project=prefixed, secret=target.token)
-    backend._https(project.get("web_url"), "project web_url")
+    try:
+        project = _obj(backend._get(target, ["projects", path], sub=False).data, "project")
+    except ForgectlError as error:
+        if error.code in _UNREADABLE:
+            return _answer(f"{target.host}/{path}", user, None, None, reason=True)
+        raise
+    # the answer names the project by its own verified url; a path that differs from the one
+    # asked for (other than in case) is another project's answer
+    shown = _project_web_path(backend, target, project.get("web_url"))
+    if m.ascii_lower(shown) != m.ascii_lower(path):
+        raise backend._wrong_host(target, "another project", project.get("web_url"))
     project_id = _int_id(project.get("id"), "project id")
-    canonical = _project_path(project.get("path_with_namespace"), "project path")
-    where = f"{target.host}/{canonical}"
+    _project_path(project.get("path_with_namespace"), "project path")  # the shape, not trusted
+    where = f"{target.host}/{shown}"
     try:
         found = backend._get(
             target, ["users"], query=(("username", user),), shape="list", sub=False

@@ -49,6 +49,7 @@ def scene(
 ) -> None:
     fake.on(path, mrs() if items is None else items, headers=NEXT if headers is None else headers)
     fake.on("projects/202", lists("source_project"))
+    fake.on("projects/user-9%2Fproj", lists("project"))
     fake.on("version", {"version": "17.5.1", "revision": "abc"})
 
 
@@ -255,7 +256,7 @@ def test_fork_heads_deleted_heads_and_a_null_source(tmp_path: Path) -> None:
     assert heads[5] == (None, None)  # no source project at all
 
 
-def test_a_source_project_is_read_once_per_process(tmp_path: Path) -> None:
+def test_a_source_project_is_read_once_per_command(tmp_path: Path) -> None:
     fake = FakeGitLab()
     items = mrs()
     extra = copy.deepcopy(items[1])
@@ -267,7 +268,7 @@ def test_a_source_project_is_read_once_per_process(tmp_path: Path) -> None:
     assert [i.number for i in page.items] == [31, 29, 28]
     assert fake.count("projects/202") == 1
     backend.list_prs(PrQuery(repo=REPO, host="gitlab.com"))
-    assert fake.count("projects/202") == 1
+    assert fake.count("projects/202") == 2  # a later command on a long-lived backend re-reads
 
 
 def test_an_author_without_a_bot_field_is_read_once(tmp_path: Path) -> None:
@@ -337,14 +338,14 @@ def test_a_draft_item_reads_draft(tmp_path: Path) -> None:
 def test_the_title_and_branches_are_one_line_and_labels_are_clean(tmp_path: Path) -> None:
     fake = FakeGitLab()
     items = mrs()[:1]
-    items[0]["title"] = "a\x1b[31mb\nc‮d"
+    items[0]["title"] = "a\x1b[31mb\nc\u202ed"
     items[0]["source_branch"] = "x\ny"
     items[0]["labels"] = ["l\x00l"]
     scene(fake, items)
     (item,) = read(tmp_path, fake).items
     for text in (item.title, item.head.ref, *item.labels):
         assert "\x1b" not in text and "\n" not in text and "\x00" not in text
-        assert "‮" not in text
+        assert "\u202e" not in text
 
 
 def test_the_token_never_reaches_the_output(tmp_path: Path) -> None:
@@ -376,6 +377,7 @@ def make_items(count: int, *, start: int = 1000) -> list[dict[str, Any]]:
 def paged(fake: FakeGitLab, items: list[dict[str, Any]], per_page: int = 100) -> None:
     chunks = [items[i : i + per_page] for i in range(0, len(items), per_page)] or [[]]
     fake.pages(ROUTE, chunks)
+    fake.on("projects/user-9%2Fproj", lists("project"))
     fake.on("version", {"version": "17.5.1"})
 
 
@@ -433,6 +435,7 @@ def test_a_full_last_page_without_a_header_is_followed(tmp_path: Path) -> None:
         return Answer(200, items if query["page"] == "1" else [])
 
     fake.on_handler(ROUTE, handler)
+    fake.on("projects/user-9%2Fproj", lists("project"))
     page = read(tmp_path, fake, limit=1000)
     assert len(page.items) == 100 and page.complete is True
     assert calls == ["1", "2"]
@@ -459,6 +462,7 @@ def test_a_duplicate_across_pages_is_dropped_and_incomplete(tmp_path: Path) -> N
     page_one = items[:100]
     page_two = [items[99], items[100]]  # the list shifted by one between the reads
     fake.pages(ROUTE, [page_one, page_two])
+    fake.on("projects/user-9%2Fproj", lists("project"))
     fake.on("version", {"version": "17.5.1"})
     page = read(tmp_path, fake, limit=1000)
     assert len(page.items) == 101 and page.complete is False
@@ -560,6 +564,122 @@ def test_an_item_of_another_project_in_a_project_list_is_an_error(tmp_path: Path
     items[1]["web_url"] = "https://gitlab.com/user-6/other/-/merge_requests/29"
     scene(fake, items)
     assert fails(tmp_path, fake).code == "upstream_error"
+
+
+def test_a_whole_list_for_another_project_is_an_error(tmp_path: Path) -> None:
+    fake = FakeGitLab()
+    items = mrs()[:2]
+    for item in items:
+        item["project_id"] = item["target_project_id"] = item["source_project_id"] = 303
+        item["web_url"] = item["web_url"].replace("user-9/proj", "user-6/other")
+    scene(fake, items)
+    assert fails(tmp_path, fake, state="all").code == "upstream_error"
+
+
+def test_mixed_paths_under_one_project_id_are_an_error(tmp_path: Path) -> None:
+    fake = FakeGitLab()
+    items = mrs()[:2]
+    items[1]["web_url"] = "https://gitlab.com/user-6/other/-/merge_requests/29"
+    scene(fake, items)
+    assert fails(tmp_path, fake).code == "upstream_error"
+
+
+def test_a_renamed_project_is_listed_under_its_new_path(tmp_path: Path) -> None:
+    fake = FakeGitLab()
+    items = mrs()[:1]
+    items[0]["web_url"] = "https://gitlab.com/user-9/renamed/-/merge_requests/31"
+    scene(fake, items)
+    project = lists("project")
+    project["path_with_namespace"] = "user-9/renamed"
+    project["web_url"] = "https://gitlab.com/user-9/renamed"
+    fake.on("projects/user-9%2Fproj", project)
+    (item,) = read(tmp_path, fake).items
+    assert item.repo == "gitlab.com/user-9/renamed"
+
+
+def test_a_project_list_is_tied_by_one_project_read(tmp_path: Path) -> None:
+    fake = FakeGitLab()
+    scene(fake)
+    read(tmp_path, fake, state="all")
+    assert fake.count("projects/user-9%2Fproj") == 1
+
+
+def test_an_empty_project_list_reads_no_project(tmp_path: Path) -> None:
+    fake = FakeGitLab()
+    scene(fake, [])
+    read(tmp_path, fake)
+    assert fake.count("projects/user-9%2Fproj") == 0
+
+
+def test_a_project_read_for_another_id_fails_the_list(tmp_path: Path) -> None:
+    fake = FakeGitLab()
+    scene(fake)
+    project = lists("project")
+    project["id"] = 999
+    fake.on("projects/user-9%2Fproj", project)
+    assert fails(tmp_path, fake, state="all").code == "upstream_error"
+
+
+@pytest.mark.parametrize("bad", ["abc", {"a": 1}, True, [7], 0])
+def test_a_malformed_source_project_id_after_a_null_is_an_error(tmp_path: Path, bad: Any) -> None:
+    fake = FakeGitLab()
+    items = [copy.deepcopy(mrs()[3]) for _ in range(3)]  # a null source project
+    for index, (number, stamp) in enumerate([(5, "05"), (4, "04"), (3, "03")]):
+        items[index].update(iid=number, id=90000 + number, updated_at=f"2026-10-{stamp}T00:00:00Z")
+        items[index]["web_url"] = f"https://gitlab.com/user-9/proj/-/merge_requests/{number}"
+    items[1]["source_project_id"] = bad
+    scene(fake, items)
+    assert fails(tmp_path, fake, state="all").code == "upstream_error"
+
+
+def forks(count: int) -> list[dict[str, Any]]:
+    """`count` MRs, newest first, each from its own fork project."""
+    found = []
+    for index in range(count):
+        item = copy.deepcopy(mrs()[1])
+        number = 100 + count - index
+        item.update(
+            iid=number,
+            id=91000 + number,
+            source_project_id=5000 + number,
+            updated_at=f"2026-10-05T{23 - index // 60:02d}:{59 - index % 60:02d}:00Z",
+        )
+        item["web_url"] = f"https://gitlab.com/user-9/proj/-/merge_requests/{number}"
+        found.append(item)
+    return found
+
+
+def test_side_reads_run_only_for_the_returned_items(tmp_path: Path) -> None:
+    fake = FakeGitLab()
+    items = forks(100)
+    for item in items:
+        item["author"] = {**item["author"]}
+        del item["author"]["bot"]
+        item["author"]["id"] = 7000 + item["iid"]
+        item["author"]["username"] = f"user-{item['iid']}"
+    scene(fake, items)
+    fake.on("projects/5101", {**lists("source_project"), "id": 5101, "path_with_namespace": "u/f"})
+    fake.on("users/7101", {"id": 7101, "username": "user-101", "bot": False})
+    page = read(tmp_path, fake, PrQuery(repo=REPO, host="gitlab.com", limit=1))
+    assert [i.number for i in page.items] == [200]  # newest
+    assert page.complete is False
+    reads = [c.path for c in fake.calls if c.path.startswith(("projects/5", "users/"))]
+    assert len(reads) <= 2  # the returned item's fork and author only
+
+
+def test_a_failing_fork_read_on_a_cut_item_does_not_fail_the_list(tmp_path: Path) -> None:
+    fake = FakeGitLab()
+    items = forks(3)
+    scene(fake, items)
+    for item in items:
+        fake.on(f"projects/{item['source_project_id']}", {"message": "boom"}, status=500)
+    fake.on(
+        f"projects/{items[0]['source_project_id']}",
+        {**lists("source_project"), "id": items[0]["source_project_id"]},
+    )
+    page = read(tmp_path, fake, PrQuery(repo=REPO, host="gitlab.com", limit=1))
+    assert [i.number for i in page.items] == [items[0]["iid"]]
+    assert page.complete is False
 
 
 def test_an_item_on_another_host_is_wrong_host_response(tmp_path: Path) -> None:
@@ -698,7 +818,7 @@ def test_the_draft_filter_name_follows_the_host_version(
     read(tmp_path, fake, draft=True)
     (call,) = [c for c in fake.calls if c.path == ROUTE]
     assert call.query[name] == "yes"
-    assert {"draft", "wip"} - {name} not in set(call.query)
+    assert ({"draft", "wip"} - {name}).isdisjoint(call.query)
 
 
 @pytest.mark.parametrize("status", [404, 500])
@@ -1004,6 +1124,86 @@ def test_a_project_answer_missing_a_field_is_an_error(tmp_path: Path, field: str
     with pytest.raises(ForgectlError) as caught:
         ask(tmp_path, fake)
     assert caught.value.code in ("upstream_error", "wrong_host_response")
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_an_unreadable_project_is_null_with_a_reason(tmp_path: Path, status: int) -> None:
+    fake = FakeGitLab()
+    access_scene(fake)
+    fake.on("projects/user-9%2Fproj", {"message": "x"}, status=status)
+    result = ask(tmp_path, fake)
+    assert result.write_access is None and result.level is None
+    assert result.reason == "no_permission_to_read"
+    assert result.repo == "gitlab.com/user-9/proj"
+    assert fake.count("users") == 0
+
+
+def test_the_answer_names_the_verified_web_url_path_not_path_with_namespace(
+    tmp_path: Path,
+) -> None:
+    fake = FakeGitLab()
+    project = lists("project")
+    project["path_with_namespace"] = "evil/other"
+    access_scene(fake)
+    fake.on("projects/user-9%2Fproj", project)
+    assert ask(tmp_path, fake).repo == "gitlab.com/user-9/proj"
+
+
+def test_a_project_url_that_differs_in_case_only_is_accepted(tmp_path: Path) -> None:
+    fake = FakeGitLab()
+    project = lists("project")
+    project["web_url"] = "https://gitlab.com/User-9/Proj"
+    access_scene(fake)
+    fake.on("projects/user-9%2Fproj", project)
+    result = ask(tmp_path, fake)
+    assert result.write_access is True and result.repo == "gitlab.com/User-9/Proj"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://gitlab.com/user-9/other",
+        "https://gitlab.com/user-9/proj/extra",
+        "https://gitlab.com/user-9",
+        "https://evil.example.test/User-9/Proj",
+    ],
+)
+def test_a_project_url_for_another_project_or_host_is_wrong_host_response(
+    tmp_path: Path, url: str
+) -> None:
+    fake = FakeGitLab()
+    project = lists("project")
+    project["web_url"] = url
+    access_scene(fake)
+    fake.on("projects/user-9%2Fproj", project)
+    with pytest.raises(ForgectlError) as caught:
+        ask(tmp_path, fake)
+    assert caught.value.code == "wrong_host_response"
+
+
+MEMBER_LEVELS = [0, 5, 29, 30, 40, 50]
+MEMBER_STATES = [
+    ("active", "active"),
+    ("blocked", None),
+    ("awaiting", "awaiting"),
+    ("active", None),
+]
+EXPIRIES = ["2999-01-01", "2020-01-01", "soon", None]
+
+
+def test_effective_and_can_push_agree_on_write_in_force(tmp_path: Path) -> None:
+    backend = make_backend(FakeGitLab(), tmp_path, today=lambda: date(2026, 10, 5))
+    for level in MEMBER_LEVELS:
+        for state, membership in MEMBER_STATES:
+            for expires in EXPIRIES:
+                data = member(access_level=level, state=state, expires_at=expires)
+                if membership is None:
+                    data.pop("membership_state", None)
+                else:
+                    data["membership_state"] = membership
+                in_force = backend._member_in_force(data)
+                assert gitlab_lists._effective(backend, data) is in_force, data
+                assert backend._member_can_push(data) is (in_force and level >= 30), data
 
 
 def test_the_golden_access_output(tmp_path: Path) -> None:

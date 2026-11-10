@@ -905,6 +905,11 @@ class GitLabBackend:
         level = data.get("access_level")
         if isinstance(level, bool) or not isinstance(level, int) or level < 30:
             return False
+        return self._member_in_force(data)
+
+    def _member_in_force(self, data: Mapping[str, Any]) -> bool:
+        """Whether the membership counts at all: active user and seat, not expired. The level is
+        checked separately."""
         if data.get("state") != "active":
             return False
         if "membership_state" in data and data["membership_state"] != "active":
