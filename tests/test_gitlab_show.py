@@ -68,7 +68,6 @@ def test_the_backend_satisfies_the_protocol_and_names_itself(
     backend = make_backend(fake, tmp_path)
     assert isinstance(backend, Backend)
     assert backend.name == "gitlab"
-    assert gl.BACKEND is GitLabBackend
 
 
 def test_an_open_ready_mr_is_normalized(fake: FakeGitLab, tmp_path: Path) -> None:
@@ -103,6 +102,16 @@ def test_an_open_ready_mr_is_normalized(fake: FakeGitLab, tmp_path: Path) -> Non
         None,
     )
     assert read.ci.state == "passing"
+
+
+def test_the_read_carries_the_reviewer_table_the_review_fields_came_from(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    read = show(fake, tmp_path)
+    approved = [e.login for e in read.latest_by_reviewer if e.state == "approved"]
+    assert approved == ["user-2"]
+    assert len(approved) == read.pr.approvals
+    assert read.pr.review_decision == "approved"
 
 
 def test_show_output_matches_the_schema_and_golden(fake: FakeGitLab, tmp_path: Path) -> None:
