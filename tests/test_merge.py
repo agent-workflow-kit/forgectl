@@ -25,8 +25,10 @@ from typing import Any
 
 import pytest
 
+from forgectl import cli as cli_module
 from forgectl import merge as merge_module
 from forgectl.cli import main
+from forgectl.errors import ForgectlError, SignalExit
 from forgectl.humanactions import Tty
 
 from .harness import golden, schemas
@@ -1231,6 +1233,67 @@ def test_an_internal_error_after_the_attempt_is_outcome_unknown_and_post_hooks_r
     internal = [r for r in rig.log() if r["event"] == "internal"]
     assert [r["details"]["exception"] for r in internal] == ["RuntimeError"]
     assert "a bug in verification" not in json.dumps(rig.log())
+
+
+def test_a_typed_error_from_verification_keeps_its_code_and_the_post_hooks_run(
+    rig: Rig, tmp_path: Path
+) -> None:
+    out = tmp_path / "post.json"
+    rig.reads(doc(), merged())
+    rig.put()
+
+    def typed(self: Any, **kw: Any) -> Any:
+        raise ForgectlError("rate_limited", "slow down")
+
+    rig.monkeypatch.setattr(merge_module.MergeRun, "_verify", typed)
+    done = rig.run(extra_config=hook_config("post-merge", f"cat > {out}"))
+    assert done.code == 12 and done.error["code"] == "rate_limited"
+    assert results(rig.audit()) == ["attempted", "outcome_unknown"]
+    assert json.loads(out.read_text())["result"] == "outcome_unknown"
+
+
+def test_a_failing_log_in_the_internal_error_path_still_records_and_runs_the_hooks(
+    rig: Rig, tmp_path: Path
+) -> None:
+    out = tmp_path / "post.json"
+    rig.reads(doc(), merged())
+    rig.put()
+
+    def boom(self: Any, **kw: Any) -> Any:
+        raise RuntimeError("bug")
+
+    def bad_log(self: Any, *a: Any, **kw: Any) -> None:
+        raise OSError("log is gone")
+
+    rig.monkeypatch.setattr(merge_module.MergeRun, "_verify", boom)
+    rig.monkeypatch.setattr(merge_module.MergeRun, "_log", bad_log)
+    done = rig.run(extra_config=hook_config("post-merge", f"cat > {out}"))
+    assert done.code == 12 and done.error["code"] == "outcome_unknown"
+    assert results(rig.audit()) == ["attempted", "outcome_unknown"]
+    assert json.loads(out.read_text())["result"] == "outcome_unknown"
+
+
+def test_a_signal_while_the_result_is_printed_after_a_merge_exits_12_outcome_unknown(
+    rig: Rig,
+) -> None:
+    rig.reads(doc(), merged())
+    rig.put()
+
+    def signalled(*a: Any, **kw: Any) -> None:
+        raise SignalExit(signal.SIGTERM)
+
+    rig.monkeypatch.setattr(cli_module, "emit_success", signalled)
+    done = rig.run()
+    assert done.code == 12 and done.error["code"] == "outcome_unknown"
+    assert results(rig.audit()) == ["attempted", "merged"]
+
+
+def test_a_signal_with_no_write_attempted_still_exits_128_plus_n(rig: Rig) -> None:
+    def signalled(*a: Any, **kw: Any) -> None:
+        raise SignalExit(signal.SIGTERM)
+
+    rig.monkeypatch.setattr(cli_module, "_run", signalled)
+    assert rig.run().code == 128 + signal.SIGTERM
 
 
 def test_a_method_the_re_read_no_longer_allows_is_refused_with_no_write(

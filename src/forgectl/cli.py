@@ -13,7 +13,7 @@ from typing import Any
 
 from . import gateway, jsonlog, registry
 from .config import load_config
-from .errors import ForgectlError, SignalExit
+from .errors import ForgectlError, SignalExit, reset_write_attempted, write_was_attempted
 from .humanactions import Tty, build_context, default_me_name
 from .identifiers import bind_args
 from .output import RecordStream, emit_error, emit_success, warn
@@ -152,7 +152,7 @@ def _dispatch(argv: list[str], tty: Tty | None) -> int:
     except ForgectlError as err:
         return _fail(err, args, json_mode=json_mode)
     except SignalExit as signalled:
-        if not signalled.write_attempted:
+        if not (signalled.write_attempted or write_was_attempted()):
             raise  # no write was attempted: main() exits 128+N with no envelope
         # A signal after Attempt.begin(): the audit already says outcome_unknown, so the exit
         # says it too (interface: Exit codes), whatever the host did with the write.
@@ -182,8 +182,11 @@ def main(argv: list[str] | None = None, *, tty: Tty | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     # The signal handlers stay installed while an error is printed, so a signal then still ends
     # the run as 128+N rather than a default-handler death in the middle of the output.
+    reset_write_attempted()
     with _signals():
         try:
             return _dispatch(argv, tty)
         except SignalExit as signalled:  # before any write, or one that is already recorded
+            if write_was_attempted():  # a signal outside every handler after a write
+                return 12
             return 128 + signalled.signum

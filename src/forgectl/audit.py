@@ -24,7 +24,7 @@ from types import TracebackType
 from typing import Any, Literal
 
 from . import jsonlog
-from .errors import ForgectlError, SignalExit
+from .errors import ForgectlError, SignalExit, mark_write_attempted
 from .jsonlog import PATTERNS, JsonlError, matches, parse_ts
 from .sanitize import sanitize_line, sanitize_text
 
@@ -327,6 +327,7 @@ class Attempt:
             return
         record = self._record("attempted")
         with _signals_held():
+            mark_write_attempted()  # before the append: a signal after it can land anywhere
             try:
                 jsonlog.append(self._dir, AUDIT_FILE, record)
             except JsonlError as err:
@@ -384,6 +385,8 @@ class Attempt:
             self.finish("outcome_unknown")
         except SignalExit as late:  # held during the append, it replaces the one in flight
             late.write_attempted = True
+            if self.finish_error is not None:  # the append failed: audit_failed carries it
+                raise self.finish_error from None
             raise
         except ForgectlError:
             if exc is None or isinstance(exc, Exception):

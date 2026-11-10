@@ -498,8 +498,13 @@ class MergeRun:
         still follow. A signal is not caught."""
         try:
             return self._merge_and_verify(current, method)
+        except ForgectlError as err:  # typed: keeps its code; the record and hooks follow
+            return Outcome("outcome_unknown", error=err)
         except Exception as exc:
-            self._log("error", "internal", {"exception": type(exc).__name__})
+            try:
+                self._log("error", "internal", {"exception": type(exc).__name__})
+            except Exception:  # a failing log must not skip the record and the hooks
+                pass
             return Outcome(
                 "outcome_unknown",
                 error=ForgectlError(

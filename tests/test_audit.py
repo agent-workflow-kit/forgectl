@@ -642,3 +642,32 @@ def test_every_signal_forgectl_handles_is_held_during_an_append(
         attempt.finish("merged")
     assert len(masks) == 2
     assert all(getattr(signal, held) in mask for mask in masks)
+
+
+def test_a_late_signal_during_a_failing_unknown_append_ends_as_audit_failed(
+    state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-2: the unknown outcome could not be recorded; the signal held meanwhile must not
+    turn the audit_failed into a bare outcome_unknown."""
+
+    def fail_and_signal(*_: object) -> None:
+        os.kill(os.getpid(), signal.SIGINT)  # held, delivered as the mask is restored
+        raise audit.jsonlog.JsonlError("full")
+
+    with _signals(), pytest.raises(ForgectlError) as caught, Attempt(state, context()) as attempt:
+        attempt.begin()
+        monkeypatch.setattr(audit.jsonlog, "append", fail_and_signal)
+        raise SignalExit(signal.SIGTERM)
+    assert (caught.value.code, caught.value.details) == (
+        "audit_failed",
+        {"outcome": "outcome_unknown"},
+    )
+
+
+def test_begin_sets_the_process_level_write_flag(state: Path) -> None:
+    from forgectl.errors import write_was_attempted
+
+    attempt = Attempt(state, context())
+    assert not write_was_attempted()
+    attempt.begin()
+    assert write_was_attempted()

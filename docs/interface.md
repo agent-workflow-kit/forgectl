@@ -408,7 +408,7 @@ Every `merge` follows one order:
 9. **Verify,** polling up to 10 s (1 s, 2 s, 3 s, 4 s): head, base and state; for `--auto`, armed or merged. GitLab's transient `locked` counts as not yet decided. Merged at the sent head and the expected base is success. A merged PR at another head or whose `base.ref` differs from the expected base exits 12 (`merge_unverified`, `details.observed`). Still open or closed after the window is `merge_unverified`, for example a PR that was enqueued, or `outcome_unknown` after step 8's failure answer. A failed verify read is `outcome_unknown`. A success answer from the host is never proof by itself: GitHub returns `merged: true` for an already merged PR with a wrong sha.
 10. **Audit result, `post-merge` hooks, result.**
 
-Once a host write was attempted, every path runs the audit result record and the `post-` hooks, then exits. A signal before the outcome is recorded skips the `post-` hooks and exits 12 `outcome_unknown`; a signal after it stops the remaining `post-` hooks and exits with the recorded outcome. Neither exits 128+N. A refusal before any call does not.
+Once a host write was attempted, every path runs the audit result record and the `post-` hooks, then exits. A signal before the outcome is recorded skips the `post-` hooks and exits 12 `outcome_unknown`; a signal after it stops the remaining `post-` hooks and exits with the recorded outcome. A signal while the result is being printed, or anywhere else after the `attempted` record was written, exits 12 `outcome_unknown`, since the result was not reported, and the audit record is authoritative. Neither exits 128+N. A refusal before any call does not.
 
 `--override-blocks` (human-only) skips only `not_ready`. It never skips `stale_head`, `stale_base`, `not_open` or `no_head_match`.
 
@@ -673,7 +673,7 @@ Exit 20 has `code: refused`, with `reason` required. There are no tool-specific 
 
 `unsupported_host_version` applies to the rows marked so in [Host versions](#host-versions).
 
-A declined dialog exits 13 `confirmation_required`, message `declined`, with a log line and no audit record. A signal with no write attempted exits 128+N with no envelope, the one exception to this table. Once a write was attempted, a signal never exits 128+N: while the outcome is unknown it exits 12 `outcome_unknown`; after the outcome record is written it ends the `post-` hooks and exits with that outcome.
+A declined dialog exits 13 `confirmation_required`, message `declined`, with a log line and no audit record. A signal with no write attempted exits 128+N with no envelope, the one exception to this table. Once a write was attempted, a signal never exits 128+N: while the outcome is unknown it exits 12 `outcome_unknown`; after the outcome record is written it ends the `post-` hooks and exits with that outcome. A signal while the result is being printed exits 12 `outcome_unknown` too, and the audit record says what happened. If the unknown-outcome record itself cannot be written, the exit is 12 `audit_failed`.
 
 ## Output by exit code
 
