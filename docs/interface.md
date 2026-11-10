@@ -73,7 +73,7 @@ Every text field that comes from a forge is untrusted (`x-untrusted` in the sche
 | `merged_by` | login or null |
 | `labels` | list of untrusted strings; anyone with triage rights can set one |
 | `author_association` | GitHub's value or null; may only make a tier stricter, and never shows write access |
-| `head` | `{sha, ref, repo, is_fork}`; `repo` is null when the head project was deleted; `sha` survives branch and repo deletion |
+| `head` | `{sha, ref, repo, is_fork}`; `repo` is null when the head project was deleted or is hidden (GitLab 403 or 404 on it), and `is_fork` is still true when the head project's id differs from the target's; `sha` survives branch and repo deletion |
 | `base` | `{ref, sha, is_default}`; a non-default `ref` is how a stacked PR shows; forgectl has no stack concept |
 | `merged_head_sha` | the PR's head when it merged, null until merged. Callers pass this to `wtctl remove --merged-head` |
 | `merge_commit_sha` | the merged commit, null until merged, also for a host that fills it on open PRs |
@@ -95,13 +95,13 @@ Field rules:
 - **`url`** is built by forgectl as `https://<host><prefix>/<path>/...`, never taken from the host.
 - **`base.sha`:** GitHub `baseRefOid`, GitLab `diff_refs.base_sha`; it is not the merge base, which is in [`diff`](#diff). **`base.is_default`:** GitHub GraphQL `repository.defaultBranchRef`; GitLab project read.
 - **`merged_head_sha` on GitLab** is the MR's `sha`, which stays the pre-merge head after every merge type on every method. **`merge_commit_sha` on GitLab** is the host's `merge_commit_sha`, else `squash_commit_sha`, else `sha`.
-- **`mergeable`.** GitHub: `mergeable`. GitLab: true for `mergeable`; null for `checking`, `unchecked`, `preparing`; false otherwise, including policy reasons. `blocked_by` says which.
+- **`mergeable`.** GitHub: `mergeable`. GitLab: true for `mergeable` unless `has_conflicts` is true; null for `checking`, `unchecked`, `preparing`; false otherwise, including policy reasons. `blocked_by` says which.
 - **`auto_merge`.** GitLab may read `enabled` true for about 3 s after a push.
-- **`merge_queue`.** GitHub: GraphQL `isMergeQueueEnabled` on the PR, which varies per PR. GitLab: project `merge_trains_enabled`; absent from the answer means `false`.
+- **`merge_queue`.** GitHub: GraphQL `isMergeQueueEnabled` on the PR, which varies per PR. GitLab: project `merge_trains_enabled`; absent from the answer means `false`, and a value that is not a boolean gives null.
 - **`merge_methods_allowed`.** GitHub: the repository's `squashMergeAllowed`, `mergeCommitAllowed` and `rebaseMergeAllowed`, in the one GraphQL query; absent gives null. GitLab: from the table in [Merge method](#merge-method).
 - **Sizes.** On GitLab `additions` and `deletions` are null, and `changed_files` is `changes_count` as an integer, null for a form like `1000+`. A consumer treats a null size as the largest tier.
 - **`review_decision`.** GitHub: `reviewDecision`, or `none` when that is null. `none` says no rule decided, not that nobody approved. GitLab: `changes_requested` if any `latest_by_reviewer` entry has that state; else `review_required` if `approvals_left > 0`; else `approved` if `approvals > 0`; else `none`.
-- **`approvals_at_head`.** GitHub: entries with `commit_sha` equal to the head, as in the table above. GitLab: null unless `reset_approvals_on_push` is read as true, because a GitLab approval survives a push otherwise. Both compare the author by id. An approval older than the PR's latest retarget does not count, and neither does one with a null `at` when a retarget exists. GitHub: `timelineItems(last:1, itemTypes: [BASE_REF_CHANGED_EVENT, AUTOMATIC_BASE_CHANGE_SUCCEEDED_EVENT])` `createdAt`, in the one query, so a manual retarget and the host's own both count. GitLab, only when the field would otherwise be non-null: the newest system note beginning `changed target branch from`, found by its own walk over all of the MR's notes, which never stops early as the `instance` read does; `show` then also makes it on such a project. A walk that cannot complete means no approval counts. A discount or a failed walk is a `warn` log line.
+- **`approvals_at_head`.** GitHub: entries with `commit_sha` equal to the head, as in the table above. GitLab: null unless `reset_approvals_on_push` is read as true, because a GitLab approval survives a push otherwise. Both compare the author by id. An approval older than the PR's latest retarget does not count, and neither does one with a null `at` when a retarget exists. GitHub: `timelineItems(last:1, itemTypes: [BASE_REF_CHANGED_EVENT, AUTOMATIC_BASE_CHANGE_SUCCEEDED_EVENT])` `createdAt`, in the one query, so a manual retarget and the host's own both count. GitLab, only when the field would otherwise be non-null: the newest system note beginning `changed target branch from` or containing `now targets the` (the host's own retarget after the target branch is merged and deleted), found by its own walk over all of the MR's notes, which never stops early as the `instance` read does; `show` then also makes it on such a project. A walk that cannot complete means no approval counts. A discount or a failed walk is a `warn` log line. GitLab resets approvals on push asynchronously and only when the `git patch-id` of the changes differs, so an approval GitLab still lists right after a push counts.
 
 ### Blocker codes
 
@@ -118,9 +118,9 @@ Field rules:
 | `discussions_unresolved` | `BLOCKED` with unresolved resolvable threads, when no other code explains it | `discussions_not_resolved` |
 | `branch_behind` | `BEHIND` | `need_rebase` |
 | `mergeability_unknown` | `UNKNOWN` after retries; `mergeStateStatus` or `mergeable` UNKNOWN, missing or unmapped after the readiness tries | `checking`, `unchecked`, `preparing` after retries |
-| `other` | `BLOCKED` when nothing above explains it, with `detail: "BLOCKED"` | anything else (`merge_time`, `merge_request_blocked`, `commits_status` and others), with the status as `detail`; `locked` |
+| `other` | `BLOCKED` when nothing above explains it, with `detail: "BLOCKED"` | anything else (`merge_time`, `merge_request_blocked`, `commits_status` and others), with the status as `detail`; `locked`; `not_open` on an open (or locked) MR |
 | `checks_absent` | not in `blocked_by`: only in [`merge`](#merge-order)'s refusal of a non-human actor | the same |
-| (adds nothing) | `CLEAN`, `HAS_HOOKS`, `UNSTABLE` | `mergeable`, `not_open` |
+| (adds nothing) | `CLEAN`, `HAS_HOOKS`, `UNSTABLE` | `mergeable`; `not_open` on a closed or merged MR |
 
 `checks_pending` and `checks_failing` come from forgectl's own reading of the head's checks, not only from the host's status: a host can report `CLEAN` or `mergeable` with a check still running or failing, and with no rules on a branch GitHub merges past failing checks. GitLab reads `mergeable` on failed, canceled and skipped pipelines. An optional failing GitHub check therefore blocks a merge until a human passes `--override-blocks`.
 
@@ -224,7 +224,9 @@ A new push gives a later `pushed_at` on the next snapshot. Nothing is stored bet
 
 GitHub: checks are read for `headRefOid` exactly: the rollup of the last listed commit when its `oid` matches, else a second query by oid (commit order is not head order). `for_current_head` is always true on GitHub.
 
-GitLab: checks are `GET /projects/:id/repository/commits/:sha/statuses` with `sha` and `id` from `head_pipeline` (`sha`, `project_id`) and `pipeline_id=<head_pipeline.id>`, each validated as a sha or an integer; latest per name. A null `head_pipeline` gives `checks: []`, `state: none`, with no read.
+GitLab: checks are `GET /projects/:id/repository/commits/:sha/statuses` with `sha` and `id` from `head_pipeline` (`sha`, `project_id`) and `pipeline_id=<head_pipeline.id>`, each validated as a sha or an integer; `project_id` must be the MR's `project_id` or `source_project_id`, else `upstream_error`. Latest per name: the highest status `id` (an integer, else `upstream_error`), and on equal ids the worse state (`failing`, then `pending`, then `passing`). A null `head_pipeline` gives `checks: []`, `state: none`, with no read. The `pipeline_id` filter needs GitLab 17.9 ([Host versions](#host-versions)). For a fork's pipeline (`project_id` is the source project), a 404 or 403 on the statuses gives no checks and `complete: false` with a `warn` log line; on the target project it is `upstream_error`.
+
+GitLab also adds checks from the pipeline itself. `head_pipeline.status` `success`, `skipped` and `manual` add nothing; `failed` and `canceled` add a counted failing check named `(pipeline)`; `created`, `waiting_for_resource`, `preparing`, `pending`, `running`, `scheduled`, `canceling` and `waiting_for_callback` add a counted pending `(pipeline)` check; any other value, or none, adds a pending `(pipeline)` check and a `warn` log line. Child pipelines come from `GET /projects/:id/pipelines/:pipeline_id/bridges` (the pipeline's project, paged like the statuses): each bridge is a check named `(child) <bridge name>`, whose state is its `downstream_pipeline.status`: `success` passing, `skipped` skipped, `failed` and `canceled` failing, `manual` and the unfinished values above pending, anything else pending with a `warn` log line; a null `downstream_pipeline` is pending, and a bridge with `allow_failure: true` is not counted. A bridges read that fails (other than `auth_required`, `wrong_host_response` and `tool_missing`) or is cut at the page cap gives `complete: false` with a `warn` log line. A bridge row that is not the documented shape is `upstream_error`, as a malformed commit-status row is.
 
 A check's `state`:
 
@@ -232,7 +234,7 @@ A check's `state`:
 |---|---|---|---|
 | `passing` | `SUCCESS` | `SUCCESS` | `success` |
 | `failing` | `FAILURE`, `TIMED_OUT`, `CANCELLED`, `ACTION_REQUIRED`, `STARTUP_FAILURE`, `STALE` | `FAILURE`, `ERROR` | `failed`, `canceled` |
-| `pending` | `QUEUED`, `IN_PROGRESS`, `WAITING`, `PENDING`, `REQUESTED` | `PENDING`, `EXPECTED` | `created`, `pending`, `preparing`, `running`, `scheduled`, `waiting_for_resource`, `waiting_for_callback`; `manual` with `allow_failure: false` |
+| `pending` | `QUEUED`, `IN_PROGRESS`, `WAITING`, `PENDING`, `REQUESTED` | `PENDING`, `EXPECTED` | `created`, `pending`, `preparing`, `running`, `scheduled`, `waiting_for_resource`, `waiting_for_callback`, `canceling`; `manual` with `allow_failure: false` |
 | `skipped` | `NEUTRAL`, `SKIPPED` | | `skipped`; `manual` with `allow_failure: true` |
 
 An unmapped value is `pending` with a `warn` log line, so a new host state never reads as passing.
@@ -240,7 +242,7 @@ An unmapped value is `pending` with a `warn` log line, so a new host state never
 - `counted` is false for a GitLab `allow_failure` job and for `skipped`; true otherwise. `required` is `true`, `false` or `null`; GitLab gives `false` for `allow_failure: true`, else `null`. A check's `url` is null for a scheme other than lowercase `http://` or `https://`, matching the schema's pattern, and for a url holding whitespace or a control character.
 - **Aggregation over counted checks:** any `failing` gives `failing`; else any `pending` gives `pending`; else any `passing` gives `passing`; else `none`. **`none` is not passing:** it means no evidence, including a head whose only pipeline was skipped.
 - `for_current_head` false (GitLab `head_pipeline.sha` differs from the head) forces `state: pending`, whatever the old pipeline reported; `head_sha` names the old commit. With `state: none`, `for_current_head` is true and `head_sha` is the PR's head. `passing` means no counted check registered for this head is failing or pending, and at least one passed. It does not say which checks, that every expected check registered, or who ran them.
-- `complete` false (a host cap on the check list) turns `passing` into `pending`.
+- `complete` false (a host cap on the check list, or on GitLab an unfiltered or unreadable part of it as above) turns `passing` into `pending`.
 
 ### Files
 
@@ -330,7 +332,7 @@ Every call to a forge goes through one gateway:
 
 **Readiness** values that are still being computed get a short retry: `merge` up to 5 tries in 10 s; `show` and `snapshot` up to 3 tries in 4 s; `prs` none. `retries: 0` turns off both kinds of retry. On GitLab the single-MR `GET` triggers the recheck; `with_merge_status_recheck` is not used, since lists do not refresh. If unresolved, `blocked_by` includes `mergeability_unknown`.
 
-**Completeness.** Host-imposed caps give `complete: false`, exit 0. Every read a command needs behaves alike: after retries it exits 12; [`access`](#access) and `can_push`'s member read keep their stated nulls, and the [retarget walk](#pr-object) counts no approval. No exit 0 output is partial by failure, apart from `prs` and `whoami`, which list `errors`.
+**Completeness.** Host-imposed caps give `complete: false`, exit 0. Every read a command needs behaves alike: after retries it exits 12; [`access`](#access) and `can_push`'s member read keep their stated nulls, the [retarget walk](#pr-object) counts no approval, and GitLab's fork-pipeline statuses and child-pipeline read give `ci.complete: false` ([CI object](#ci-object)). No exit 0 output is partial by failure, apart from `prs` and `whoami`, which list `errors`.
 
 **Writes** are never retried. `merge` first re-reads the PR and treats merged at the expected head and base as success. A caller may retry a post with `--dedupe-key`: text is not duplicated, and on GitLab a missing state step is completed.
 
@@ -561,7 +563,7 @@ Exit 20 (`too_large`) when cut. GitHub: a 406 on the diff, a diff larger than fo
 | Backend | Answer |
 |---|---|
 | GitHub | `GET /repos/O/R/collaborators/U/permission`: `permission` decides `write_access` (`admin` and `write` give true, others false), which covers custom roles. `level` is `role_name` when it is in the enum and within the legacy `permission` (`admin` under `admin`, `maintain` or `write` under `write`, `triage` or `read` under `read`), else `permission`. The answer must name the user it is for (`user.login`); one without it is not the documented shape (retried, then `upstream_error`). A 403 (the account lacks push access) gives `null`, `reason: no_permission_to_read`. A 404 for a login ending in `[bot]` gives `null` with `reason: no_permission_to_read`; any other 404 is `not_found` (exit 10). |
-| GitLab | `/users?username=` (empty gives false), then `GET /projects/:id/members/all/:user_id`: true requires access level 30 or more, `state: active` and an unexpired `expires_at`; any other `state` gives false. A 404 gives false. A 401 or 403 gives `null`, `reason: no_permission_to_read`. Levels 50, 40 and 30 map to `admin`, `maintain` and `write`; below that `read`. |
+| GitLab | `/users?username=` (empty gives false), then `GET /projects/:id/members/all/:user_id`: true requires access level 30 or more, `state: active`, `membership_state` absent or `active` (a member `awaiting` a seat cannot push) and an unexpired `expires_at`; any other `state` or `membership_state` gives false. The answer's `id` must be the user's, else `upstream_error`. A 404 gives false. A 401 or 403 gives `null`, `reason: no_permission_to_read`. Levels 50, 40 and 30 map to `admin`, `maintain` and `write`; below that `read`. |
 
 `reason` is set only when `write_access` is null. `author_association` is not used: it misses people with write access. An unresolvable user exits 10 only on GitHub's own 404; GitLab reports non-members and unknown users alike. `me` is reserved in `<user>` too, and resolves as in `prs`.
 
@@ -714,12 +716,13 @@ Errors also go to stderr as text.
 
 ## Host versions
 
-forgectl reads GitLab's `GET /version` once per process, only for the rows marked below. It parses `^(\d+)\.(\d+)`; an unreadable version counts as below every row, except `--auto`, as in [Merge order](#merge-order).
+forgectl reads GitLab's `GET /version` once per process, only for the rows marked below. It parses `^(\d{1,6})\.(\d{1,6})`; an unreadable version, including a failed read other than `auth_required`, `wrong_host_response` and `tool_missing`, counts as below every row, except `--auto`, as in [Merge order](#merge-order).
 
 | Feature | Detected by | Below this version |
 |---|---|---|
 | `detailed_merge_status` (15.6) | the field being absent | `unsupported_host_version` |
 | `/diffs` (15.7) | a 404 on the MR's `/diffs` | `unsupported_host_version` |
+| `pipeline_id` filter on commit statuses (17.9) | version read | `ci.complete: false` with a `warn` log line, so `passing` reads `pending`: an older host ignores the filter and lists every pipeline's statuses on the sha, and a status row carries no `pipeline_id` to filter on |
 | `mergeRequestRequestChanges` (17.2) | version read | a `request_changes` review exits 12 (`unsupported_host_version`), before anything is posted |
 | push cancels auto-merge (17.7) | version read | `merge --auto --expected-head` exits 20, `no_head_match` |
 | `auto_merge` parameter (17.11) | version read | `merge_when_pipeline_succeeds` |

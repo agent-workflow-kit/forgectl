@@ -1088,7 +1088,7 @@
                   "type": "null"
                 }
               ],
-              "description": "null when the head project was deleted."
+              "description": "null when the head project was deleted or is hidden (GitLab 403 or 404); is_fork stays true when the head project's id differs from the target's."
             },
             "is_fork": {
               "type": [
