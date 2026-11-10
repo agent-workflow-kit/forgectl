@@ -1,0 +1,38 @@
+[
+  {
+    "allow_failure": false,
+    "created_at": "2026-10-05T12:00:00.000Z",
+    "finished_at": "2026-10-05T12:10:00.000Z",
+    "id": 7003,
+    "name": "build",
+    "pipeline_id": 5001,
+    "ref": "feature/widget",
+    "sha": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "status": "success",
+    "target_url": "https://gitlab.com/user-9/proj/-/jobs/7003"
+  },
+  {
+    "allow_failure": false,
+    "created_at": "2026-10-05T12:00:00.000Z",
+    "finished_at": "2026-10-05T12:20:00.000Z",
+    "id": 7004,
+    "name": "test",
+    "pipeline_id": 5001,
+    "ref": "feature/widget",
+    "sha": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "status": "success",
+    "target_url": "https://gitlab.com/user-9/proj/-/jobs/7004"
+  },
+  {
+    "allow_failure": true,
+    "created_at": "2026-10-05T12:00:00.000Z",
+    "finished_at": "2026-10-05T12:05:00.000Z",
+    "id": 7005,
+    "name": "lint",
+    "pipeline_id": 5001,
+    "ref": "feature/widget",
+    "sha": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "status": "failed",
+    "target_url": "https://gitlab.com/user-9/proj/-/jobs/7005"
+  }
+]

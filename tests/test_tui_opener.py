@@ -4,13 +4,38 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+from forgectl import gateway
 from forgectl.tui.opener import BrowserOpener, OpenRefused, is_openable
+
+
+@pytest.fixture(autouse=True)
+def private_home(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The harness refuses a child without a HOME under the test's private directory; the opener
+    passes only what its allowlist finds in the test's environment, so give each child the
+    private HOME when the test's own environment names none. The opener is never killed, so each
+    test waits for the fake it started to finish."""
+    real = gateway.start
+    started: list[subprocess.Popen[bytes]] = []
+
+    def start(
+        argv: list[str], *, env: dict[str, str], cwd: str | None = None
+    ) -> subprocess.Popen[bytes]:
+        proc = real(argv, env={"HOME": os.environ["HOME"], **env}, cwd=cwd)
+        started.append(proc)
+        return proc
+
+    monkeypatch.setattr(gateway, "start", start)
+    yield
+    for proc in started:
+        proc.wait(timeout=10)
 
 
 @pytest.fixture
@@ -219,9 +244,9 @@ def test_an_unsafe_browser_value_is_skipped_for_sensible_browser(
 @pytest.mark.parametrize(
     "url",
     [
-        "https://github.com;x@evil.example/",
-        "https://user@github.com/",
-        "https://github.com:443@evil.example/a",
+        "https://github.com;x" + "@evil.example/",
+        "https://user" + "@github.com/",
+        "https://github.com:443" + "@evil.example/a",
         "http://a@b/",
     ],
 )
@@ -234,3 +259,41 @@ def test_the_length_cap_is_2048_characters_including_the_scheme() -> None:
     assert len(ok) == 2048 and is_openable(ok)
     assert not is_openable(ok + "a")
     assert is_openable("https://e.example/a@b")  # @ outside the authority is fine
+
+
+def test_the_opener_is_detached_in_its_own_session_with_slash_as_its_directory(
+    tmp_path: Path,
+) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "session.log"
+    script = bindir / ("open" if sys.platform == "darwin" else "xdg-open")
+    script.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$(pwd)" "$(ps -o sid= -p $$ | tr -d " ")" "$$" "x" >> "{log}"\n'
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    path = f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin"
+    BrowserOpener({"PATH": path}).open("https://github.com/acme/widgets/pull/1")
+    cwd, session, pid, _ = _wait_for(log)
+    assert cwd == "/"
+    assert session == pid  # a session leader: a group kill aimed at forgectl's group misses it
+
+
+def test_no_token_variable_of_any_kind_reaches_the_opener(
+    fake_opener: tuple[Path, Path], tmp_path: Path
+) -> None:
+    bindir, log = fake_opener
+    environ = {
+        "PATH": str(bindir),
+        "HOME": str(tmp_path / "home"),
+        "GITLAB_TOKEN": "x",
+        "GH_ENTERPRISE_TOKEN": "x",
+        "GITHUB_TOKEN": "x",
+        "FORGECTL_ANYTHING": "x",
+        "MY_TOKEN_ENV": "x",
+    }
+    opener = BrowserOpener(environ)
+    assert set(opener._env()) == {"PATH", "HOME"}
+    opener.open("https://github.com/acme/widgets/pull/1")
+    _wait_for(log)

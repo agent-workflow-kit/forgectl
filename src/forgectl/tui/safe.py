@@ -4,17 +4,15 @@ Every piece of forge text on screen goes through ``text`` or ``line`` and is wra
 ``plain``, which builds a ``Content`` that is never parsed as markup (no ``[@click=...]``
 actions, no styles). Neither the sanitizer nor the markup switch is imported anywhere else in
 ``forgectl.tui``, so changing the sanitizer is a change to this file alone.
-
-TODO(#6): import ``sanitize_text`` and ``sanitize_line`` from ``sanitize.py`` (diff mode for the
-diff pane) instead of the stand-in ``textsafe``.
 """
 
 from __future__ import annotations
 
 from textual.content import Content
 
-from forgectl.textsafe import sanitize_line as _sanitize_line
-from forgectl.textsafe import sanitize_text as _sanitize_text
+from forgectl.sanitize import sanitize_diff as _sanitize_diff
+from forgectl.sanitize import sanitize_line as _sanitize_line
+from forgectl.sanitize import sanitize_text as _sanitize_text
 
 # Bounds that keep a hostile or huge field from freezing the UI. Applied before sanitizing, so
 # the work is bounded too.
@@ -36,6 +34,11 @@ def line(value: object, limit: int = LINE_LIMIT) -> str:
 def text(value: object, limit: int = TEXT_LIMIT) -> str:
     """A multi-line field: bounded, then sanitized."""
     return _sanitize_text(_cut(value, limit))
+
+
+def diff(value: object, limit: int = DIFF_LIMIT) -> str:
+    """A diff: bounded, then sanitized in diff mode (a CR before LF stays)."""
+    return _sanitize_diff(_cut(value, limit))
 
 
 def plain(value: str) -> Content:

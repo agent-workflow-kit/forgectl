@@ -1,11 +1,14 @@
 [project]
 name = "forgectl"
-version = "0.0.1"
+version = "0.15.0"
 description = "Normalized access to pull/merge requests across GitHub and GitLab"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-dependencies = []
+dependencies = [
+    "pydantic>=2.9",
+    "pyyaml>=6.0",
+]
 
 [project.optional-dependencies]
 tui = ["textual>=8.2,<9"]
@@ -29,6 +32,7 @@ dev = [
     "jsonschema>=4.26.0",
     "referencing>=0.36",
     "textual>=8.2,<9",
+    "types-pyyaml>=6.0",
 ]
 
 [tool.ruff]

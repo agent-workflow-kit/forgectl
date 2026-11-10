@@ -105,7 +105,7 @@
         },
         "config_hash": {
           "$ref": "defs.json#/$defs/sha256",
-          "description": "sha256 of sorted-key JSON of the merged config after defaults, without flags."
+          "description": "sha256 hex of the canonical JSON of the effective config (files, environment overrides and defaults; not flags): every key, each with its default when unset (null only where the default is null), sorted, compact separators, ASCII escapes, UTF-8, durations as JSON numbers of seconds with a fraction part (60.0, 0.009), schema key spellings, me.name as configured. See interface.md Audit and log."
         },
         "config_path": {
           "type": [

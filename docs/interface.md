@@ -1,6 +1,6 @@
 # forgectl: interface
 
-Status: 0.1.0-design, 2026-11-03. This document is the single normative source for forgectl's rules. `docs/design.md`, the README and the awkit architecture link to its headings and do not restate its tables. Schemas live in [`schemas/`](../schemas/).
+Status: 0.2.0-design, 2026-11-09. This document is the single normative source for forgectl's rules. `docs/design.md`, the README and the awkit architecture link to its headings and do not restate its tables. Schemas live in [`schemas/`](../schemas/).
 
 forgectl gives one normalized interface to pull requests on GitHub and merge requests on GitLab, for reading, posting and merging. It runs `gh api` and `glab api`; it never uses their high-level commands. It keeps no database.
 
@@ -8,12 +8,12 @@ forgectl gives one normalized interface to pull requests on GitHub and merge req
 
 ### Identifiers
 
-- **Repo id:** `host/<full project path>`. The host is lowercase, with an optional `:port` only for a non-default port; the path is one or more segments of `[A-Za-z0-9._-]`, none equal to `.` or `..`. Backend `github` takes exactly two segments. Backend `gitlab` takes one or more; with `api_prefix`, a URL must begin with the prefix, which is stripped first, and `-` and `merge_requests` are not valid project segments when parsing a URL. Output uses the host's canonical path and case. `repos.<id>` lookups are case-insensitive against the canonical path. A bad `--repo` exits 2 (`usage`).
+- **Repo id:** `host/<full project path>`. The host is lowercase, with an optional `:port` only for a non-default port; the path is one or more segments of `[A-Za-z0-9._-]`, none equal to `.` or `..`. Backend `github` takes exactly two segments. Backend `gitlab` takes one or more; with `api_prefix`, a URL must begin with the prefix, which is stripped first, and `-` and `merge_requests` are not valid project segments when parsing a merge request URL. No GitLab segment and no GitHub owner segment starts with `-` (a GitHub repo name may), in a URL, `host/path#N` and `--repo` alike; a PR breaking this exits 2 (`invalid_pr`), a `--repo` exits 2 (`usage`). Output uses the host's canonical path and case. `repos.<id>` lookups are case-insensitive against the canonical path. A bad `--repo` exits 2 (`usage`).
 - **PR reference:** an `https` URL, or `host/<full project path>#N`. `N` matches `^[1-9][0-9]{0,9}$`, checked before any path is built (GitHub resolves `/pulls/7abc` to PR 7). GitLab numbers are written without `!`. Output always uses the `#N` form, in the field `pr`. A bad PR exits 2 (`invalid_pr`).
 - **Accepted URLs.** GitHub: `https://<host>/<owner>/<repo>/pull/<N>`, optionally followed by `/files`, `/commits`, `/commits/<sha>`, `/checks`, `.diff` or `.patch`. GitLab: `https://<host>/<path>/-/merge_requests/<N>`, or the older form without `/-/`, optionally followed by `/diffs`, `/commits` or `/pipelines`. A trailing slash is accepted. A query and fragment made of `[A-Za-z0-9._~=&-]` are accepted and dropped. `@`, `\`, `%`, whitespace and non-ASCII exit 2. Anything else exits 2 too; forgectl never hands an unparsed reference to `gh` or `glab`.
 - **Parsing.** References and ids are matched by one anchored ASCII pattern over the whole input (Python `fullmatch`), on the raw text, before any normalization, with no URL library. The child gets the matched config key and validated parts, never input text. Lowercasing uses ASCII rules.
 - **Hosts in input.** Lowercased; `:443` is normalized away; userinfo is refused. A leading `www.` is stripped only for the built-in hosts.
-- **Other input grammars,** exit 2 otherwise. GitHub login: `^[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\[bot\])?$`. GitLab username: `^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254}$`. `me` is reserved in `--author` and `--review-requested-from`. A branch name (`--expected-base`) follows git's `check-ref-format` rules, with no leading `-`, no space, `~^:?*[\`, `..`, `@{` or control character.
+- **Other input grammars,** exit 2 otherwise. GitHub login: `^[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\[bot\])?$`. GitLab username: `^(?:[A-Za-z0-9_]|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,253}[A-Za-z0-9_-])$`, so it never ends in `.` (`.` and `..` are refused). `me` is reserved in `--author` and `--review-requested-from`. A branch name (`--expected-base`) follows git's `check-ref-format` rules, with no leading `-`, no space, `~^:?*[\`, `..` or `@{`; no control, format or line/paragraph-separator character (such as bidi marks); neither `refs` nor anything starting with `refs/` (a branch is never given as a full ref); and at most 1024 characters.
 - **Commit shas.** `--expected-head` and the shas of `compare` are full 40-hex shas. Uppercase is lowered first. A GitLab project using SHA-256 (64 hex) is not supported.
 - **No derivation from the working directory.** forgectl never reads a repository in the current directory: a PR is always given in full, and `--repo` is never derived from `origin`. It never needs a local checkout, so it has no reason to run git.
 - **Comment and thread ids** are stable across calls. `reply --to` takes comment, thread and review ids; `resolve --thread` and `unresolve --thread` take thread ids. Treat them as opaque; the prefix is for forgectl. `<node>` is `[A-Za-z0-9_=-]{1,100}`. Nothing outside these forms is accepted.
@@ -31,7 +31,7 @@ forgectl gives one normalized interface to pull requests on GitHub and merge req
 
 ### Hosts
 
-The set of hosts is **closed**. `github.com` (backend `github`) and `gitlab.com` (backend `gitlab`) are built in; any other host must be declared as `hosts.<host>.backend`. A PR, `--repo` or `--host` naming any other host exits 20 (`reason: unknown_host`) before any process starts. forgectl never probes a host to guess its backend, because a reference may come from third-party text and must never receive a token; this protects references, not a caller who controls the config.
+The set of hosts is **closed**. `github.com` (backend `github`) and `gitlab.com` (backend `gitlab`) are built in; any other host must be declared as `hosts.<host>.backend`. A host key, and the host part of a `repos.<id>` key, is written in normalized form: no `:443`, no leading-zero port, a port from 1 to 65535, and no `www.` in front of a built-in host; any other key exits 2 (`config_invalid`) naming the key. A PR, `--repo` or `--host` naming any other host exits 20 (`reason: unknown_host`) before any process starts. forgectl never probes a host to guess its backend, because a reference may come from third-party text and must never receive a token; this protects references, not a caller who controls the config. Host names are compared in lowercase. A GitHub host takes no port (`gh` refuses one). A declared GitHub host that `gh` rewrites to another host, `*.github.com`, `github.localhost` or `*.github.localhost`, exits 2 (`config_invalid`) naming `hosts.<host>`.
 
 ### Human actions
 
@@ -73,14 +73,14 @@ Every text field that comes from a forge is untrusted (`x-untrusted` in the sche
 | `merged_by` | login or null |
 | `labels` | list of untrusted strings; anyone with triage rights can set one |
 | `author_association` | GitHub's value or null; may only make a tier stricter, and never shows write access |
-| `head` | `{sha, ref, repo, is_fork}`; `repo` is null when the head project was deleted; `sha` survives branch and repo deletion |
+| `head` | `{sha, ref, repo, is_fork}`; `repo` is null when the head project was deleted or is hidden (GitLab 403 or 404 on it), and `is_fork` is still true when the head project's id differs from the target's; `sha` survives branch and repo deletion |
 | `base` | `{ref, sha, is_default}`; a non-default `ref` is how a stacked PR shows; forgectl has no stack concept |
 | `merged_head_sha` | the PR's head when it merged, null until merged. Callers pass this to `wtctl remove --merged-head` |
 | `merge_commit_sha` | the merged commit, null until merged, also for a host that fills it on open PRs |
 | `head_fetch_ref` | `refs/pull/N/head` or `refs/merge-requests/N/head`; reaches a fork's head from the target repo |
 | `mergeable` | `true`, `false` or `null`: the host's mergeability alone, which may be true with failing checks |
 | `blocked_by` | list of [blocker codes](#blocker-codes); empty means nothing known blocks a merge |
-| `auto_merge` | `{enabled, by}`; `enabled` is false once merged, whatever the host's stale field says |
+| `auto_merge` | `{enabled, by}`; `enabled` is false (and `by` null) unless the PR is open, whatever the host's stale field says |
 | `merge_queue` | `true`, `false` or `null`: a merge queue or merge train applies |
 | `merge_methods_allowed` | list of methods, or null when unknown |
 | `additions`, `deletions`, `changed_files` | sizes |
@@ -95,13 +95,13 @@ Field rules:
 - **`url`** is built by forgectl as `https://<host><prefix>/<path>/...`, never taken from the host.
 - **`base.sha`:** GitHub `baseRefOid`, GitLab `diff_refs.base_sha`; it is not the merge base, which is in [`diff`](#diff). **`base.is_default`:** GitHub GraphQL `repository.defaultBranchRef`; GitLab project read.
 - **`merged_head_sha` on GitLab** is the MR's `sha`, which stays the pre-merge head after every merge type on every method. **`merge_commit_sha` on GitLab** is the host's `merge_commit_sha`, else `squash_commit_sha`, else `sha`.
-- **`mergeable`.** GitHub: `mergeable`. GitLab: true for `mergeable`; null for `checking`, `unchecked`, `preparing`; false otherwise, including policy reasons. `blocked_by` says which.
+- **`mergeable`.** GitHub: `mergeable`. GitLab: true for `mergeable` unless `has_conflicts` is true; null for `checking`, `unchecked`, `preparing`; false otherwise, including policy reasons. `blocked_by` says which.
 - **`auto_merge`.** GitLab may read `enabled` true for about 3 s after a push.
-- **`merge_queue`.** GitHub: GraphQL `isMergeQueueEnabled` on the PR, which varies per PR. GitLab: project `merge_trains_enabled`; absent from the answer means `false`.
+- **`merge_queue`.** GitHub: GraphQL `isMergeQueueEnabled` on the PR, which varies per PR. GitLab: project `merge_trains_enabled`; absent from the answer means `false`, and a value that is not a boolean gives null.
 - **`merge_methods_allowed`.** GitHub: the repository's `squashMergeAllowed`, `mergeCommitAllowed` and `rebaseMergeAllowed`, in the one GraphQL query; absent gives null. GitLab: from the table in [Merge method](#merge-method).
 - **Sizes.** On GitLab `additions` and `deletions` are null, and `changed_files` is `changes_count` as an integer, null for a form like `1000+`. A consumer treats a null size as the largest tier.
 - **`review_decision`.** GitHub: `reviewDecision`, or `none` when that is null. `none` says no rule decided, not that nobody approved. GitLab: `changes_requested` if any `latest_by_reviewer` entry has that state; else `review_required` if `approvals_left > 0`; else `approved` if `approvals > 0`; else `none`.
-- **`approvals_at_head`.** GitHub: entries with `commit_sha` equal to the head, as in the table above. GitLab: null unless `reset_approvals_on_push` is read as true, because a GitLab approval survives a push otherwise. Both compare the author by id. An approval older than the PR's latest retarget does not count, and neither does one with a null `at` when a retarget exists. GitHub: `timelineItems(last:1, itemTypes: [BASE_REF_CHANGED_EVENT, AUTOMATIC_BASE_CHANGE_SUCCEEDED_EVENT])` `createdAt`, in the one query, so a manual retarget and the host's own both count. GitLab, only when the field would otherwise be non-null: the newest system note beginning `changed target branch from`, found by its own walk over all of the MR's notes, which never stops early as the `instance` read does; `show` then also makes it on such a project. A walk that cannot complete means no approval counts. A discount or a failed walk is a `warn` log line.
+- **`approvals_at_head`.** GitHub: entries with `commit_sha` equal to the head, as in the table above. GitLab: null unless `reset_approvals_on_push` is read as true, because a GitLab approval survives a push otherwise. Both compare the author by id. An approval older than the PR's latest retarget does not count, and neither does one with a null `at` when a retarget exists. GitHub: `timelineItems(last:1, itemTypes: [BASE_REF_CHANGED_EVENT, AUTOMATIC_BASE_CHANGE_SUCCEEDED_EVENT])` `createdAt`, in the one query, so a manual retarget and the host's own both count. GitLab, only when the field would otherwise be non-null: the newest system note beginning `changed target branch from` or containing `now targets the` (the host's own retarget after the target branch is merged and deleted), found by its own walk over all of the MR's notes, which never stops early as the `instance` read does; `show` then also makes it on such a project. A walk that cannot complete means no approval counts. A discount or a failed walk is a `warn` log line. GitLab resets approvals on push asynchronously and only when the `git patch-id` of the changes differs, so an approval GitLab still lists right after a push counts.
 
 ### Blocker codes
 
@@ -110,17 +110,17 @@ Field rules:
 | Code | GitHub (`mergeStateStatus` and others) | GitLab (`detailed_merge_status` and others) |
 |---|---|---|
 | `draft` | `DRAFT`, `isDraft` | `draft_status` |
-| `conflicts` | `DIRTY` | `conflict`; `has_conflicts: true`, whatever the status (`need_rebase` can hide conflicts) |
+| `conflicts` | `DIRTY`; `mergeable: CONFLICTING` | `conflict`; `has_conflicts: true`, whatever the status (`need_rebase` can hide conflicts) |
 | `checks_pending` | any counted check pending ([CI object](#ci-object)); `ci.state` is `pending`; `BLOCKED` with `ci.state: none`, a required check that has not reported | any counted check pending; `ci.state` is `pending`; `ci_still_running`; `ci_must_pass` when no counted check is failing; `for_current_head: false` |
-| `checks_failing` | any counted check failing | any counted check failing |
+| `checks_failing` | any counted check of the current head failing | any counted check of the current head failing; an old commit's failing checks give `checks_pending` instead (`for_current_head: false`) |
 | `reviews_required` | `BLOCKED` with `reviewDecision: REVIEW_REQUIRED` | `not_approved` |
 | `changes_requested` | any `latest_by_reviewer` entry with that state and `can_push` not false, whether or not the host would block | `requested_changes`; any `latest_by_reviewer` entry with that state and `can_push` not false |
 | `discussions_unresolved` | `BLOCKED` with unresolved resolvable threads, when no other code explains it | `discussions_not_resolved` |
 | `branch_behind` | `BEHIND` | `need_rebase` |
-| `mergeability_unknown` | `UNKNOWN` after retries | `checking`, `unchecked`, `preparing` after retries |
-| `other` | `BLOCKED` when nothing above explains it, with `detail: "BLOCKED"` | anything else (`merge_time`, `merge_request_blocked`, `commits_status` and others), with the status as `detail`; `locked` |
+| `mergeability_unknown` | `UNKNOWN` after retries; `mergeStateStatus` or `mergeable` UNKNOWN, missing or unmapped after the readiness tries | `checking`, `unchecked`, `preparing` after retries |
+| `other` | `BLOCKED` when nothing above explains it, with `detail: "BLOCKED"` | anything else (`merge_time`, `merge_request_blocked`, `commits_status` and others), with the status as `detail`; `locked`; `not_open` on an open (or locked) MR |
 | `checks_absent` | not in `blocked_by`: only in [`merge`](#merge-order)'s refusal of a non-human actor | the same |
-| (adds nothing) | `CLEAN`, `HAS_HOOKS`, `UNSTABLE` | `mergeable`, `not_open` |
+| (adds nothing) | `CLEAN`, `HAS_HOOKS`, `UNSTABLE` | `mergeable`; `not_open` on a closed or merged MR |
 
 `checks_pending` and `checks_failing` come from forgectl's own reading of the head's checks, not only from the host's status: a host can report `CLEAN` or `mergeable` with a check still running or failing, and with no rules on a branch GitHub merges past failing checks. GitLab reads `mergeable` on failed, canceled and skipped pipelines. An optional failing GitHub check therefore blocks a merge until a human passes `--override-blocks`.
 
@@ -138,15 +138,15 @@ Field rules:
 | `instance` | opaque string identifying this request, or null |
 | `requested_at` | RFC 3339 or null |
 
-Compare reviewers by id, else by login, case-insensitively.
+Compare reviewers by id, else by login, case-insensitively. A team's `login` is its slug: every team on a PR belongs to the repository's organization, and `kind` tells it from a user of the same name.
 
-A sibling `teams_visible` says whether the absence of a team means anything. It is always true on GitLab. On GitHub it is false if `requested_reviewers` shows fewer than the event list; otherwise true. A GraphQL error of type `INSUFFICIENT_SCOPES` or `FORBIDDEN` naming a team field re-sends a constant query without team fields, and gives `teams_visible: false`. A token that reports no scopes also gives `false`.
+A sibling `teams_visible` says whether the absence of a team means anything. It is always true on GitLab. On GitHub it is false when `requested_reviewers` names a different number of reviewers than the GraphQL request list (fewer or more); otherwise true. A GraphQL error of type `INSUFFICIENT_SCOPES` or `FORBIDDEN` naming a team field re-sends a constant query without team fields, and gives `teams_visible: false`. A token that reports no scopes also gives `false`. So does a `requested_reviewers` read the token may not make, and a null or unreadable requested reviewer in the GraphQL list. A reviewer that only `requested_reviewers` names is added to `review_requests`, with a null `instance` unless an event names it.
 
 **State.** GitHub: every listed request is `outstanding`; a submitted review clears the request without any event. GitLab: from `GET /reviewers`, where `unreviewed` and `review_started` give `outstanding` (`review_started` is set as soon as a draft exists), `approved`, `unapproved`, `reviewed` and `requested_changes` give `reviewed`, and an unknown value gives `outstanding`. A request never clears by itself on GitLab, so `state` is the way to read it. Every GitLab reviewer is a direct request; GitLab has no team reviewers.
 
 **Instance rule.** A re-request yields a new `instance`. A push does not: under one instance a new head is the same request. `(pr, instance)` identifies a request; a consumer adds the head to identify a piece of work on it.
 
-- GitHub: the `id` of the latest `ReviewRequestedEvent` for that reviewer. With no matching event, `instance` is null.
+- GitHub: the node `id` of the latest `ReviewRequestedEvent` for that reviewer, as GitHub returns it (no particular id format is promised; older objects can carry legacy-format ids). With no matching event, `instance` is null. A list of events that is cut off before every reviewer is found puts `review_requests` in `incomplete`.
 - GitLab: the id of the newest **system** note (`system: true`) beginning `requested review from`. All `@login` tokens up to the first word that is not a login, `,` or `and` are parsed, each matched whole, so `requested review from @a, @b and removed approval` names both. Paging is newest first and stops when every reviewer is found. Creating an MR with reviewers writes such a note. Re-sending the same set of reviewers adds none, so it makes no new instance.
 - If no note matches (for example different wording on a self-managed instance), `instance` is `null` and a `warn` log line is written.
 - **First sight.** A consumer with no earlier record of `(pr, reviewer)` treats a null `instance` as one new request. After that, null is the same request as before.
@@ -190,13 +190,43 @@ A published GitLab draft is a resolvable thread, including a review's body, so o
 
 A comment is `{id, author, body, created_at, updated_at, minimized, reply_to, review_id}`. `review_id` is the review it belongs to, or null. `minimized` is false on GitLab. System notes are left out.
 
+### Push time
+
+`snapshot` adds two fields to `head`: `pushed_at`, an RFC 3339 UTC time, and `pushed_at_source`, `push_event` or `commit_date`. They say when the current head was last pushed and how that was determined, so a consumer can ask what happened after the last push without keeping state. Both are null when the time cannot be determined. `pushed_at` is not part of the PR object, `prs` or `show`.
+
+| Host | `push_event` | `commit_date` |
+|---|---|---|
+| GitHub | the newest push event on the PR timeline for the current head sha: `HeadRefForcePushedEvent` or `PullRequestCommit` | the head commit's committed date, when the timeline holds no such event for the head sha |
+| GitLab | `created_at` of the newest entry of `/merge_requests/:id/versions` | the head commit's date, when versions are unavailable |
+
+A new push gives a later `pushed_at` on the next snapshot. Nothing is stored between runs.
+
+### Activity
+
+`snapshot` carries `activity`, derived in forgectl from the snapshot's own `threads`, `reviews` and `latest_by_reviewer` and from `head.pushed_at`, so every consumer shows the same counts and gets the same answer to "did others comment after my push". It is the same code path for both hosts and stores nothing.
+
+| Field | Meaning |
+|---|---|
+| `comments_total` | all comments across all `threads`, including mine and those of ignored authors |
+| `unresolved_threads` | threads that are not resolved |
+| `others_since_push` | comments plus reviews by an account that is not me and not ignored, timestamped after `head.pushed_at`; null when `pushed_at` is null |
+| `awaiting_my_reply` | unresolved threads whose last comment by a non-ignored author is not mine |
+
+- **Me** is the authenticated user from [`whoami`](#whoami), compared as in [Logins](#logins). My own login is always excluded from "others", whatever the config says.
+- **Ignored** authors are those matching `activity.ignore_authors` ([Config](#config)): logins, with glob patterns allowed, such as `dependabot[bot]`, `renovate*` or `gitlab-bot`. The config list alone decides. `author.is_bot` stays in the output as information and never changes a count: a bot not on the list counts, and a listed account is ignored whatever `is_bot` says.
+- **Resolved threads** are never awaiting my reply, whoever wrote last.
+- **GitHub.** Comments come from `threads`, reviews from `reviews`; a review counts at its `submitted_at`.
+- **GitLab.** `reviews` is always empty, so nothing is inferred from it. Review comments are discussion notes, already in `threads`. Approvals feed `others_since_push` from `latest_by_reviewer`: only entries with state `approved` whose `at` is set, by someone who is not me and not ignored, with `at` after `head.pushed_at`. Such an approval counts once.
+
 ### CI object
 
 `{state, head_sha, for_current_head, complete, checks}`, with `state` one of `passing`, `failing`, `pending` or `none`. `checks` is a list of `{name, state, required, counted, url, finished_at}`. GitHub's check runs and status contexts merge into one list.
 
 GitHub: checks are read for `headRefOid` exactly: the rollup of the last listed commit when its `oid` matches, else a second query by oid (commit order is not head order). `for_current_head` is always true on GitHub.
 
-GitLab: checks are `GET /projects/:id/repository/commits/:sha/statuses` with `sha` and `id` from `head_pipeline` (`sha`, `project_id`) and `pipeline_id=<head_pipeline.id>`, each validated as a sha or an integer; latest per name. A null `head_pipeline` gives `checks: []`, `state: none`, with no read.
+GitLab: checks are `GET /projects/:id/repository/commits/:sha/statuses` with `sha` and `id` from `head_pipeline` (`sha`, `project_id`) and `pipeline_id=<head_pipeline.id>`, each validated as a sha or an integer; `project_id` must be the MR's `project_id` or `source_project_id`, else `upstream_error`. Latest per name: the highest status `id` (an integer, else `upstream_error`), and on equal ids the worse state (`failing`, then `pending`, then `passing`). A null `head_pipeline` gives `checks: []`, `state: none`, with no read. The `pipeline_id` filter needs GitLab 17.9 ([Host versions](#host-versions)). For a fork's pipeline (`project_id` is the source project), a 404 or 403 on the statuses gives no checks and `complete: false` with a `warn` log line; on the target project it is `upstream_error`.
+
+GitLab also adds checks from the pipeline itself. `head_pipeline.status` `success`, `skipped` and `manual` add nothing; `failed` and `canceled` add a counted failing check named `(pipeline)`; `created`, `waiting_for_resource`, `preparing`, `pending`, `running`, `scheduled`, `canceling` and `waiting_for_callback` add a counted pending `(pipeline)` check; any other value, or none, adds a pending `(pipeline)` check and a `warn` log line. Child pipelines come from `GET /projects/:id/pipelines/:pipeline_id/bridges` (the pipeline's project, paged like the statuses): each bridge is a check named `(child) <bridge name>`, whose state is its `downstream_pipeline.status`: `success` passing, `skipped` skipped, `failed` and `canceled` failing, `manual` and the unfinished values above pending, anything else pending with a `warn` log line; a null `downstream_pipeline` is pending, and a bridge with `allow_failure: true` is not counted. A bridges read that fails (other than `auth_required`, `wrong_host_response` and `tool_missing`) or is cut at the page cap gives `complete: false` with a `warn` log line. A bridge row that is not the documented shape is `upstream_error`, as a malformed commit-status row is.
 
 A check's `state`:
 
@@ -204,15 +234,15 @@ A check's `state`:
 |---|---|---|---|
 | `passing` | `SUCCESS` | `SUCCESS` | `success` |
 | `failing` | `FAILURE`, `TIMED_OUT`, `CANCELLED`, `ACTION_REQUIRED`, `STARTUP_FAILURE`, `STALE` | `FAILURE`, `ERROR` | `failed`, `canceled` |
-| `pending` | `QUEUED`, `IN_PROGRESS`, `WAITING`, `PENDING`, `REQUESTED` | `PENDING`, `EXPECTED` | `created`, `pending`, `preparing`, `running`, `scheduled`, `waiting_for_resource`, `waiting_for_callback`; `manual` with `allow_failure: false` |
+| `pending` | `QUEUED`, `IN_PROGRESS`, `WAITING`, `PENDING`, `REQUESTED` | `PENDING`, `EXPECTED` | `created`, `pending`, `preparing`, `running`, `scheduled`, `waiting_for_resource`, `waiting_for_callback`, `canceling`; `manual` with `allow_failure: false` |
 | `skipped` | `NEUTRAL`, `SKIPPED` | | `skipped`; `manual` with `allow_failure: true` |
 
 An unmapped value is `pending` with a `warn` log line, so a new host state never reads as passing.
 
-- `counted` is false for a GitLab `allow_failure` job and for `skipped`; true otherwise. `required` is `true`, `false` or `null`; GitLab gives `false` for `allow_failure: true`, else `null`. A check's `url` is null for a scheme other than `http` or `https`.
+- `counted` is false for a GitLab `allow_failure` job and for `skipped`; true otherwise. `required` is `true`, `false` or `null`; GitLab gives `false` for `allow_failure: true`, else `null`. A check's `url` is null for a scheme other than lowercase `http://` or `https://`, matching the schema's pattern, and for a url holding whitespace or a control character.
 - **Aggregation over counted checks:** any `failing` gives `failing`; else any `pending` gives `pending`; else any `passing` gives `passing`; else `none`. **`none` is not passing:** it means no evidence, including a head whose only pipeline was skipped.
 - `for_current_head` false (GitLab `head_pipeline.sha` differs from the head) forces `state: pending`, whatever the old pipeline reported; `head_sha` names the old commit. With `state: none`, `for_current_head` is true and `head_sha` is the PR's head. `passing` means no counted check registered for this head is failing or pending, and at least one passed. It does not say which checks, that every expected check registered, or who ran them.
-- `complete` false (a host cap on the check list) turns `passing` into `pending`.
+- `complete` false (a host cap on the check list, or on GitLab an unfiltered or unreadable part of it as above) turns `passing` into `pending`.
 
 ### Files
 
@@ -230,6 +260,8 @@ An unmapped value is `pending` with a `warn` log line, so a new host state never
 
 `login` is the REST form on every command: a GitHub bot is `name[bot]`, mapped by the backend from GraphQL's `name`. One bot can read differently per API (`name[bot]`, `name`, `app/name`) and REST `users/name` can be a different account, so several names map to one per id, through the backend's table. `--author` and `access` accept this form. `author` is `{login, id, is_bot}`, with `id` opaque and stable, or null.
 
+`me` is reserved in `--author`, `--review-requested-from` and `access`'s `<user>`. Logins are case-insensitive on both hosts, so another spelling of it (`ME`, `Me`) exits 2 (`usage`, "`me` is reserved; write it as `me`") rather than naming an account called `me`. A login given to `prs` must fit the login grammar of every declared host and of the `--repo` or `--host` target, checked before any call (exit 2); an undeclared built-in is checked only once its scope probe puts it in scope, so a login that fits only one backend is not refused for a host that is skipped.
+
 Self-approval, dedupe and already-approved compare the authenticated account's id. An identity read that fails exits 12 like any read, so these checks fail closed. Where no id exists, logins compare case-insensitively.
 
 ## Sanitizing
@@ -238,7 +270,7 @@ Applied to every forge text field, diffs, and anything printed from input or a c
 
 - Characters of Unicode categories `Cc` (except tab and newline), `Cf`, `Cs`, `Co`, `Cn`, `Zl` and `Zp` are replaced by a visible marker `<U+XXXX>`, for example `<U+202E>`. Bidi overrides stay visible rather than disappearing, because in a diff they can be the attack.
 - So are these code points: all variation selectors, U+034F, U+17B4, U+17B5, U+180B to U+180F, U+115F, U+1160, U+3164, U+FFA0 and U+2800.
-- **One-line fields** (`title`, `head.ref`, `base.ref`, `path`, `login`, a check's `name`, labels; `x-one-line` in the schemas): tab and LF also become markers.
+- **One-line fields** (`title`, `head.ref`, `base.ref`, `path`, `login`, a check's `name` and `url`, labels; `x-one-line` in the schemas): tab and LF also become markers.
 - In text fields CRLF becomes LF. A lone CR becomes `<U+000D>`. In a diff, a CR before LF stays as it is.
 - Bytes that are not valid UTF-8 become U+FFFD.
 
@@ -266,9 +298,10 @@ Mentions (`@name`) pass through; policy on them belongs to the caller.
 Every call to a forge goes through one gateway:
 
 - **Executable.** `gh_bin` and `glab_bin` are a bare name or an absolute path. A bare name resolves only against absolute `PATH` entries. The child's `PATH` holds only absolute entries. A missing executable exits 12 (`tool_missing`) with the install command, only when that backend is needed.
-- **Environment built from scratch.** In both modes: `PATH`, `HOME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR`, proxy variables (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, lowercase forms), `SSL_CERT_FILE`, `SSL_CERT_DIR`, `GLAB_CA_CERT`, `GIT_CEILING_DIRECTORIES=<parent of the private cwd>`, and the fixed settings `GH_PROMPT_DISABLED=1`, `GH_NO_UPDATE_NOTIFIER=1`, `NO_COLOR=1`, `GLAB_SEND_TELEMETRY=false`, `GLAB_CHECK_UPDATE=false`, `GLAB_SHOW_WHATS_NEW=false`, `NO_PROMPT=1`. `GH_FORCE_TTY`, `CLICOLOR_FORCE`, `GH_REPO` and `GH_HOST` never pass through.
-  - **Token mode** (forgectl supplies a token) adds the one token variable of [Credentials](#credentials), plus `GH_CONFIG_DIR` or `GLAB_CONFIG_DIR` pointing at a private empty directory.
-  - **Stored-login mode** adds the caller's `GH_CONFIG_DIR`, `GLAB_CONFIG_DIR` and `XDG_CONFIG_HOME`, plus `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR` unless the caller set [that backend's config dir](#credentials).
+- **Environment built from scratch.** In both modes: `PATH`, `HOME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR`, proxy variables (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, lowercase forms), `SSL_CERT_FILE`, `SSL_CERT_DIR`, `GLAB_CA_CERT`, `GIT_CEILING_DIRECTORIES=<parent of the private cwd>`, and the fixed settings `GH_PROMPT_DISABLED=1`, `GH_NO_UPDATE_NOTIFIER=1`, `NO_COLOR=1`, `GLAB_SEND_TELEMETRY=false`, `GLAB_CHECK_UPDATE=false`, `GLAB_SHOW_WHATS_NEW=false`, `GLAB_NO_PROMPT=1`. `NO_PROMPT` is never set: `glab` 1.89 prints a deprecation warning to stdout when it is. `GH_FORCE_TTY`, `CLICOLOR_FORCE`, `GH_REPO` and `GH_HOST` never pass through.
+  - **Token mode** (forgectl supplies a token) adds the one token variable of [Credentials](#credentials), plus `GH_CONFIG_DIR` or `GLAB_CONFIG_DIR` pointing at a private empty directory, and `DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent/forgectl-no-bus`.
+  - **Stored-login mode** adds the caller's `GH_CONFIG_DIR`, `GLAB_CONFIG_DIR` and `XDG_CONFIG_HOME`, plus the caller's `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR` unless the caller set [that backend's config dir](#credentials); then it adds `DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent/forgectl-no-bus` instead.
+  - The fixed bus address fails at once. Leaving the bus variables out is not enough: with neither set, `gh` 2.87.3 still reaches the session bus through the default `/run/user/<uid>/bus` socket.
 - **Empty private working directory.** `glab` always runs read-only git in its cwd, and `gh` does when not given a repo. Private directories are under `TMPDIR`, mode 0700. An ancestor repository cannot reroute a call, through the ceiling variable.
 - **Routing.** `gh`: `--hostname` on every call. `glab`: for gitlab.com, `--hostname gitlab.com` and no `GITLAB_HOST`; for any other host, `GITLAB_HOST=<host>[:port]<api_prefix>` and no `--hostname`, in both modes.
 - **Only `gh api` and `glab api`.** Endpoints are built only from validated parts, never from a URL as given. A full-URL endpoint is never used, because `glab` sends its token to whatever host it names.
@@ -279,37 +312,41 @@ Every call to a forge goes through one gateway:
 - **Pagination** is forgectl's own, by page parameters or GraphQL cursors, so a partial page never looks complete.
 - **Answers are checked for identity.** A PR, project or note response carries its URL or path; a host or project other than the expected one exits 12 (`wrong_host_response`). The canonical path comes from the first read; a rename on the same host is accepted. Hook `repo`, audit `target` and `repos.<id>` lookups use the canonical form. This detects an accidental redirect, not a hostile host. On `wrong_host_response` the message says the token may have reached another host and should be rotated.
 - **Writes** use the canonical path from the read on GitHub, and the numeric project id on GitLab. A write succeeds only on [its documented answer](#reliability); a `gh` POST turned into a GET therefore never reads as posted.
-- **Children** run under the command's budget and are signaled only by their exact PID. On SIGINT or SIGTERM forgectl forwards the signal to the exact child PID and removes its temporary directories. A signal during a write: audit `outcome_unknown`, no `post-` hook, exit 12 `outcome_unknown`.
+- **Local failures.** These are `upstream_error` on a read and `outcome_unknown` on a write, and never returned as data: an answer over the size cap (32 MiB); output still held open by another process after the program exited; a 2xx with a nonzero exit (except `gh api graphql`'s exit 1 with `errors`); only a 1xx status; a body that is not strict UTF-8 JSON (a BOM, NaN, a duplicate key); on a read, a body that is not the documented object or list. An answer still arriving at the deadline is a timeout: `network_error` on a read, `outcome_unknown` on a write. On a write, a list where one object is documented is `host_rejected` and any other body that is not the documented shape is `outcome_unknown`. A GraphQL write that answers a result together with `errors` is `outcome_unknown`.
+- **Rate-limit rule.** A 403 counts as a rate limit when it has a `retry-after` header, or its message matches `rate limit`, `abuse detection` or `too many requests`, ignoring case. Both tables in [Reliability](#reliability) use this rule.
+- **Children** run under the command's budget, each as the leader of its own process group. At the deadline, or when forgectl gets SIGINT, SIGTERM or SIGHUP, the child's group gets SIGTERM and, 2 s later, SIGKILL. A group is signaled only while its leader is not yet reaped, so the group id cannot have been reused. Then forgectl removes the child's temporary directories. SIGHUP is handled as SIGTERM is. A signal during a write: audit `outcome_unknown`, no `post-` hook, exit 12 `outcome_unknown`.
 
 ## Reliability
 
-**Reads** are retried up to `retries` times (default 3) on 429, GitHub's secondary rate limit, 5xx and network errors, with backoff from 1 s doubling to 8 s, with jitter, honoring `retry-after`, within `--timeout`. A `retry-after` past the budget exits at once with `retry_after` set. A read timeout is `network_error`. After the retries, a read exits 12 with the code below, plus `retry_after` when known.
+**Reads** are retried up to `retries` times (default 3) on 429, GitHub's secondary rate limit, 5xx and network errors, with backoff from 1 s doubling to 8 s, with jitter that adds up to a quarter of the table value and never waits less than it, honoring `retry-after`, within `--timeout`. A `retry-after` past the budget exits at once with `retry_after` set; a wait that would leave less than 1 s of the budget counts as past the budget, and a readiness re-read that does not fit, or fails a retryable way, leaves the value unknown. A read timeout is `network_error`. An answer that is not the documented shape (`upstream_error`), whether the gateway or the backend finds it, is retried like a 5xx; `not_found` and `wrong_host_response` are never retried. Each wait counts against the budget. After the retries, a read exits 12 with the code below, plus `retry_after` when known.
 
 | Answer | Code |
 |---|---|
-| 401; `gh` rc 4 with no headers | `auth_required` |
-| 403 with `retry-after` or secondary-limit wording; 429 | `rate_limited` |
+| 401; `gh` rc 4 with no headers; `glab` saying `Unauthenticated.` with no credential | `auth_required` |
+| 403 under the [rate-limit rule](#invoking-the-backends); 429 | `rate_limited` |
 | other 403 | `permission_denied` |
 | 404 | `not_found` |
 | 5xx | `upstream_error` |
 | no status | `network_error` |
-| other 4xx | `host_rejected` |
+| any 3xx; other 4xx | `host_rejected` |
 
 **Readiness** values that are still being computed get a short retry: `merge` up to 5 tries in 10 s; `show` and `snapshot` up to 3 tries in 4 s; `prs` none. `retries: 0` turns off both kinds of retry. On GitLab the single-MR `GET` triggers the recheck; `with_merge_status_recheck` is not used, since lists do not refresh. If unresolved, `blocked_by` includes `mergeability_unknown`.
 
-**Completeness.** Host-imposed caps give `complete: false`, exit 0. Every read a command needs behaves alike: after retries it exits 12; [`access`](#access) and `can_push`'s member read keep their stated nulls, and the [retarget walk](#pr-object) counts no approval. No exit 0 output is partial by failure, apart from `prs` and `whoami`, which list `errors`.
+**Completeness.** Host-imposed caps give `complete: false`, exit 0. Every read a command needs behaves alike: after retries it exits 12; [`access`](#access) and `can_push`'s member read keep their stated nulls, the [retarget walk](#pr-object) counts no approval, and GitLab's fork-pipeline statuses and child-pipeline read give `ci.complete: false` ([CI object](#ci-object)). No exit 0 output is partial by failure, apart from `prs` and `whoami`, which list `errors`.
 
 **Writes** are never retried. `merge` first re-reads the PR and treats merged at the expected head and base as success. A caller may retry a post with `--dedupe-key`: text is not duplicated, and on GitLab a missing state step is completed.
 
 | Answer to a write | Code | Landed | Audit result |
 |---|---|---|---|
 | the endpoint's success, below | continue | yes | per action |
-| 429; 403 with `retry-after` or secondary-limit wording | `rate_limited`, `retry_after` | no | `failed` |
+| 429; 403 under the [rate-limit rule](#invoking-the-backends) | `rate_limited`, `retry_after` | no | `failed` |
 | 401; other 403 | `auth_required`; `permission_denied` | no | `failed` |
 | 404 | exit 10, `not_found` | no | `failed` |
 | 409 on a merge or a GitLab approve | exit 20, `stale_head`; `details.head_sha` from one read, omitted if that read fails | no | `failed` |
-| any 3xx; a list where the endpoint documents one object (a redirected GET); other 4xx | `host_rejected` | no | `failed` |
+| a 3xx shown (a 307 or 308); a list where the endpoint documents one object (a redirected GET); other 4xx | `host_rejected` | no | `failed` |
 | any other 2xx without its documented status and proof; 5xx, timeout, no status | `outcome_unknown` | maybe | `outcome_unknown` |
+
+**Redirected writes.** `gh` and `glab` follow a 301, 302 or 303 by sending a GET without the body, and show only that GET's answer. A redirected write is therefore detected only by the endpoint's status and proof in the table below. They do not follow a 307 or 308 on a body sent by stdin: the 3xx itself comes back, `host_rejected`.
 
 After text landed, any failure of the state step is exit 12 `outcome_partial`, `failed` naming it. Merge's 405, 5xx and verification rows and GitLab's draft rules refine this table; GitLab's 401 on `POST /approve` keeps its re-read. After `outcome_unknown` or `outcome_partial`, a retry without a key may duplicate; after every other code in this table nothing landed.
 
@@ -468,15 +505,16 @@ Lists PRs, default `--state open`, `--limit 100` (maximum 1000).
 
 - **Filters.** Without `--repo`, `--author` or `--review-requested-from` is required, else exit 2. `--repo` with `--host` exits 2. `--state closed` means closed unmerged. `--updated-since` takes RFC 3339 or a duration.
 - **People.** `--review-requested-from` means requested **directly** by name. On GitLab this also lists requests the reviewer has finished; `snapshot`'s `review_requests[].state` decides. `me` resolves per host from `hosts.<host>.me`, then `me.github` or `me.gitlab`, then the authenticated user.
-- **Scope** without `--repo` or `--host`: a host with an entry in `hosts`, or a configured credential, is always in scope and a failure goes to `errors`. An undeclared built-in with no binary, or whose `GET /user` gives `auth_required` with no configured credential, is skipped. `hosts_queried` lists the hosts asked.
-- **Limit and order.** `--limit` is a total. Order is `updated_at` descending, then `pr`; forgectl fetches `limit + 1` to set `complete`. `complete: false` means older items were cut, including by GitHub's 1000-result search limit; a caller narrows with `--updated-since`.
-- **Implementation.** GitHub: GraphQL search, with the qualifier string built from validated parts. GitLab: `/merge_requests` with `scope=all` plus filters.
+- **Scope** without `--repo` or `--host`: a host with an entry in `hosts`, or a configured credential, is always in scope and a failure goes to `errors`. An undeclared built-in with no binary, or whose `GET /user` gives `auth_required` with no configured credential, is skipped. `hosts_queried` lists the hosts asked. With no host in scope the result is exit 0, empty `items`, `complete: true`, `hosts_queried: []` and null `rate_limit` fields, so a caller checks `hosts_queried`.
+- **Limit and order.** `--limit` is a total. Order is `updated_at` descending, then `pr`; forgectl fetches `limit + 1` to set `complete`. `complete: false` means older items were cut, including by GitHub's 1000-result search limit; a caller narrows with `--updated-since`. At `--limit 1000` GitHub cannot fetch `limit + 1` past that cap, so `complete` there comes from the host's match count (`issueCount`). `complete` is false whenever a host asked failed.
+- **Live filters.** GitHub's search runs on an index, while `state` and `draft` are read live, so a PR merged, closed, reopened or marked ready seconds earlier can be returned for a filter it no longer matches. Such an item is dropped and that host's list is `complete: false`, as for a result hidden from the account. An item older than the `--updated-since` time is not the documented behavior and fails the read (`upstream_error`).
+- **Implementation.** GitHub: GraphQL search, with the qualifier string built from validated parts; `--updated-since` is sent as `updated:>=YYYY-MM-DDTHH:MM:SS+00:00`, the form GitHub documents. A time that falls outside the years 1 to 9999 once in UTC exits 2. GitLab: `/merge_requests` with `scope=all` plus filters.
 
-Output: `{items, complete, errors, hosts_queried, rate_limit}`. `items` are `{pr, pr_id, repo, number, url, title, author, state, draft, labels, head: {sha, ref, repo, is_fork}, base: {ref}, updated_at}`; a request instance needs `snapshot`. `head.repo` of a GitLab fork: one read per distinct source project, cached per process. `rate_limit` is `{host, remaining, reset_at}`, the lowest `remaining` among the APIs and hosts this command called, from the response headers, each null where absent. For one-host commands `host` is that host.
+Output: `{items, complete, errors, hosts_queried, rate_limit}`. `items` are `{pr, pr_id, repo, number, url, title, author, state, draft, labels, head: {sha, ref, repo, is_fork}, base: {ref}, updated_at}`; a request instance needs `snapshot`. `head.repo` of a GitLab fork: one read per distinct source project, cached per process. `rate_limit` is `{host, remaining, reset_at}`, the lowest `remaining` among the APIs this command called on the hosts in `hosts_queried`, from the response headers, each null where absent; a skipped host's probe does not count, so with `hosts_queried: []` every field is null. For one-host commands `host` is that host. Every answer from a queried host counts, success or failure: search and label pages, identity reads and access reads, so a rate-limited host that failed reports its `remaining: 0`.
 
 If a host fails, the rest is still returned, with `errors: [{host, code, message}]` and exit 12 (`partial_results`). The output is the normal object; the code appears on stderr only, and `errors` holds details.
 
-With `--repo` or `--host` there is one target, so a failure uses the ordinary exit and envelope. `partial_results` applies when several hosts were in scope. If all fail: exit 12 `partial_results`, empty `items`, and `errors` holds each.
+With `--repo` or `--host` there is one target, so a failure uses the ordinary exit and envelope. `partial_results` applies when two or more hosts were asked (`hosts_queried`); a failure of the only host asked uses that host's ordinary exit and envelope. If all fail: exit 12 `partial_results`, empty `items`, `complete: false`, and `errors` holds each.
 
 ### `show`
 
@@ -484,23 +522,23 @@ With `--repo` or `--host` there is one target, so a failure uses the ordinary ex
 
 ### `snapshot`
 
-`snapshot <pr>`: the PR object plus `review_requests`, `teams_visible`, `reviews`, `latest_by_reviewer`, `threads`, `ci`, `rate_limit`, `complete`, `incomplete` (names of the parts that are not complete) and `fetched_at`. One call for a caller that compares successive states. forgectl emits no events and stores nothing. `updated_at` is not a reliable change signal on either host.
+`snapshot <pr>`: the PR object plus `review_requests`, `teams_visible`, `reviews`, `latest_by_reviewer`, `threads`, `ci`, `activity` ([Activity](#activity)), `rate_limit`, `complete`, `incomplete` (names of the parts that are not complete) and `fetched_at`. In `snapshot` only, `head` also carries `pushed_at` and `pushed_at_source` ([Push time](#push-time)); `prs` and `show` items keep the `head` fields they have. One call for a caller that compares successive states. forgectl emits no events and stores nothing. `updated_at` is not a reliable change signal on either host.
 
 `incomplete` names any of `review_requests`, `reviews`, `threads`, `ci`. The `ci` name follows `ci.complete`.
 
-Lists have a fixed order, so two snapshots compare directly, excluding `fetched_at` and `rate_limit`. `reviews`: `submitted_at`, `id`. `latest_by_reviewer`, `review_requests`: login. `threads`: first comment's `created_at`, `id`. A thread's comments: `created_at`, `id`. `checks`: `name`, `url`, `state`. `blocked_by`: code, `detail`. `files`: `path`. Comparison by code point. Logins: ASCII-lowered, then `kind`. Ids are not ordered, so a watermark is a set of seen ids. Absence from a part named in `incomplete` means nothing.
+On GitHub `rate_limit` is the lowest `remaining` among the GraphQL `rateLimit` fields and the REST response headers of the reads after `show`'s own, which carries none. Lists have a fixed order, so two snapshots compare directly, excluding `fetched_at` and `rate_limit`. `reviews`: `submitted_at`, `id`. `latest_by_reviewer`, `review_requests`: login. `threads`: first comment's `created_at`, `id`. A thread's comments: `created_at`, `id`. `checks`: `name`, `url`, `state`. `blocked_by`: code, `detail`. `files`: `path`. Comparison by code point. Logins: ASCII-lowered, then `kind`. Ids are not ordered, so a watermark is a set of seen ids. Absence from a part named in `incomplete` means nothing.
 
 ### `diff`
 
-`diff <pr>`: the unified diff; with `--json`, `{pr, head_sha, base_sha, merge_base_sha, diff}`. `merge_base_sha` is null if unavailable. If the host will not produce the whole diff, exit 20 (`too_large`): a partial diff would mislead a reviewer. On GitLab a file is cut when `too_large` or `collapsed` is true, or when it is `modified` with an empty `diff` and no mode or path change. A cut file exits 20 (`too_large`). The text is assembled from `/diffs` fragments with `diff --git`, `---` and `+++` headers forgectl writes; `unidiff` is not used. If the head moved during the fetch, forgectl fetches once more, then exits 12 (`upstream_error`). The GitLab endpoint is `/diffs`, never `/changes`.
+`diff <pr>`: the unified diff; with `--json`, `{pr, head_sha, base_sha, merge_base_sha, diff}`. `merge_base_sha` is null if unavailable. If the host will not produce the whole diff, or it is larger than forgectl's read cap, exit 20 (`too_large`): a partial diff would mislead a reviewer. On GitHub the diff's `diff --git` headers must number the PR's `changed_files`, a required count; otherwise exit 12 (`upstream_error`). On GitLab a file is cut when `too_large` or `collapsed` is true, or when it is `modified` with an empty `diff` and no mode or path change. A cut file exits 20 (`too_large`). The text is assembled from `/diffs` fragments with `diff --git`, `---` and `+++` headers forgectl writes; `unidiff` is not used. If the head moved during the fetch, forgectl fetches once more, then exits 12 (`upstream_error`). The GitLab endpoint is `/diffs`, never `/changes`.
 
 ### `compare`
 
 `compare <pr> --from <sha> --to <sha>`: `{pr, from_sha, to_sha, status, diff}`, `status` being `ahead`, `behind`, `diverged`, `identical` or `unavailable` (a host no longer has it, or it is inaccessible). `diff` is the change from `from` to `to`: present on `ahead`, empty on `identical`, null on `behind`, `diverged` and `unavailable`. It is sanitized as for [`diff`](#diff). Shas only.
 
-GitHub: `/compare/<from>...<to>`, whose `status` is used; `diff` by the diff media type. GitLab: `/repository/compare` in the target project, `straight=false`, both ways. Commits only forward is `ahead`, only backward `behind`, both `diverged`. `identical` requires equal shas or the host's own `identical` status; an answer with no commits either way for two different shas is `unavailable`. A 404 is `unavailable`; other failures follow the read table.
+GitHub: the PR is read first, for its canonical path (a missing PR is `not_found`); then `/compare/<from>...<to>`, whose `status` is used; `diff` by the diff media type. GitLab: `/repository/compare` in the target project, `straight=false`, both ways. Commits only forward is `ahead`, only backward `behind`, both `diverged`. `identical` requires equal shas or the host's own `identical` status; an answer with no commits either way for two different shas is `unavailable`. A 404 is `unavailable`; other failures follow the read table.
 
-Exit 20 (`too_large`) when cut. GitHub: a 406 on the diff, or a listed file count at the host's cap. GitLab: `compare_timeout`, or a file cut by [`diff`](#diff)'s rule. An unclear answer is `unavailable`, never a partial diff.
+Exit 20 (`too_large`) when cut. GitHub: a 406 on the diff, a diff larger than forgectl's read cap, or a listed file count at the host's cap; a diff whose `diff --git` header count is not the listed file count is `unavailable`. GitLab: `compare_timeout`, or a file cut by [`diff`](#diff)'s rule. An unclear answer is `unavailable`, never a partial diff.
 
 ### `files`
 
@@ -524,16 +562,16 @@ Exit 20 (`too_large`) when cut. GitHub: a 406 on the diff, or a listed file coun
 
 | Backend | Answer |
 |---|---|
-| GitHub | `GET /repos/O/R/collaborators/U/permission`: `permission` decides `write_access` (`admin` and `write` give true, others false), which covers custom roles. `level` comes from `role_name` when in the enum, else `permission`. A 403 (the account lacks push access) gives `null`, `reason: no_permission_to_read`. |
-| GitLab | `/users?username=` (empty gives false), then `GET /projects/:id/members/all/:user_id`: true requires access level 30 or more, `state: active` and an unexpired `expires_at`; any other `state` gives false. A 404 gives false. A 401 or 403 gives `null`, `reason: no_permission_to_read`. Levels 50, 40 and 30 map to `admin`, `maintain` and `write`; below that `read`. |
+| GitHub | `GET /repos/O/R/collaborators/U/permission`: `permission` decides `write_access` (`admin` and `write` give true, others false), which covers custom roles. `level` is `role_name` when it is in the enum and within the legacy `permission` (`admin` under `admin`, `maintain` or `write` under `write`, `triage` or `read` under `read`), else `permission`. The answer must name the user it is for (`user.login`); one without it is not the documented shape (retried, then `upstream_error`). A 403 (the account lacks push access) gives `null`, `reason: no_permission_to_read`. A 404 for a login ending in `[bot]` gives `null` with `reason: no_permission_to_read`; any other 404 is `not_found` (exit 10). |
+| GitLab | `/users?username=` (empty gives false), then `GET /projects/:id/members/all/:user_id`: true requires access level 30 or more, `state: active`, `membership_state` absent or `active` (a member `awaiting` a seat cannot push) and an unexpired `expires_at`; any other `state` or `membership_state` gives false. The answer's `id` must be the user's, else `upstream_error`. A 404 gives false. A 401 or 403 gives `null`, `reason: no_permission_to_read`. Levels 50, 40 and 30 map to `admin`, `maintain` and `write`; below that `read`. |
 
-`reason` is set only when `write_access` is null. `author_association` is not used: it misses people with write access. An unresolvable user exits 10 only on GitHub's own 404; GitLab reports non-members and unknown users alike.
+`reason` is set only when `write_access` is null. `author_association` is not used: it misses people with write access. An unresolvable user exits 10 only on GitHub's own 404; GitLab reports non-members and unknown users alike. `me` is reserved in `<user>` too, and resolves as in `prs`.
 
 ### `whoami`
 
 `whoami [--host <host>]`: `{hosts: [{host, backend, login, id, me, me_matches_login, token_source, scopes}], errors}`, `token_source` being `token_env`, `token_command`, `stored_login` or `none`. Scopes are listed where the host reports them; tokens never are. Lists both built-ins and every declared host, or `--host`.
 
-`prs` uses `me`; posts and rules act as the authenticated account. A mismatch warns. No binary with no configured credential gives `token_source: none` with no error. `stored_login` means `GET /user` succeeded with no token supplied by forgectl; an `auth_required` there gives `none`. A configured credential that fails goes in `errors`, exit 12 (`partial_results`), and the `errors` items are `{host, code, message}`.
+`prs` uses `me`; posts and rules act as the authenticated account. A mismatch warns: one stderr line per mismatching host, `forgectl: warning: <host>: me is <me> but the authenticated login is <login>; ...`, and the exit code is unchanged. Any host failure is `partial_results` (exit 12), also with `--host`. Identity reads are retried like other reads. No binary with no configured credential gives `token_source: none` with no error. `stored_login` means `GET /user` succeeded with no token supplied by forgectl; an `auth_required` there gives `none`. A configured credential that fails goes in `errors`, exit 12 (`partial_results`), and the `errors` items are `{host, code, message}`. A configured credential that yields no token gives `none`; one that gave a token for a read that then failed keeps its source (`token_env` or `token_command`), with the failure in `errors`. A stored login whose read fails with any error other than `auth_required` or `tool_missing` gives `none`, with the failure in `errors`.
 
 ### `merge`
 
@@ -549,7 +587,7 @@ Output: `{pr, merged, already_merged, auto_merge_enabled, merged_head_sha, merge
 
 `review <pr> --file <path|-> [--expected-head <sha>] [--expected-base <ref>] [--allow-self] [--dedupe-key K] [--yes] [--dry-run] [--actor A] [--decision-id D]... [--override-escalation]`
 
-The input file (`schemas/review-input.json`) is `{event, body, comments}`: `event` is `comment`, `request_changes` or `approve`; `comments` is a list of `{path, line, side, start_line, body}`, with `line` required, `side` being `left` or `right` (default `right`), and a range on one side. An `approve` event follows [`approve`](#approve)'s rules for self-approval and already-approved; its text is always posted. An empty review means `comment` with neither body nor comments; `approve` with neither is allowed. Attribution footers are the caller's. `--expected-head` and `--expected-base` are required unless the run is interactive.
+The input file (`schemas/review-input.json`) is `{event, body, comments}`: `event` is `comment`, `request_changes` or `approve`; `comments` is a list of `{path, line, side, start_line, body}`, with `line` required, `side` being `left` or `right` (default `right`), and a range on one side. An `approve` event follows [`approve`](#approve)'s rules for self-approval and already-approved; its text is always posted. An empty review means `comment` with neither body nor comments; `approve` with neither is allowed. Attribution footers are the caller's. `review` accepts at most 200 inline comments per call; more is a usage error (exit 2), so the audit outcome record stays under the 64 KiB line cap. `--expected-head` and `--expected-base` are required unless the run is interactive.
 
 Output: `{pr, action, ids, thread_ids, review_id, already_posted, follow_up_done, neutralized_lines, markers_removed, warnings, head_sha, head_verified, dry_run}`, as for every post; `head_verified` is only on `review` and `approve`, and null for other events.
 
@@ -592,7 +630,7 @@ See [TUI](#tui).
 
 ### `export`
 
-`export [--since TIME]`: audit records, as JSONL; `--json` prints an array. `--since` takes RFC 3339 or a duration. A missing file gives empty output; a malformed line warns and is skipped.
+`export [--since TIME]`: audit records, as JSONL; `--json` prints an array. `--since` takes RFC 3339 or a duration. A missing file gives empty output; a malformed line warns and is skipped. If the state directory or `audit.jsonl` exists but is refused (see [Files](#files)) or cannot be read, `export` exits 12 `audit_unavailable`.
 
 ## Global flags
 
@@ -678,12 +716,13 @@ Errors also go to stderr as text.
 
 ## Host versions
 
-forgectl reads GitLab's `GET /version` once per process, only for the rows marked below. It parses `^(\d+)\.(\d+)`; an unreadable version counts as below every row, except `--auto`, as in [Merge order](#merge-order).
+forgectl reads GitLab's `GET /version` once per process, only for the rows marked below. It parses `^(\d{1,6})\.(\d{1,6})`; an unreadable version, including a failed read other than `auth_required`, `wrong_host_response` and `tool_missing`, counts as below every row, except `--auto`, as in [Merge order](#merge-order).
 
 | Feature | Detected by | Below this version |
 |---|---|---|
 | `detailed_merge_status` (15.6) | the field being absent | `unsupported_host_version` |
 | `/diffs` (15.7) | a 404 on the MR's `/diffs` | `unsupported_host_version` |
+| `pipeline_id` filter on commit statuses (17.9) | version read | `ci.complete: false` with a `warn` log line, so `passing` reads `pending`: an older host ignores the filter and lists every pipeline's statuses on the sha, and a status row carries no `pipeline_id` to filter on |
 | `mergeRequestRequestChanges` (17.2) | version read | a `request_changes` review exits 12 (`unsupported_host_version`), before anything is posted |
 | push cancels auto-merge (17.7) | version read | `merge --auto --expected-head` exits 20, `no_head_match` |
 | `auto_merge` parameter (17.11) | version read | `merge_when_pipeline_succeeds` |
@@ -705,21 +744,23 @@ Configured as `hooks.<name>`, a list of `{cmd, timeout, async}` (default timeout
 
 Reads fire none.
 
-**Payload.** `tool`, `hook`, `object_type: "pr"`, `object_id` (the `pr` form), `repo`, `head_sha`, `action`, `actor`, `decision_ids`. `pre-merge` and `post-merge` add `auto`, `method`, `base_ref`, `expected_head`, `expected_base`, `blocked_by`, `override_blocks`. `pre-merge` also adds `ci`; `post-merge` also adds `observed`. Both `pre-` hooks add `override_escalation`. `pre-post` and `post-post` add `event`, `body_sha256`, `body_bytes`, `thread_id`, `thread_author_is_self` and `reply_to`; `pre-post` also adds `allow_self`. `post-` hooks add `result` and, for posts, `ids`.
+**Payload.** `tool`, `hook`, `object_type: "pr"`, `object_id` (the `pr` form), `repo`, `head_sha`, `action`, `actor`, `decision_ids`. `pre-merge` and `post-merge` add `auto`, `method`, `base_ref`, `expected_head`, `expected_base`, `blocked_by`, `override_blocks`. `pre-merge` also adds `ci`; `post-merge` also adds `observed`. Both `pre-` hooks add `override_escalation`, which forgectl sets from the command's own override, never from another source. `pre-post` and `post-post` add `event`, `body_sha256`, `body_bytes`, `thread_id`, `thread_author_is_self` and `reply_to`; `pre-post` also adds `allow_self`. `post-` hooks add `result` and, for posts, `ids`.
 
 `ci` is `{state, checks: [{name, state}]}`; a check's `name` is untrusted, for comparison by equality. `observed` is `{head_sha, base_ref}` with result `merged_unexpected`, else null. `thread_id` and `thread_author_is_self` are for `resolve` and `unresolve`, else null; `reply_to` is for `reply`, else null; they come from the [Post order](#post-order) step 2 lookup.
 
 **Bodies are never in a payload.** `action` stays `review` for a review, with `event` being `comment`, `request_changes` or `approve`; `event` is null for other actions. For `resolve` and `unresolve`, `body_sha256` is null and `body_bytes` is 0. `body_sha256` is the sha256 of the body as posted; for a `review`, of canonical JSON `{body, comments}` as posted, with `body_bytes` their total. It is null only when nothing is posted. `method` may be null. On a failed attempt `post-post`'s `result` is `failed`, `outcome_unknown`, `outcome_partial` or `quick_action_ran`.
 
-**Environment.** `FORGECTL_HOOK`, `FORGECTL_ID`, `FORGECTL_OBJECT_TYPE`, plus forgectl's environment minus every configured `token_env` variable and the [ambient token list](#credentials).
+**Payload delivery.** The payload is strict JSON (ASCII only, at most 1 MiB, one line) on stdin, never in argv or the environment; every string in it is sanitized as a one-line field, so a control, bidi or invisible character arrives as a `<U+XXXX>` marker. A payload over the limit is exit 1 `internal` for a `pre-` hook and a warning for a `post-` hook. The command is run as `/bin/sh -c <cmd>`.
 
-**Outcomes.** Run in order. Exit 0 continues. Exit 13 escalates and later hooks still run; if none vetoes, the command exits 13 (`escalated`) and nothing is posted or merged. With several escalations, `hook_stderr` is the first's, `escalated_hooks` lists all as `{hook, index}`, and `hook` is the list name. Any other non-zero exit or a timeout vetoes at once (exit 11). `post-` failures are logged and warned, never fatal.
+**Environment.** `FORGECTL_HOOK` (the list name), `FORGECTL_ID` (the `object_id`), `FORGECTL_OBJECT_TYPE` (`pr`), plus forgectl's environment minus every configured `token_env` variable and the [ambient token list](#credentials).
 
-**Stdout.** forgectl reads at most 64 KiB. A JSON object with `decision_id` (string or list), each matching the grammar, is recorded in the audit record; invalid output is warned and ignored, and ids past 32 are dropped with a warning. A later hook sees earlier ids in `decision_ids`. `async` stdout is discarded.
+**Outcomes.** Run in order. Exit 0 continues. Exit 13 escalates and later hooks still run; if none vetoes, the command exits 13 (`escalated`) and nothing is posted or merged. With several escalations, `hook_stderr` is the first's, `escalated_hooks` lists all as `{hook, index}`, and `hook` is the list name. Any other non-zero exit, a death by signal, a hook that cannot be started, a timeout, more than 64 KiB on stdout (the hook is killed) or output still held open by a leftover process after the hook exited vetoes at once (exit 11); the leftover processes in the hook's group are killed. `post-` failures are logged and warned, never fatal. Warnings from earlier hooks of a list that ends in a veto or an escalation go to stderr.
+
+**Stdout.** forgectl reads at most 64 KiB. A JSON object with `decision_id` (string or list), each matching the grammar, is recorded in the audit record; invalid output is warned and ignored, and ids past 32 are dropped with a warning. A later hook sees earlier ids in `decision_ids`. One invalid id invalidates that hook's whole output. Ids are deduplicated in first-seen order before the cap. A `post-` hook's ids are visible to later hooks only. `async` stdout is discarded.
 
 **Time.** Each hook has its own timeout, no total bound applies, and `--timeout` does not cover them. The re-read after hooks is what protects against a slow list.
 
-**Delivery** is inline, with no outbox. A crash between the host call and a `post-` hook loses that hook; the audit record, written first, remains. An `async` hook runs detached under a small watchdog that enforces its timeout. Each `async` hook has its own private directory, which its watchdog removes.
+**Delivery** is inline, with no outbox. A crash between the host call and a `post-` hook loses that hook; the audit record, written first, remains. An `async` hook runs detached under a small watchdog that enforces its timeout. Each `async` hook has its own private directory, which its watchdog removes. The watchdog is a detached `python -I` running `forgectl.hookwatch` in its own session. The directory that holds the running forgectl package is appended to its module path, so a PYTHONPATH-only or user-site install is found and nothing in that directory shadows the standard library; an interpreter with forgectl in its own site-packages imports that copy. The watchdog's imports are standard library only. It acknowledges its start once it has checked what it was handed; with no acknowledgement within 2 s the hook is warned as not run, the watchdog's group is killed and then the acknowledgement pipe closed, and the directory removed. A watchdog that cannot write its acknowledgement runs no hook, removes the directory and logs `hook_failed`. A failing async hook is logged by the watchdog as the `warn` event `hook_failed` with `{hook, index, why}`. An `async` hook's timeout may be as long as any configured duration. A watchdog killed with SIGKILL cannot enforce the timeout or remove the directory.
 
 ## Config
 
@@ -728,33 +769,37 @@ Reads fire none.
 | Key | Default | Meaning |
 |---|---|---|
 | `me.name` | OS username | the `<user>` in `human:<user>`; `human:unknown` when the OS username fails the pattern |
-| `me.github`, `me.gitlab` | null | your login; else the authenticated user |
+| `me.github`, `me.gitlab` | null | your login, under that backend's login grammar; else the authenticated user |
 | `gh_bin`, `glab_bin` | `gh`, `glab` | executables: a bare name or an absolute path |
 | `timeout` | `60s` | budget for host calls |
 | `retries` | `3` | read retries (0 to 10) |
 | `hosts.<host>.backend` | built-in hosts only | `github` or `gitlab`; required for any other host |
 | `hosts.<host>.token_env` | null | variable holding the token |
 | `hosts.<host>.token_command` | null | argv list producing the token |
-| `hosts.<host>.me` | null | login on this host |
+| `hosts.<host>.me` | null | login on this host, under its backend's login grammar |
 | `hosts.<host>.api_prefix` | null | GitLab under a path, such as `/gitlab` |
 | `repos.<id>.merge_method` | null | `squash`, `merge` or `rebase` |
+| `activity.ignore_authors` | `[]` | logins whose comments and reviews [`activity`](#activity) ignores; glob patterns allowed; replaces on merge like any list |
+| `browse.refresh_interval` | `120s` | seconds between automatic refreshes in [`browse`](#tui); `0` disables them; the flag `browse --interval` wins |
 | `hooks.<name>` | `[]` | [Hooks](#hooks) |
 
-Per-repo overrides hold only `merge_method` in v1: no setting lowers a safety rule, so none can be relaxed per repo. A duration is a positive number or a numeric string, in seconds, or `<number><unit>` with unit `ms`, `s`, `m`, `h` or `d`. `api_prefix` is only for declared hosts and null for GitHub. A built-in host's `backend` must match. A hook's `cmd` is not empty.
+Per-repo overrides hold only `merge_method` in v1: no setting lowers a safety rule, so none can be relaxed per repo. A duration is a positive number or a numeric string, in seconds, or `<number><unit>` with unit `ms`, `s`, `m`, `h` or `d`; `browse.refresh_interval` alone also accepts `0`, which disables the refresh. `api_prefix` is only for declared hosts and null for GitHub; it has 1 to 8 segments of 1 to 64 characters from `A-Za-z0-9._-`, none of them `.` or `..`, and no trailing slash. A host key has labels of at most 63 characters and a name of at most 253, and a GitHub host's key has no port (`gh` refuses one); either failure exits 2 (`config_invalid`) naming the key. A built-in host's `backend` must match. A hook's `cmd` is not empty.
+
+**Reading files.** A config file or drop-in must be a regular file (a symlink to one is followed) of at most 256 KiB, valid UTF-8, a single YAML document of at most 10,000 nodes whose top level is a mapping; at most 256 drop-ins are read, and names that do not end in `.yaml` or that start with `.` are skipped. The default `config.yaml` and `config.d` are absent only when no entry exists at their path (a missing parent, or a parent that is not a directory, counts as none); an entry that exists but is not a readable regular file (`config.yaml`) or directory (`config.d`), a dangling symlink included, is refused. Scalars resolve under the YAML 1.2 core schema, with numbers in decimal only: only `true` and `false` are booleans and integers are decimal, so `yes`, `010`, `0x1f` and `1:30` are strings. YAML anchors, aliases, merge keys, duplicate keys, non-string keys, tags beyond the core types (so also timestamps and binary), and a NUL or a lone surrogate (U+D800 to U+DFFF) in any key or value are refused. `--config` and its drop-ins do not read the default location. A refusal names the key, or the file for a problem that has no key, and its message repeats no file content other than a key. Each of `FORGECTL_TIMEOUT`, `FORGECTL_RETRIES`, `FORGECTL_GH_BIN` and `FORGECTL_GLAB_BIN` is refused when empty, and is named by the variable. Beyond the schema, these are refused: a hook `cmd` that is only whitespace (Unicode whitespace included); an executable named `.` or `..`; control characters (Unicode category Cc: C0, DEL and C1) in an executable name or a `token_command` argument; a NUL or a lone surrogate in any string; `retries` written with a fraction part, such as `3.0`; a duration that is infinite, NaN or over 100 years; per-repo keys that differ only by case; a `me.github`, `me.gitlab` or `hosts.<host>.me` that is not a login under its own backend's grammar (the schema allows the union of both); a `token_command` whose first word is not a bare name or an absolute path; a `token_env` naming a variable forgectl sets in or passes to a child (see [Credentials](#credentials)); and a GitHub host key that `gh` rewrites (see [Hosts](#hosts)). Each is refused at load, before any process starts. `config_hash` covers the environment's overrides; its canonical form is defined under [Audit and log](#audit-and-log).
 
 ### Credentials
 
 Per host, in this order:
 
-1. `token_env`: the value of that variable, if set and non-empty.
-2. `token_command`: run directly with no shell, stdin `/dev/null`, a 10 s timeout, in its own process group; an argument equal to `{host}` becomes the host; stdout minus the trailing newline is the token. It runs in the private empty directory, with the [built environment](#invoking-the-backends) for stored-login mode and without any ambient token variable. It runs once per process per host. Output must be one line of printable ASCII with no space; anything else is a failure, and its stderr is never logged.
+1. `token_env`: the value of that variable, if set and non-empty. It may name an ambient token variable, but not a variable forgectl sets in or passes to a child (`PATH`, `HOME`, `TMPDIR`, `GIT_CEILING_DIRECTORIES`, the locale, proxy and certificate variables, the bus variables, `GH_CONFIG_DIR`, `GLAB_CONFIG_DIR`, `XDG_CONFIG_HOME`, `GITLAB_HOST` and the fixed settings), which exits 2 (`config_invalid`) naming `hosts.<host>.token_env`.
+2. `token_command`: its first word is a bare name, resolved only against absolute `PATH` entries, or an absolute path; anything else exits 2 (`config_invalid`) naming `hosts.<host>.token_command` at load. It is run directly with no shell, stdin `/dev/null`, a 10 s timeout, in its own process group; an argument equal to `{host}` becomes the host; stdout minus the trailing newline is the token. It runs in the private empty directory, with the [built environment](#invoking-the-backends) for stored-login mode and without any ambient token variable. It runs once per process per host, and a failure is remembered for the process too. A non-zero exit, a timeout, output over 4098 bytes and a missing program are each a failure that names only that reason, never the output or stderr. Output must be one line of printable ASCII with no space; anything else is a failure, and its stderr is never logged.
 3. The stored login of `gh` or `glab`, in the CLI's own config, only when neither of the above is configured.
 
 If `token_env` or `token_command` is configured and neither yields a token, exit 12 (`auth_required`), naming the variable; the stored login is not used. It applies to reads and writes. `details.variable` is the configured name, absent otherwise; the message says to set `hosts.<host>.token_env` or log in.
 
-GitLab with no credential is anonymous: a command succeeds if every read it needs allows it, else `auth_required`. `whoami` then shows `none`.
+GitLab with no credential is anonymous: a command succeeds if every read it needs allows it, else `auth_required`. `whoami` then shows `none`. `glab` 1.89 cannot read anonymously: it prints `Unauthenticated.` and sends nothing, and forgectl then reports `auth_required`.
 
-If the caller set `GH_CONFIG_DIR` (GitHub) or `GLAB_CONFIG_DIR` (GitLab), stored-login mode passes neither `DBUS_SESSION_BUS_ADDRESS` nor `XDG_RUNTIME_DIR` for that backend, so a custom config dir only ever uses files. forgectl does not inspect the directory. A login kept only in a keyring then reads as no credential, on GitHub `auth_required` and on GitLab anonymous, and a `token_command`, which runs in this environment, cannot reach a keyring over the bus either. `token_env` still applies. The macOS Keychain is a [residual risk](#residual-risks).
+If the caller set `GH_CONFIG_DIR` (GitHub) or `GLAB_CONFIG_DIR` (GitLab), stored-login mode passes no `XDG_RUNTIME_DIR` for that backend and sets `DBUS_SESSION_BUS_ADDRESS` to the fixed unusable address of [Invoking the backends](#invoking-the-backends), so a custom config dir only ever uses files. forgectl does not inspect the directory. A login kept only in a keyring then reads as no credential, on GitHub `auth_required` and on GitLab anonymous, and a `token_command`, which runs in this environment, cannot reach a keyring over the bus either. `token_env` still applies. The macOS Keychain is a [residual risk](#residual-risks).
 
 **Which variable the child gets.** Exactly one:
 
@@ -768,9 +813,11 @@ If the caller set `GH_CONFIG_DIR` (GitHub) or `GLAB_CONFIG_DIR` (GitLab), stored
 
 Tokens never reach argv, files, logs, audit records, output or hooks. On Linux forgectl sets `PR_SET_DUMPABLE=0`.
 
+Redaction of host- or child-derived text is by the exact value of each token in use and its percent-encoded forms: the pass over registered secrets (`hosts.redact_secrets`) matches percent-encoded forms with hex digits in either case, while the gateway's per-call redaction matches the exact value and the uppercase forms `quote` and `quote_plus` produce; other transformations, such as base64 or JSON escaping, are not caught.
+
 ## Environment variables
 
-`FORGECTL_TIMEOUT`, `FORGECTL_RETRIES`, `FORGECTL_GH_BIN` and `FORGECTL_GLAB_BIN` set the matching top-level keys, under the same rules; bad values exit 2. Structured config cannot be set from the environment. `FORGECTL_HOOK`, `FORGECTL_ID` and `FORGECTL_OBJECT_TYPE` are reserved for hooks and are not config keys.
+`FORGECTL_TIMEOUT`, `FORGECTL_RETRIES`, `FORGECTL_GH_BIN` and `FORGECTL_GLAB_BIN` set the matching top-level keys, under the same rules; bad values exit 2. A set but empty value is refused, not treated as unset, unlike `token_env`, which counts only when set and non-empty. Structured config cannot be set from the environment. `FORGECTL_HOOK`, `FORGECTL_ID` and `FORGECTL_OBJECT_TYPE` are reserved for hooks and are not config keys.
 
 ## Labels
 
@@ -778,13 +825,43 @@ forgectl stores no long-lived objects, so it has no labels of its own. Conventio
 
 ## TUI
 
-`browse [--focus <pr>] [--result-file PATH]` needs the extra `forgectl[tui]`; without it, exit 2 with the install command.
+`browse [--focus <pr>] [--result-file PATH] [--interval D]` needs the extra `forgectl[tui]`; without it, exit 2 with the install command.
 
-A list and a detail pane with facts, CI, reviews, comments and diff. The default list is the union of requested-from-you and authored-by-you, as two `prs` calls. Two actions: `m` merge, `o` open in a browser. Posting stays with the tools that own drafts.
+`browse` is read-only: a dashboard of your open PRs and MRs on GitHub and GitLab, a detail pane with facts, CI, reviews, comments and diff, and one action, `o` open in a browser. The browser opener is started with only a short list of variables (`PATH` without relative entries, `HOME`, the locale, display and desktop-session variables, `BROWSER`, `TMPDIR` and the proxy variables) and `/` as its working directory, so no token variable ever reaches it. It runs detached in its own session and outside the gateway's deadline kill: forgectl signals no process it did not start, never kills the opener, and `browse` does not wait on it, only reports a non-zero exit. Posting stays with the tools that own drafts. Merging is a separate follow-up ([Merge from `browse`](#merge-from-browse-follow-up)). Forge text renders with Textual markup disabled. GitLab rows rely on the GitLab path being verified against a self-managed instance (#35).
 
-`m` runs the merge in process, with `--actor human:<me.name>`, and `--expected-head`, `--expected-base` from that read. `m`'s dialog is [Merge order](#merge-order) step 5's, plus a choice of `merge_methods_allowed`, preselecting the configured method, when the method is unresolved. A blocked PR gets no merge: the status line shows `not_ready` and the CLI command. Audit: `actor_source: tty`. A veto, an escalation or any refusal shows in the status line. `o` opens only the built `url`; a check's `url` is shown, opened only when `http` or `https`. Forge text renders with Textual markup disabled.
+### List
 
-`--result-file` writes `{"intent": "open"|"back", "selected": [...], "merged": [...]}` on exit (`schemas/cli/browse-result.json`). `selected` holds zero or one `pr`; `merged` lists the PRs merged with `m`. `enter` opens the detail pane and `intent` stays `back` on exit; `intent: open` means `o` was used. Keys: `q` quit, `?` help, `/` filter, `enter` open, `r` refresh. The result file is written only when `browse` exits 0; on any other exit an existing file is left unchanged and must be ignored by callers.
+The default list is the union of requested-from-you and authored-by-you, as two `prs` calls. Columns:
+
+| Column | Source |
+|---|---|
+| repo and number, title | the `prs` item |
+| badge | state, draft and the first blocker |
+| CI glyph | `ci.state` |
+| approvals | `approvals`; on GitLab over `approvals` plus the `approvals_left` of the approval rule forgectl already reads, such as `1/2`; on GitHub, which reports no required count in the model, the bare count |
+| comments | `activity`: `comments_total`, `unresolved_threads`, `others_since_push` (new since push) and `awaiting_my_reply` |
+| age | since `head.pushed_at` (blank when it is null) and since `updated_at` |
+
+- **Grouping and order.** Rows group by repo. A "needs attention first" order puts rows with failing CI, new comments from others since the push, a thread awaiting my reply or changes requested first, then the rest; a key switches between it and the default order. Authors in `activity.ignore_authors` never move a row.
+- **Filters.** Authored by me or review-requested from me; CI failing; has new comments. Filters combine as an intersection, and the status bar names the active ones. `/` filters by text.
+- **Loading.** One `prs` call per query builds the rows, then `snapshot` runs per PR with bounded concurrency (configurable, a small default), visible rows first. Rows render as each snapshot arrives, with a per-row loading state and a progress count in the status bar. The names and defaults of the tunables here and in Refresh (concurrency, the full pass every Nth cycle, the rate-limit threshold) are fixed with their schema entries when the implementation lands. A failed snapshot marks its row with the error and does not block the others.
+
+### Refresh
+
+- **Manual.** `r` refreshes the selected PR (its `snapshot`); `R` refreshes all (`prs`, then snapshots). A refresh in flight is never started twice: `R` during a cycle is ignored, with a status note.
+- **Automatic.** Every `browse.refresh_interval` seconds, default 120, `0` disables it; `--interval` takes a duration like the config value, or `0`, wins over the config, and an invalid value exits 2. Each cycle re-runs `prs`, re-snapshots only PRs whose `updated_at` or head sha changed and PRs with pending CI, and re-snapshots all every Nth cycle (configurable, default 5), because `updated_at` is not a reliable change signal and can miss CI and approval changes.
+- **Place and change.** Selection and scroll position survive any refresh. Rows whose data changed are highlighted until the next cycle or a keypress. A failed refresh keeps the row's last good data and marks it stale.
+- **Status bar.** Last refresh time, `rate_limit.remaining` per host, the active filters, loading progress, and partial errors (`complete` false, `errors`).
+- **Cost control.** When `rate_limit.remaining` for a host drops below a threshold, the interval for that host lengthens and the status bar says so; the normal interval resumes after `rate_limit.reset_at`. Polling stays within [Reliability](#reliability); an ETag pass-through may later lower its cost.
+- **State.** Nothing is stored between runs (D-4); change tracking lives in memory only.
+
+### Result file
+
+`--result-file` writes `{"intent": "open"|"back", "selected": [...], "merged": [...]}` on exit (`schemas/cli/browse-result.json`). `selected` holds zero or one `pr`; `merged` lists the PRs merged from `browse`, and stays empty until the merge follow-up. `enter` opens the detail pane and `intent` stays `back` on exit; `intent: open` means `o` was used. `o` opens only the built `url`; a check's `url` is shown, opened only when `http` or `https`. Keys: `q` quit, `?` help, `/` filter, `enter` open, `r` refresh selected, `R` refresh all, `o` open in a browser; the keys for sort order and filters are listed in `?`. The result file is written only when `browse` exits 0; on any other exit an existing file is left unchanged and must be ignored by callers.
+
+### Merge from `browse` (follow-up)
+
+`m` is not part of the read-only `browse`; it follows as its own step. It runs the merge in process, with `--actor human:<me.name>`, and `--expected-head`, `--expected-base` from that read. `m`'s dialog is [Merge order](#merge-order) step 5's, plus a choice of `merge_methods_allowed`, preselecting the configured method, when the method is unresolved. A blocked PR gets no merge and no override: the status line shows `not_ready` and the CLI command. Audit: `actor_source: tty`. A veto, an escalation or any refusal shows in the status line, and merged PRs are listed in `merged` in the result file.
 
 ## Files
 
@@ -795,7 +872,9 @@ A list and a detail pane with facts, CI, reviews, comments and diff. The default
 | `log.jsonl` | 0600 | public contract |
 | private temporary directories | 0700 | empty cwd and config dirs per process, under `TMPDIR`, removed on exit |
 
-`audit.jsonl` gets mode 0600 on creation; an existing file's mode is not changed. There is no `state.db`.
+`audit.jsonl` gets mode 0600 on creation; an existing file's mode is not changed. There is no `state.db`. Neither file is rotated. Each record is one ASCII line (non-ASCII is escaped) of at most 64 KiB, written with a single append, so concurrent runs never interleave lines. The state directory must be a real directory (not a symlink) owned by the user and not writable by group or others, and a file must be a regular file owned by the user with one link and not writable by group or others (an existing file's mode is still never changed, so 0600 and 0644 are accepted and 0620 or 0666 are not); otherwise it is not used (an audit append fails as `audit_unavailable`, a log write warns). `export` skips a line over 256 KiB.
+
+Either file may contain empty lines: forgectl adds a newline first when an append finds the file not ending in one. A reader skips empty lines.
 
 ## Audit and log
 
@@ -803,9 +882,9 @@ A list and a detail pane with facts, CI, reviews, comments and diff. The default
 
 **Two records per write.** Before a host write, forgectl appends a record with `result: attempted` and an `attempt_id`; after, a second record with the same id and the outcome. `attempted` is written once per run, before its first write, whichever step that is. A record with no outcome means forgectl died in between. If that first append fails, exit 12 (`audit_unavailable`), with nothing sent. If the second fails, exit 12 (`audit_failed`) with the outcome in `details`, so a caller does not retry.
 
-**Fields.** `merge_unverified` is recorded as `merged_unexpected` when the PR merged at another head or base, with `observed: {head_sha, base_ref}` in the outcome record, else as `outcome_unknown`; `observed` is null otherwise. A post's `quick_action_ran` as itself; `approved_stale_head` as `approved`, since the approval exists. `config_hash` is the sha256 of sorted-key JSON of the merged config after defaults, without flags. `config_path` is null for the default. `actor_source` is `flag`, `tty` or `default`. `human:` with `stdin_tty: false` is expected from a dashboard, and is checkable, not refused.
+**Fields.** `merge_unverified` is recorded as `merged_unexpected` when the PR merged at another head or base, with `observed: {head_sha, base_ref}` in the outcome record, else as `outcome_unknown`; `observed` is null otherwise. A post's `quick_action_ran` as itself; `approved_stale_head` as `approved`, since the approval exists. `config_hash` is the sha256 hex digest of the canonical JSON of the effective config, after files, environment overrides and defaults but not flags: every key present, each with its default when unset (null only where the default is null, such as `me.name`), keys sorted, compact separators (`,` and `:`), non-ASCII characters as `\u` escapes, encoded as UTF-8, durations as JSON numbers of seconds always written with a fraction part, as Python's float repr does (`60.0`, `0.009`), keys spelled as in the schema (such as `pre-merge` and a hook's `async`), and `me.name` as configured (null when unset, not the OS username). `config_path` is null for the default. `actor_source` is `flag`, `tty` or `default`. `human:` with `stdin_tty: false` is expected from a dashboard, and is checkable, not refused. `inputs.base_ref` and `observed.base_ref` are cut to their first 1024 characters when written. `ts` must be a real instant: `export` skips, as malformed, a record whose `ts` matches the schema pattern but names no real time (such as a leap second `23:59:60`, an offset of `+24:00` or a date that does not exist).
 
-**Log** (`schemas/log.json`): `ts`, `level`, `event`, `pr`, `host`, `details`. `error` for exit 1; `warn` for refusals, vetoes, escalations, exit 12 and an unmatched instance note; `info` otherwise; `debug` for `--verbose`. Reads log only at `--verbose` or on failure, so polling does not grow the file. A log write failure warns only. URLs are recorded without userinfo. Secrets never appear in either file.
+**Log** (`schemas/log.json`): `ts`, `level`, `event`, `pr`, `host`, `details`. `error` for exit 1; `warn` for refusals, vetoes, escalations, exit 12 and an unmatched instance note; `info` otherwise; `debug` for `--verbose`. Reads log only at `--verbose` or on failure, so polling does not grow the file. A log write failure warns only, and never changes the exit code. `export` prints each record with its untrusted fields (`base_ref`, `host_login`, `observed.base_ref`) sanitized, and skips, with a warning that does not repeat the line, any line that is not valid against `schemas/audit.json`. URLs are recorded without userinfo. Secrets never appear in either file.
 
 ## Upgrades
 
@@ -824,14 +903,18 @@ There is no database to migrate. `audit.jsonl` and `log.jsonl` change additively
 - **Neutralizing depends on host behavior.** A future GitLab may treat indented lines as commands; a `live` test watches this, and the backstop catches what it sees. A GitHub bot that trims a line, and mention-driven bots (`@name merge`), are not stopped. Any caller posting third-party text decides on mentions.
 - **`instance` depends on note wording** on GitLab; failure is visible (`null`, a warning). The form naming two reviewers comes from the host's source and a public sample, not from a live run with two accounts.
 - **`gh` rewrites control characters.** `gh` rewrites ESC, BEL, NUL and C1 in JSON to caret text, so on GitHub those show as `^[`, `^G` and so on, not as markers.
+- **A hook's escaped processes survive.** A process a hook starts that leaves the hook's session or process group (with `setsid`, for example) survives the kill of that group, for synchronous and `async` hooks alike.
+- **The audit and log are not tamper-evident.** A hook, like any same-user process, can append, edit or truncate `audit.jsonl` and `log.jsonl`, so a record shows what was written, not that forgectl wrote it; a consumer needing integrity copies records somewhere the user cannot change.
 - **Human checks are advisory.** A same-user process can pass `--actor human:<user>`, pass `--config` with an empty file to avoid hooks, and use `script` to supply a TTY. The same process could run `gh` directly.
 - **Allowing `forgectl` allows much more.** A caller who chooses forgectl's arguments or environment can name a config, binary, `PATH` or proxy of its own, and so run any command and send a stored token to any host. A permission profile wanting less must wrap forgectl.
 - **Draft race.** A draft created in the web UI between forgectl's last list and the publish goes out with it, unneutralized.
 - **Dedupe.** A writer may edit another's comment and keep the author. A partial GitLab publish whose marker landed reports `already_posted`. Two simultaneous runs may both post. A key can be guessed: a process able to post under this account can plant one with other text, and a writer can edit one in. `already_posted` means the key was seen, not that this text is there; `ids` lets a caller read it.
 - **Approving your own push.** Approving a PR you pushed to, under another author, is not detected. A host setting such as GitLab's prevent-approval-by-committers covers it. `self_approval` also misses a token of one configured `me` approving a PR by another account you own.
-- **Keyring under a custom config dir.** Withholding the bus variables closes only a Linux keyring. On macOS `gh` and `glab` are expected to reach the login Keychain without them, so a custom config dir may still yield the stored login there. A directory named only through `XDG_CONFIG_HOME` keeps the bus variables on every platform.
+- **Keyring under a custom config dir.** The unusable bus address closes only a Linux keyring. On macOS `gh` and `glab` are expected to reach the login Keychain without them, so a custom config dir may still yield the stored login there. A directory named only through `XDG_CONFIG_HOME` keeps the bus variables on every platform.
 - **`glab` repeats `Private-Token` on a cross-host redirect of a read.** A declared host redirecting a GET to another host hands that host the token. Only hosts you declare are reachable; gitlab.com's rename redirects stay on the host. `gh` does not do this. The target can then forge reads, including `ci.state` and approvals. A write through a renamed path uses the numeric id, so it reaches the renamed project with no signal.
 - **A `git` earlier on an absolute `PATH` entry** sees the token, because `glab` runs git.
+- **GitHub search coverage.** For a search not scoped to one repository (`--author` or `--review-requested-from` without `--repo`), GitHub documents that it searches at most a fixed number of repositories, so results beyond them can be missed while `complete` is true (UNVERIFIED, #31).
+- **A GitHub head that moves and returns.** `files` and `diff` are fetched by PR number between two reads of the PR; a head that moves and moves back between them (A, then B, then A) is not detected, so the answer may be B's. A sha-pinned GitHub diff is not available without other cuts.
 - **`access` on GitLab.** Members of an invited private group can be invisible, which reads as `false`; this errs in the safe direction. Level 30 or more is an approximation of push rights on protected branches.
 
 ## Platform notes
