@@ -34,9 +34,7 @@ def _head_sha(item: dict[str, Any]) -> Any:
     return head.get("sha") if isinstance(head, dict) else None
 
 
-def needs_snapshot(
-    row: Row, previous_item: dict[str, Any] | None, state: columns.RowState
-) -> bool:
+def needs_snapshot(row: Row, previous_item: dict[str, Any] | None, state: columns.RowState) -> bool:
     """Whether an ordinary cycle re-reads this row."""
     if previous_item is None or state.status != columns.LOADED or state.summary is None:
         return True  # new, never loaded or failed: nothing good to keep
@@ -81,7 +79,7 @@ class RateLimits:
         return now < reading.seen_at + UNKNOWN_RESET_HOLD
 
     def text(self, now: datetime) -> str:
-        """``rate: host 4000, other 12`` and, for a backed-off host, ``slow: other until 13:00:00``."""
+        """``rate: host 4000, other 12`` and ``slow: other until 13:00:00`` when backed off."""
         if not self._hosts:
             return ""
         shown = ", ".join(
@@ -91,6 +89,8 @@ class RateLimits:
         parts = [f"rate: {shown}"]
         for host, reading in sorted(self._hosts.items()):
             if self.low(host, now):
-                until = f" until {reading.reset_at.strftime('%H:%M:%S')}" if reading.reset_at else ""
+                until = (
+                    f" until {reading.reset_at.strftime('%H:%M:%S')}" if reading.reset_at else ""
+                )
                 parts.append(f"slow: {safe.line(host, 60)}{until}")
         return " | ".join(parts)

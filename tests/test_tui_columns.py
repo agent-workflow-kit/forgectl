@@ -525,7 +525,9 @@ def test_a_reload_mid_load_never_runs_more_snapshots_than_the_concurrency() -> N
     async def go() -> None:
         async with app.run_test(size=(140, 50)) as pilot:
             await wait_for(app, lambda: len(source.started) >= 8)(pilot)
-            await pilot.press("R")  # the old round still has reads in flight
+            # R is ignored while a refresh runs (#59), so start the newer round directly: the
+            # old one still has reads in flight, and the one shared bound must hold.
+            app._start_snapshots(None)
             await settle(app, pilot)
 
     asyncio.run(go())

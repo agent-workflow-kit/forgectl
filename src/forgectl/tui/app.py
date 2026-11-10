@@ -362,10 +362,14 @@ class BrowseApp(App[None]):
         self._busy = False
         if listed:  # a refresh whose `prs` calls both failed outright is not a refresh
             self._last_refresh = self.clock()
+        flagged = any(state.refreshing for state in self._states.values())
         for state in self._states.values():
             state.refreshing = False
         if self.is_running:
-            self._apply_filter()  # also paints the bar
+            if flagged:
+                self._apply_filter()  # also paints the bar
+            else:
+                self._paint_bar()
 
     def _state(self, row: Row) -> columns.RowState:
         return self._states.get(row.pr) or columns.RowState()
@@ -471,12 +475,16 @@ class BrowseApp(App[None]):
         self._snap_total = len(order) if self.concurrency else 0
         self._busy = True
         now = self.clock()
+        flagged = False
         for pr in order:
             self._host_last[host_of(pr)] = now
             state = self._states.get(pr)
             if self._snap_total and state is not None and state.status == columns.LOADED:
-                state.refreshing = True  # the last good data stays on screen meanwhile
-        self._apply_filter()
+                state.refreshing = flagged = True  # the last good data stays on screen meanwhile
+        if flagged:
+            self._apply_filter()
+        else:
+            self._paint_bar()
         if order and self.concurrency:
             self.run_worker(self._load_snapshots(self._snap_token, order), group="snapshots")
             return True
@@ -517,9 +525,7 @@ class BrowseApp(App[None]):
                     except Cancelled:
                         return  # a newer round replaced this one before the read started
                     except ForgectlError as err:
-                        state = self._failed_state(
-                            self._states.get(pr), safe.line(err.code, 60)
-                        )
+                        state = self._failed_state(self._states.get(pr), safe.line(err.code, 60))
                     except Exception as exc:  # a source bug or bad data marks the row only
                         state = self._failed_state(self._states.get(pr), self._internal(exc))
                 if token != self._snap_token:  # a newer round replaced this one

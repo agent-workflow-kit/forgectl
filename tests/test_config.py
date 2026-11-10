@@ -135,7 +135,9 @@ def test_browse_defaults_and_values(home: Path) -> None:
 
 @pytest.mark.parametrize("value", ["0", "0.0"])
 def test_browse_refresh_interval_accepts_zero_to_disable(home: Path, value: str) -> None:
-    assert load(home, f"browse: {{refresh_interval: {value}}}\n").config.browse.refresh_interval == 0
+    assert (
+        load(home, f"browse: {{refresh_interval: {value}}}\n").config.browse.refresh_interval == 0
+    )
 
 
 @pytest.mark.parametrize(

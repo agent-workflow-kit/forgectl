@@ -22,6 +22,7 @@ from forgectl.errors import ForgectlError
 from forgectl.tui import run as tui_run
 from forgectl.tui.app import BrowseApp
 from forgectl.tui.refresh import RateLimits, host_of
+from forgectl.tui.source_live import Cancelled
 
 from .test_tui_app import content_of, list_prompts, settle
 from .test_tui_columns import GH, GL, order_of, prefix, prompt_of, snap
@@ -62,6 +63,8 @@ class RefreshSource(FakeSource):
     def snapshot(self, pr: str, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
         if cancelled is not None:
             self.cancel_probes.append(cancelled)
+            if cancelled():  # as ``LiveSource`` does: refuse a call a newer round replaced
+                raise Cancelled(pr)
         with self.lock:
             self.running += 1
             self.peak = max(self.peak, self.running)
@@ -502,9 +505,9 @@ def test_a_changed_row_is_highlighted_until_the_next_cycle() -> None:
         changed = prompt_of(app, prefix(GH, 1))
         assert "[changed]" in changed and "✗" in changed
         assert "[changed]" not in prompt_of(app, prefix(GH, 2))
-        assert any(
-            p.plain.startswith(prefix(GH, 1)) and p.spans for p in list_prompts(app)
-        ), "the changed row is styled, not only labelled"
+        assert any(p.plain.startswith(prefix(GH, 1)) and p.spans for p in list_prompts(app)), (
+            "the changed row is styled, not only labelled"
+        )
         await cycle(app, pilot)  # nothing changed this time
         assert "[changed]" not in prompt_of(app, prefix(GH, 1))
 
@@ -705,6 +708,7 @@ def test_an_older_round_is_cancelled_and_never_exceeds_the_thread_bound() -> Non
         assert any(probe() for probe in source.cancel_probes)
         assert not all(probe() for probe in source.cancel_probes)
         assert "snapshots 12/12" in bar(app)
+        assert not any("ERROR" in p.plain for p in list_prompts(app))  # Cancelled is no failure
 
     run(source, script, concurrency=2)
 
@@ -768,9 +772,10 @@ def test_the_flag_wins_over_the_config(
 def test_the_config_can_turn_the_refresh_off(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    assert run_with(monkeypatch, tmp_path, "browse: {refresh_interval: 0}\n", None)[
-        "refresh_interval"
-    ] == 0
+    assert (
+        run_with(monkeypatch, tmp_path, "browse: {refresh_interval: 0}\n", None)["refresh_interval"]
+        == 0
+    )
 
 
 def test_an_invalid_config_stops_before_the_app_starts(
