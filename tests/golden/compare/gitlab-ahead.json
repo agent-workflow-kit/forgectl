@@ -1,0 +1,7 @@
+{
+  "diff": "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a\n+b\n",
+  "from_sha": "1111111111111111111111111111111111111111",
+  "pr": "gitlab.com/user-9/proj#7",
+  "status": "ahead",
+  "to_sha": "2222222222222222222222222222222222222222"
+}

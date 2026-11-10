@@ -1,0 +1,7 @@
+{
+  "base_sha": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+  "diff": "diff --git a/src/widget.py b/src/widget.py\n--- a/src/widget.py\n+++ b/src/widget.py\n@@ -1,4 +1,5 @@\n import os\n+import sys\n \n def run():\n-    pass\n+    return 1\ndiff --git a/docs/old name.md b/docs/new name.md\nrename from docs/old name.md\nrename to docs/new name.md\n--- a/docs/old name.md\t\n+++ b/docs/new name.md\t\n@@ -1 +1,2 @@\n # Title\n+More text.\ndiff --git a/src/gone.py b/src/gone.py\ndeleted file mode 100755\n--- a/src/gone.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-print('bye')\n-last\n\\ No newline at end of file\n",
+  "head_sha": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+  "merge_base_sha": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+  "pr": "gitlab.com/user-9/proj#7"
+}

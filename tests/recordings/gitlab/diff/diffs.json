@@ -1,0 +1,35 @@
+[
+  {
+    "old_path": "src/widget.py",
+    "new_path": "src/widget.py",
+    "a_mode": "100644",
+    "b_mode": "100644",
+    "diff": "@@ -1,4 +1,5 @@\n import os\n+import sys\n \n def run():\n-    pass\n+    return 1\n",
+    "new_file": false,
+    "renamed_file": false,
+    "deleted_file": false,
+    "generated_file": false
+  },
+  {
+    "old_path": "docs/old name.md",
+    "new_path": "docs/new name.md",
+    "a_mode": "100644",
+    "b_mode": "100644",
+    "diff": "@@ -1 +1,2 @@\n # Title\n+More text.\n",
+    "new_file": false,
+    "renamed_file": true,
+    "deleted_file": false,
+    "generated_file": false
+  },
+  {
+    "old_path": "src/gone.py",
+    "new_path": "src/gone.py",
+    "a_mode": "100755",
+    "b_mode": "0",
+    "diff": "@@ -1,2 +0,0 @@\n-print('bye')\n-last\n\\ No newline at end of file\n",
+    "new_file": false,
+    "renamed_file": false,
+    "deleted_file": true,
+    "generated_file": false
+  }
+]
