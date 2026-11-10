@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import random
-import time
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
-from forgectl.tui import columns, query
+from forgectl.tui import columns, filtering, query
 from forgectl.tui.query import (
     ME,
     And,
@@ -22,8 +22,11 @@ from forgectl.tui.query import (
     matches,
     parse,
 )
+from forgectl.tui.source import Row
 
 DAY = 86400
+GH = "github.com/acme/widgets"
+NOW = datetime(2026, 11, 3, 12, 0, 0, tzinfo=UTC)
 
 
 def ok(text: str) -> Query:
@@ -290,12 +293,23 @@ def test_regex_like_patterns_match_literally() -> None:
     assert matches(q.where, row(title=".*"))
 
 
-def test_pathological_globs_stay_fast() -> None:
-    pattern = "*a" * 20 + "b"
-    q = ok(f"title LIKE '{pattern}'")
-    started = time.perf_counter()
-    assert not matches(q.where, row(title="a" * 5000))
-    assert time.perf_counter() - started < 5
+def test_pathological_globs_match_only_a_bounded_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[int] = []
+    real = query._glob
+
+    def spy(pattern: str, text: str) -> bool:
+        seen.append(len(text))
+        return real(pattern, text)
+
+    monkeypatch.setattr(query, "_glob", spy)
+    q = ok("title LIKE '" + "*a" * 20 + "b'")
+    get = filtering.getter(
+        Row({"pr": f"{GH}#1", "title": "a" * 5000, "author": {"login": "x"}}),
+        columns.RowState(),
+        NOW,
+    )
+    assert not matches(q.where, get)
+    assert seen == [filtering._TEXT_LIMIT] and filtering._TEXT_LIMIT == 500
 
 
 def test_the_parser_is_total_on_random_text() -> None:
@@ -617,4 +631,111 @@ def test_the_four_presets_are_the_quick_filters() -> None:
         "ci-failing": "ci = failing",
         "new-comments": "others_since_push",
     }
-    assert set(query.PRESETS) == set(columns.FILTER_ORDER)
+    assert list(query.PRESETS) == ["authored", "requested", "ci-failing", "new-comments"]
+
+
+# -- round 1 fixes -----------------------------------------------------------------------------
+
+
+def test_a_query_whose_canonical_text_is_too_long_is_refused() -> None:
+    text = " AND ".join(f"title=xxxxxxx{n:02d}" for n in range(50))
+    assert len(text) == 995 <= query.MAX_LENGTH  # the typed text fits, its canonical form not
+    result = parse(text)
+    assert isinstance(result, ParseError)
+    assert "canonical" in result.message
+
+
+def test_an_accepted_query_always_parses_back_from_its_canonical_text() -> None:
+    rng = random.Random(2105)
+    pieces = ["title=xxxxxxx", "AND", "OR", "NOT", "(", ")", "ci=FAILING", "draft", "age>7d"]
+    for _ in range(2000):
+        text = " ".join(rng.choice(pieces) for _ in range(rng.randint(1, 60)))
+        result = parse(text)
+        if isinstance(result, Query):
+            assert len(format_query(result)) <= query.MAX_LENGTH
+            assert parse(format_query(result)) == result
+
+
+def test_a_condition_is_toggled_off_among_other_groups() -> None:
+    term = query.PRESETS["authored"]
+    q = query.toggle_term(ok("authored AND (draft OR requested)"), term)
+    assert format_query(q) == "draft OR requested"
+    q = query.toggle_term(ok("authored AND NOT (draft OR requested) AND ci = failing"), term)
+    assert format_query(q) == "NOT (draft OR requested) AND ci = failing"
+    assert format_query(query.toggle_term(ok("authored"), term)) == ""
+
+
+def test_a_preset_matches_an_enum_value_in_any_case() -> None:
+    q = Query(Cond("ci", "=", ("FAILING",)), ())
+    assert query.toggle_term(q, query.PRESETS["ci-failing"]).where is None
+
+
+def test_a_toggle_that_does_not_fit_is_detected() -> None:
+    full = ok(" AND ".join(f"approvals > {n}" for n in range(50)))
+    over = query.toggle_term(full, query.PRESETS["authored"])
+    assert not query.fits(over)
+    assert query.fits(full)
+
+
+def test_enum_values_are_lowercase_in_the_canonical_text() -> None:
+    assert format_query(ok("ci = FAILING")) == "ci = failing"
+    assert format_query(ok("review IN (Approved, 'NONE')")) == "review IN (approved, none)"
+    assert format_query(ok("ci LIKE 'FAIL*'")) == "ci LIKE FAIL*"  # a pattern is kept
+
+
+@pytest.mark.parametrize(
+    "text", ["ORDER BY age DE\u017fC", "ci = failing AND dra\u017ft", "\u212a = 1", "AND\u017f"]
+)
+def test_unicode_lookalikes_are_not_keywords(text: str) -> None:
+    bad(text)
+
+
+def test_and_or_short_circuit_without_changing_the_three_valued_answer() -> None:
+    calls: list[str] = []
+
+    def get(name: str) -> Any:
+        calls.append(name)
+        return {"draft": False, "authored": True}.get(name)
+
+    assert evaluate(ok("draft AND requested").where, get) is False
+    assert calls == ["draft"]
+    calls.clear()
+    assert evaluate(ok("authored OR requested").where, get) is True
+    assert calls == ["authored"]
+    assert evaluate(ok("requested AND authored").where, get) is None
+    assert evaluate(ok("requested OR draft").where, get) is None
+    assert evaluate(ok("requested OR NOT draft").where, get) is True
+
+
+def _state(blocker: str | None, status: str = columns.LOADED) -> columns.RowState:
+    return columns.RowState(status=status, summary=columns.Summary(blocker=blocker))
+
+
+def _eval(text: str, state: columns.RowState) -> bool | None:
+    return filtering.evaluate(
+        ok(text).where, Row({"pr": f"{GH}#1", "title": "t", "author": {"login": "x"}}), state, NOW
+    )
+
+
+def test_a_loaded_snapshot_with_no_blocker_is_known_empty() -> None:
+    free = _state(None)
+    assert _eval("blocker != ci_failing", free) is True
+    assert _eval("NOT blocker = ci_failing", free) is True
+    assert _eval("blocker = ci_failing", free) is False
+    assert _eval("blocker IS NULL", free) is True
+    assert _eval("blocker IS NOT NULL", free) is False
+    blocked = _state("ci_failing")
+    assert _eval("blocker = ci_failing", blocked) is True
+    assert _eval("blocker IS NULL", blocked) is False
+
+
+def test_an_unloaded_row_has_an_unknown_blocker_and_is_the_only_one_counted() -> None:
+    loading = columns.RowState()
+    assert _eval("blocker != x", loading) is None
+    assert _eval("blocker IS NULL", loading) is True
+    rows = [Row({"pr": f"{GH}#{n}", "title": "t", "author": {"login": "x"}}) for n in (1, 2, 3)]
+    states = {rows[0].pr: _state(None), rows[1].pr: _state(None, columns.FAILED)}
+    where = ok("blocker != x AND approvals > 0").where
+    # #1 is loaded (approvals not reported: its answer), #2 failed, #3 never started
+    assert filtering.unknown_count(where, rows, states, NOW) == 2
+    assert filtering.unknown_count(ok("blocker != x").where, rows, states, NOW) == 2

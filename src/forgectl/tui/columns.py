@@ -35,12 +35,6 @@ SORT_REPO = "repo"
 SORT_ATTENTION = "attention"
 SORT_MODES = (SORT_REPO, SORT_ATTENTION)
 
-FILTER_AUTHORED = "authored"
-FILTER_REQUESTED = "requested"
-FILTER_CI_FAILING = "ci-failing"
-FILTER_NEW_COMMENTS = "new-comments"
-FILTER_ORDER = (FILTER_AUTHORED, FILTER_REQUESTED, FILTER_CI_FAILING, FILTER_NEW_COMMENTS)
-
 CI_GLYPHS = {"passing": "✓", "failing": "✗", "pending": "…", "none": "-"}
 DECISIONS = {"approved": "ok", "changes_requested": "chg", "review_required": "req", "none": "-"}
 

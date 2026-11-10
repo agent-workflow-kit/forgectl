@@ -15,7 +15,7 @@ from typing import Any
 from . import columns, query
 from .source import Row
 
-_TEXT_LIMIT = 2000  # forge text longer than this is cut before it is matched: bounded work
+_TEXT_LIMIT = 500  # forge text longer than this is cut before it is matched: bounded work
 
 
 def _text(value: Any) -> str | None:
@@ -88,10 +88,12 @@ def getter(row: Row, state: columns.RowState, now: datetime) -> query.Getter:
             return ci()
         if name == "review":
             return review()
+        if name == "blocker":
+            # a loaded snapshot with no blocker is known-empty ("" and IS NULL), not unknown
+            return None if s is None else (s.blocker or "")
         if s is None:
             return None
         return {
-            "blocker": s.blocker,
             "approvals": s.approvals,
             "comments": s.comments_total,
             "unresolved": s.unresolved_threads,
@@ -118,10 +120,14 @@ def matches(where: query.Node | None, row: Row, state: columns.RowState, now: da
 def unknown_count(
     where: query.Node | None, rows: list[Row], states: dict[str, columns.RowState], now: datetime
 ) -> int:
-    """How many rows the filter cannot decide yet, for lack of a value (a snapshot not loaded)."""
-    return sum(
-        1 for r in rows if evaluate(where, r, states.get(r.pr) or columns.RowState(), now) is None
-    )
+    """How many rows the filter cannot decide yet because their snapshot has not loaded (a loaded
+    row whose snapshot lacks a value is not counted: that is its answer)."""
+    count = 0
+    for r in rows:
+        state = states.get(r.pr) or columns.RowState()
+        if state.status != columns.LOADED and evaluate(where, r, state, now) is None:
+            count += 1
+    return count
 
 
 def sort_of(order: tuple[query.OrderKey, ...]) -> columns.SortState:

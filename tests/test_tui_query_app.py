@@ -664,3 +664,103 @@ def test_the_panel_names_the_fixed_host_query_and_shows_no_hidden_repo_count() -
         assert "hidden repo" not in everything.lower()
 
     drive(script)
+
+
+# -- round 1 fixes -----------------------------------------------------------------------------
+
+
+def drive_sized(
+    script: Callable[[BrowseApp, Pilot[None]], Awaitable[None]],
+    size: tuple[int, int],
+    source: FakeSource | None = None,
+    **app_args: Any,
+) -> None:
+    app = BrowseApp(source or mixed_source(), FakeOpener(), clock=lambda: NOW, **app_args)
+
+    async def go() -> None:
+        async with app.run_test(size=size) as pilot:
+            await settle(app, pilot)
+            await script(app, pilot)
+
+    asyncio.run(go())
+
+
+def test_a_quick_key_that_would_not_fit_leaves_the_query_as_it_was() -> None:
+    full = " AND ".join(f"approvals > {k}" for k in range(50))
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        parsed = query.parse(full)
+        assert isinstance(parsed, query.Query)
+        app.set_query(parsed)
+        before = app.query_text()
+        await pilot.press("a")
+        assert app.query_text() == before
+        assert "not toggled" in status(app)
+
+    drive(script)
+
+
+def test_the_panel_controls_stay_on_the_screen_on_a_small_terminal() -> None:
+    for size in ((80, 10), (60, 15), (40, 12)):
+
+        async def script(app: BrowseApp, pilot: Pilot[None], width: int = size[0]) -> None:
+            parsed = query.parse("ci = failing AND title LIKE 'a*' ORDER BY age DESC, ci")
+            assert isinstance(parsed, query.Query)
+            app.set_query(parsed)
+            await open_panel(app, pilot)
+            await pause(pilot)
+            controls = [*app.screen.query(Button), *app.screen.query(Select)]
+            assert len(controls) > 10
+            for widget in controls:
+                region = widget.region
+                assert region.x >= 0 and region.right <= width, (width, widget.id, region)
+
+        drive_sized(script, size)
+
+
+def test_a_form_edit_over_an_invalid_line_says_the_line_was_replaced() -> None:
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await open_panel(app, pilot)
+        await type_line(app, pilot, "ci =")
+        assert "query line:" in panel_status(app)
+        await press(app, pilot, "q-add-filter")
+        assert line_of(app) == "ci = failing"
+        assert "line replaced by the form" in panel_status(app)
+
+    drive(script)
+
+
+def test_the_panel_shows_the_default_and_follows_set_as_default(tmp_path: Path) -> None:
+    store = QueryStore(config_dir=tmp_path / "cfg")
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await open_panel(app, pilot)
+        assert content_of_screen(app, "#q-default-text").endswith(": draft")
+        await type_line(app, pilot, "ci = failing")
+        await press(app, pilot, "q-default")
+        assert content_of_screen(app, "#q-default-text").endswith(": ci = failing")
+
+    drive(script, store=store, query="draft")
+
+
+def test_the_panel_count_includes_the_text_filter_and_follows_arriving_snapshots() -> None:
+    base = mixed_source()
+    source = GatedSource(gated=("snapshot",), authored=base.authored, snapshots=base.snapshots)
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        for _ in range(100):
+            if len(shown(app)) == 4:
+                break
+            await pilot.pause(0.05)
+        await pilot.press("/", "t", "e", "n", "enter")
+        await pause(pilot)
+        await open_panel(app, pilot)
+        await type_line(app, pilot, "ci = pending")
+        report = content_of_screen(app, "#q-report")
+        assert report.startswith("0 of 4 PRs match (with the / text filter); 1 hidden")
+        source.gate.set()
+        await app.workers.wait_for_complete()
+        await pause(pilot)
+        assert content_of_screen(app, "#q-report") == "1 of 4 PRs match (with the / text filter)"
+
+    drive(script, source, wait=False)

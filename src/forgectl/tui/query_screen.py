@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, OptionList, Select, Static
 from textual.widgets.option_list import Option
@@ -51,7 +51,7 @@ class PanelActions:
     the panel shows too."""
 
     text: str  # the active query, canonical
-    default: str  # the configured default query
+    default: Callable[[], str]  # the configured default query (it changes with Set as default)
     history: Callable[[], list[str]]
     host_note: str  # the list-call filters, read-only
     apply: Callable[[str], None]
@@ -72,13 +72,14 @@ class QueryScreen(ModalScreen[None]):
     #q-title { text-style: bold; }
     #q-status { height: auto; }
     .q-row { height: auto; }
-    .q-row Select { width: 22; }
-    .q-row Select.q-op { width: 16; }
-    .q-row Input { width: 1fr; }
+    .q-row Select { width: 1fr; min-width: 8; }
+    .q-row Input { width: 2fr; min-width: 8; }
     .q-row Button { min-width: 6; }
+    #qpanel.narrow .q-row { layout: vertical; }
+    #qpanel.narrow .q-row Select, #qpanel.narrow .q-row Input { width: 100%; }
     #q-history { height: 6; }
-    #q-buttons { height: auto; margin-top: 1; }
-    #q-buttons Button { margin-right: 1; }
+    #q-buttons { layout: grid; grid-size: 5; grid-gutter: 0 1; height: auto; margin-top: 1; }
+    #q-buttons Button { width: 100%; min-width: 4; }
     """
     BINDINGS = [Binding("escape", "cancel", "cancel", show=False)]
 
@@ -110,6 +111,7 @@ class QueryScreen(ModalScreen[None]):
             yield Static(safe.plain(""), id="q-status", markup=False)
             yield Static(safe.plain(self.actions.host_note), id="q-host", markup=False)
             yield Static(safe.plain(""), id="q-report", markup=False)
+            yield Static(safe.plain(""), id="q-default-text", markup=False)
             yield Static(safe.plain("Sort keys, first key first"), classes="q-head")
             yield Vertical(id="q-sort")
             yield Button("Add sort key", id="q-add-sort")
@@ -121,7 +123,7 @@ class QueryScreen(ModalScreen[None]):
                 classes="q-head",
             )
             yield OptionList(id="q-history")
-            with Horizontal(id="q-buttons"):
+            with Grid(id="q-buttons"):
                 yield Button("Apply", id="q-apply", variant="primary")
                 yield Button("Cancel", id="q-cancel")
                 yield Button("Reset", id="q-reset")
@@ -132,7 +134,21 @@ class QueryScreen(ModalScreen[None]):
         await self._render_form()
         self._fill_history()
         self._show_status()
+        self._fit(self.size.width)
         self.query_one("#q-line", Input).focus()
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._fit(event.size.width)
+
+    def _fit(self, width: int) -> None:
+        """Stack the form rows and wrap the buttons into fewer columns on a narrow terminal, so
+        every control stays inside the screen."""
+        if width <= 0:
+            return
+        self.query_one("#qpanel").set_class(width < 64, "narrow")
+        self.query_one("#q-buttons", Grid).styles.grid_size_columns = (
+            5 if width >= 100 else 3 if width >= 56 else 2
+        )
 
     def _fill_history(self) -> None:
         olist = self.query_one("#q-history", OptionList)
@@ -211,7 +227,16 @@ class QueryScreen(ModalScreen[None]):
         if note:
             text = f"{text}; {note}"
         self.query_one("#q-status", Static).update(safe.plain(text))
+        self.refresh_report()
+
+    def refresh_report(self) -> None:
+        """The match count and the default again: a snapshot may have arrived, or the default
+        been saved."""
         self.query_one("#q-report", Static).update(safe.plain(self.actions.report(self.where)))
+        default = self.actions.default()
+        self.query_one("#q-default-text", Static).update(
+            safe.plain(f"Default (Reset to default restores it): {default or 'none'}")
+        )
 
     # -- the line -------------------------------------------------------------------------
 
@@ -264,13 +289,14 @@ class QueryScreen(ModalScreen[None]):
             self.form_error = str(result)
             self._show_status()
             return
+        replaced = self.line_error is not None  # an invalid line being typed is overwritten
         self.form_error = None
         self.line_error = None
         self.valid = query.format_query(result)
         self.where = result.where
         if self.query_one("#q-line", Input).value != self.valid:
             self._set_line(self.valid)
-        self._show_status()
+        self._show_status("line replaced by the form" if replaced else "")
 
     def _edit_filters(self, index: int | None, row: query.FormFilter | None) -> None:
         """Replace (or with ``row`` None remove) filter ``index``; None ``index`` appends."""

@@ -24,7 +24,9 @@ def _store(config_path: str | None) -> QueryStore:
     except ForgectlError:
         config_dir = None
     return QueryStore(
-        history_path=None if state is None else state / HISTORY_FILE, config_dir=config_dir
+        history_path=None if state is None else state / HISTORY_FILE,
+        config_dir=config_dir,
+        no_path_note="" if state is not None else "history not saved: no state directory",
     )
 
 

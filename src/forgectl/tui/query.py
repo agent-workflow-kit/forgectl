@@ -116,6 +116,15 @@ OPERATORS: dict[str, tuple[str, ...]] = {
     SEARCH: (LIKE, NOT_LIKE),
 }
 
+_ASCII_LOWER = {c: c + 32 for c in range(ord("A"), ord("Z") + 1)}
+
+
+def lower(text: str) -> str:
+    """ASCII-only lowercase: keywords, columns and enum values match by it, so a Unicode
+    lookalike (the long s, the Kelvin sign) is never a letter of a keyword."""
+    return text.translate(_ASCII_LOWER)
+
+
 KEYWORDS = frozenset(
     {"and", "or", "not", "like", "in", "is", "null", "order", "by", "asc", "desc", "me"}
 )
@@ -199,7 +208,7 @@ class Token:
     pos: int
 
     def keyword(self) -> str | None:
-        return self.text.casefold() if self.kind == WORD else None
+        return lower(self.text) if self.kind == WORD else None
 
 
 def _printable(ch: str) -> bool:
@@ -292,7 +301,7 @@ def parse_duration(word: str) -> int | None:
     """``1w2d`` as seconds; units ``w``, ``d``, ``h``, ``m`` once each, largest first; None when
     the word is not a duration."""
     seconds, i, last = 0, 0, -1
-    word = word.lower()
+    word = lower(word)
     if not word:
         return None
     while i < len(word):
@@ -375,7 +384,7 @@ class _Parser:
         keys: list[OrderKey] = []
         while True:
             t = self.take()
-            name = t.text.casefold() if t.kind == WORD else ""
+            name = lower(t.text) if t.kind == WORD else ""
             if name not in ORDER_COLUMNS:
                 raise _Fail("expected a column to order by: " + ", ".join(ORDER_COLUMNS), t.pos)
             if any(k[0] == name for k in keys):
@@ -427,7 +436,7 @@ class _Parser:
             return node
         if t.kind != WORD or t.keyword() in KEYWORDS:
             raise _Fail("expected a column name or '('", t.pos)
-        name = t.text.casefold()
+        name = lower(t.text)
         if name not in FIELDS:
             raise _Fail(f"unknown column {t.text[:30]!r}: {', '.join(FIELDS)}", t.pos)
         self.take()
@@ -513,18 +522,20 @@ class _Parser:
                 raise _Fail("expected a whole number", t.pos)
             return int(digits)
         if kind == BOOL:
-            word = t.text.casefold() if t.kind == WORD else ""
+            word = lower(t.text) if t.kind == WORD else ""
             if word not in ("true", "false"):
                 raise _Fail("expected true or false", t.pos)
             return word == "true"
-        if t.kind == WORD and t.text.casefold() == "me":
+        if t.kind == WORD and lower(t.text) == "me":
             if name != "author":
                 raise _Fail("me applies to author only (quote it to match the text)", t.pos)
             if pattern:
                 raise _Fail("me cannot be a pattern (quote it to match the text)", t.pos)
             return ME
-        if name in VALUES and not pattern and t.text.casefold() not in VALUES[name]:
-            raise _Fail(f"{name} is one of: {', '.join(VALUES[name])}", t.pos)
+        if name in VALUES and not pattern:
+            if lower(t.text) not in VALUES[name]:
+                raise _Fail(f"{name} is one of: {', '.join(VALUES[name])}", t.pos)
+            return lower(t.text)  # canonical: an enum value is lowercase
         return t.text
 
 
@@ -545,7 +556,14 @@ def parse(text: str) -> Query | ParseError:
             return ParseError("the query is not text", 0)
         if len(text) > MAX_LENGTH:
             return ParseError(f"the query is longer than {MAX_LENGTH} characters", MAX_LENGTH)
-        return _Parser(text).query()
+        result = _Parser(text).query()
+        if len(format_query(result)) > MAX_LENGTH:
+            # the canonical text is what is stored and shown again, so it must fit too
+            return ParseError(
+                f"the query is longer than {MAX_LENGTH} characters when written canonically",
+                MAX_LENGTH,
+            )
+        return result
     except _Fail as fail:
         return ParseError(fail.message, fail.pos)
     except Exception:  # noqa: BLE001 - a backstop: no text may take the caller down
@@ -558,7 +576,7 @@ def parse(text: str) -> Query | ParseError:
 def _bare_ok(text: str) -> bool:
     return (
         bool(text)
-        and text.casefold() not in KEYWORDS
+        and lower(text) not in KEYWORDS
         and all(c not in " \t\\" and c not in _SPECIAL and c.isprintable() for c in text)
     )
 
@@ -650,13 +668,20 @@ def _one(c: Cond, kind: str, got: Any, value: Value, get: Getter) -> bool:
     return bool(got == value)  # EQ, NE, IN and NOT_IN: the caller applies the negation
 
 
+def _empty_text(value: Any) -> bool:
+    return isinstance(value, str) and not value
+
+
 def _leaf(c: Cond, get: Getter) -> bool | None:
     kind = FIELDS[c.field]
     got = get(c.field)
+    # no value is a missing one; for text an empty string is the same (a loaded snapshot with no
+    # blocker has known-empty text, which is not unknown)
+    empty = got is None or (kind == TEXT and _empty_text(got))
     if c.op == IS_NULL:
-        return got is None
+        return empty
     if c.op == NOT_NULL:
-        return got is not None
+        return not empty
     if got is None or (any(isinstance(v, Me) for v in c.values) and get("@me") is None):
         return None
     if kind == SEARCH:
@@ -688,14 +713,15 @@ def evaluate(node: Node | None, get: Getter) -> bool | None:
     if isinstance(node, Not):
         inner = evaluate(node.child, get)
         return None if inner is None else not inner
-    results = [evaluate(child, get) for child in node.children]
-    if isinstance(node, And):
-        if any(r is False for r in results):
-            return False
-        return None if any(r is None for r in results) else True
-    if any(r is True for r in results):
-        return True
-    return None if any(r is None for r in results) else False
+    # three-valued and short-circuiting: AND stops at the first False, OR at the first True
+    stop = not isinstance(node, And)  # the value that decides the group
+    unknown = False
+    for child in node.children:
+        result = evaluate(child, get)
+        if result is stop:
+            return stop
+        unknown = unknown or result is None
+    return None if unknown else not stop
 
 
 def matches(node: Node | None, get: Getter) -> bool:
@@ -789,19 +815,37 @@ PRESETS: dict[str, Cond] = {
 }
 
 
+def _same(a: Cond, b: Cond) -> bool:
+    """The same term: column, operator and values, an enum value in any case."""
+
+    def fold(values: tuple[Value, ...]) -> tuple[Value, ...]:
+        return tuple(lower(v) if isinstance(v, str) else v for v in values)
+
+    return a.field == b.field and a.op == b.op and fold(a.values) == fold(b.values)
+
+
 def toggle_term(q: Query, term: Cond) -> Query:
-    """The quick filter ``term`` switched in ``q``: removed when the filter is an AND of
-    conditions that has it, else added with AND (an ``OR`` filter is grouped first)."""
-    conds: list[Cond] = []
-    if q.where is not None and _conjuncts(q.where, conds) and term in conds:
-        rest = [c for c in conds if c != term]
-        where: Node | None = None if not rest else rest[0] if len(rest) == 1 else And(tuple(rest))
-        return Query(where, q.order)
-    if q.where is None:
+    """The quick filter ``term`` switched in ``q``: removed when the filter is that condition or
+    an AND that has it among its direct conditions (whatever else it holds), else added with AND
+    (an ``OR`` filter is grouped first)."""
+    where = q.where
+    if isinstance(where, Cond) and _same(where, term):
+        return Query(None, q.order)
+    if isinstance(where, And):
+        rest = tuple(c for c in where.children if not (isinstance(c, Cond) and _same(c, term)))
+        if len(rest) != len(where.children):
+            return Query(rest[0] if len(rest) == 1 else And(rest), q.order)
+    if where is None:
         return Query(term, q.order)
-    if isinstance(q.where, And):
-        return Query(And((*q.where.children, term)), q.order)
-    return Query(And((q.where, term)), q.order)
+    if isinstance(where, And):
+        return Query(And((*where.children, term)), q.order)
+    return Query(And((where, term)), q.order)
+
+
+def fits(q: Query) -> bool:
+    """Whether the canonical text of ``q`` parses back (within every limit): a query built in
+    code, not typed, is checked before it becomes the active one."""
+    return isinstance(parse(format_query(q)), Query)
 
 
 def conditions(node: Node | None) -> int:

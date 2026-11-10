@@ -153,3 +153,89 @@ def test_a_failed_write_leaves_no_temp_file(
     with pytest.raises(OSError):
         store.write_default("draft")
     assert list((config / "config.d").iterdir()) == []
+
+
+# -- round 1 fixes -----------------------------------------------------------------------------
+
+
+def test_a_non_bmp_default_is_written_so_the_config_loader_reads_it_back(tmp_path: Path) -> None:
+    import yaml
+
+    config = tmp_path / "cfg"
+    config.mkdir()
+    (config / "config.yaml").write_text("{}\n")
+    store = QueryStore(config_dir=config)
+    text = "title LIKE '*\U0001f600*' AND author = 'café'"
+    path = store.write_default(text)
+    assert yaml.safe_load(path.read_text())["browse"]["query"] == query.canonical(text)
+    loaded = load_config(str(config / "config.yaml"), env={"HOME": str(tmp_path)})
+    assert loaded.config.browse.query == query.canonical(text)
+    assert "\\ud83d" not in path.read_text()
+
+
+def test_a_text_whose_canonical_form_does_not_read_back_is_not_stored(tmp_path: Path) -> None:
+    text = " AND ".join(f"title=xxxxxxx{n:02d}" for n in range(50))
+    store = QueryStore(history_path=tmp_path / "h", config_dir=tmp_path / "cfg")
+    assert store.add(text) is None
+    assert store.entries == []
+    with pytest.raises(ValueError):
+        store.write_default(text)
+    assert not (tmp_path / "cfg").exists()
+
+
+def test_a_symlink_at_the_target_survives_a_write(tmp_path: Path) -> None:
+    real = tmp_path / "dotfiles" / "history"
+    real.parent.mkdir()
+    real.write_text("")
+    link = tmp_path / "state" / "browse-history"
+    link.parent.mkdir()
+    link.symlink_to(real)
+    QueryStore(history_path=link).add("draft")
+    assert link.is_symlink()
+    assert real.read_text() == "draft\n"
+
+
+def test_read_history_opens_without_blocking_and_a_fifo_is_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fifo = tmp_path / "browse-history"
+    os.mkfifo(fifo)
+    real_open = os.open
+
+    def guarded(path: object, flags: int, *args: int) -> int:
+        # a blocking open of a FIFO would hang: refuse before it can
+        assert flags & os.O_NONBLOCK
+        return real_open(path, flags, *args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "open", guarded)
+    assert read_history(fifo) == []
+
+
+def test_two_instances_do_not_lose_each_others_entries(tmp_path: Path) -> None:
+    path = tmp_path / "browse-history"
+    a, b = QueryStore(history_path=path), QueryStore(history_path=path)
+    a.add("draft")
+    b.add("authored")
+    a.add("ci = failing")
+    assert read_history(path) == ["ci = failing", "authored", "draft"]
+    assert a.entries == ["ci = failing", "authored", "draft"]
+
+
+def test_no_state_directory_gives_one_note_and_the_first_add_says_it() -> None:
+    store = QueryStore(no_path_note="history not saved: no state directory")
+    assert store.add("draft") == "history not saved: no state directory"
+    assert store.add("authored") is None
+    assert store.entries == ["authored", "draft"]
+
+
+def test_the_state_directory_is_made_private_and_the_config_directory_is_not(
+    tmp_path: Path,
+) -> None:
+    old = os.umask(0o022)
+    try:
+        QueryStore(history_path=tmp_path / "state" / "forgectl" / "browse-history").add("draft")
+        QueryStore(config_dir=tmp_path / "cfg").write_default("draft")
+    finally:
+        os.umask(old)
+    assert mode(tmp_path / "state" / "forgectl") == 0o700
+    assert mode(tmp_path / "cfg" / "config.d") == 0o755

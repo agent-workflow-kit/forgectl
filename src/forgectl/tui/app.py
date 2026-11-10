@@ -71,7 +71,8 @@ HELP_KEYS: list[tuple[str, str]] = [
     ),
     (
         "s",
-        "switch the order: by repo (default) or needs-attention first (also drops a column sort)",
+        "switch the order: by repo (default) or needs-attention first (also drops a column or "
+        "ORDER BY sort)",
     ),
     (
         "F",
@@ -791,6 +792,7 @@ class BrowseApp(App[None]):
         if old.changed and not new.stale:
             new.changed = True  # a second read of identical data must not lose the highlight
         self._states[pr] = new
+        self._refresh_panel()
         if row is None:
             self._paint_bar()
             return
@@ -886,7 +888,7 @@ class BrowseApp(App[None]):
     def _panel_actions(self) -> PanelActions:
         return PanelActions(
             text=self.query_text(),
-            default=self._default_query,
+            default=lambda: self._default_query,
             history=lambda: list(self._store.entries),
             host_note=(
                 "List (from the host, fixed): PRs authored by me and PRs with a review requested "
@@ -928,12 +930,20 @@ class BrowseApp(App[None]):
         self._status(message)
         return message
 
+    def _refresh_panel(self) -> None:
+        """A snapshot arrived: an open query panel counts again."""
+        top = self.screen_stack[-1] if self.screen_stack else None
+        if isinstance(top, QueryScreen) and top.is_mounted:
+            top.refresh_report()
+
     def _panel_report(self, where: ql.Node | None) -> str:
         now = self.clock()
         total = len(self._rows)
-        shown = sum(1 for r in self._rows if filtering.matches(where, r, self._state(r), now))
-        undecided = filtering.unknown_count(where, self._rows, self._states, now)
-        text = f"{shown} of {total} PRs match"
+        needle = self._filter.strip().lower()  # the `/` text filter, as on screen
+        rows = [r for r in self._rows if not needle or needle in render.row_haystack(r)]
+        shown = sum(1 for r in rows if filtering.matches(where, r, self._state(r), now))
+        undecided = filtering.unknown_count(where, rows, self._states, now)
+        text = f"{shown} of {total} PRs match" + (" (with the / text filter)" if needle else "")
         if undecided:
             text += f"; {undecided} hidden because their snapshot has not loaded"
         return text
@@ -1206,7 +1216,11 @@ class BrowseApp(App[None]):
 
     def action_toggle_filter(self, name: str) -> None:
         """A quick filter is a preset: it switches its term in the query, which the panel shows."""
-        self.set_query(ql.toggle_term(self.current_query(), ql.PRESETS[name]))
+        toggled = ql.toggle_term(self.current_query(), ql.PRESETS[name])
+        if not ql.fits(toggled):  # e.g. the 51st condition: the query stays as it was
+            self._status("not toggled: the query would be too long or have too many conditions")
+            return
+        self.set_query(toggled)
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen())
