@@ -274,9 +274,9 @@ def test_a_query_for_a_hidden_repo_is_empty_and_complete_without_a_call() -> Non
 def test_a_pathological_pattern_is_cheap() -> None:
     pattern = "github.com/" + "*a" * 12 + "b"
     text = "github.com/" + "a" * 200
-    started = time.perf_counter()
+    started = time.process_time()
     assert glob_match(pattern, text) is False
-    assert time.perf_counter() - started < 1.0
+    assert time.process_time() - started < 1.0
     assert ignored("a" * 200, ["*a" * 12 + "b"]) is False
 
 
