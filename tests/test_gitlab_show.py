@@ -10,10 +10,11 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
+from forgectl import model as m
 from forgectl.backends import gitlab as gl
 from forgectl.backends.base import Backend
 from forgectl.backends.gitlab import GitLabBackend
@@ -470,6 +471,7 @@ def test_every_other_protocol_method_is_a_typed_not_yet_error(
         lambda: backend.files(ref()),
         lambda: backend.diff(ref()),
         lambda: backend.compare(ref(), HEAD, BASE),
+        lambda: backend.merge(cast(m.PR, None), sha=HEAD, method=None),
     ):
         with pytest.raises(ForgectlError) as raised:
             call()
