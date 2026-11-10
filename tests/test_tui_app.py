@@ -33,6 +33,7 @@ from .tui_fakes import (
     make_diff,
     make_item,
     make_snapshot,
+    safe_style,
 )
 
 PR1 = "github.com/acme/widgets#1"
@@ -537,7 +538,8 @@ def test_a_check_url_with_another_scheme_is_shown_but_never_opened(bad_url: str)
         checks = app.query_one("#checks", OptionList)
         label = as_content(checks.get_option_at_index(0).prompt)
         assert "lint" in label.plain
-        assert label.spans == []  # never markup
+        assert all(safe_style(sp.style) for sp in label.spans)  # the state word, never markup
+        assert label.plain.startswith("failing  lint")
         checks.focus()
         checks.highlighted = 0
         await pilot.pause()
@@ -604,7 +606,10 @@ def test_hostile_titles_render_inert_in_the_list_the_detail_and_the_screen(title
             as_content(app.query_one("#checks", OptionList).get_option_at_index(0).prompt),
         ]
         for content in contents:
-            assert content.spans == []  # no styles, no click actions
+            if content.spans:  # only the detail bodies are styled (#102), by fixed styles
+                for span in content.spans:
+                    # no link, no click action, nothing from the forge text
+                    assert safe_style(span.style), span.style
             for ch in content.plain:
                 assert ch in "\t\n" or ord(ch) >= 0x20 and not 0x7F <= ord(ch) < 0xA0
             assert "‮" not in content.plain and "\x1b" not in content.plain

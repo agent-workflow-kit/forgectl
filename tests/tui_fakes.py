@@ -7,6 +7,7 @@ them against the schemas, so a fixture cannot drift from the contract.
 from __future__ import annotations
 
 import copy
+import re
 import threading
 from collections.abc import Callable
 from typing import Any
@@ -264,3 +265,23 @@ class FakeOpener:
     def open(self, url: str, on_exit: Callable[[int], None] | None = None) -> str:
         self.opened.append(url)
         return "fake-opener"
+
+
+def safe_style(style: object) -> bool:
+    """Whether a span style is built only from fixed words, hex colors and ``on <hex>``."""
+    if not isinstance(style, str):
+        return False
+    words = style.split()
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if word == "on":
+            i += 1
+            if i >= len(words) or not re.fullmatch(r"#[0-9a-fA-F]{6}", words[i]):
+                return False
+        elif word not in ("bold", "italic", "underline", "strike", "dim") and not re.fullmatch(
+            r"#[0-9a-fA-F]{6}", word
+        ):
+            return False
+        i += 1
+    return bool(words)

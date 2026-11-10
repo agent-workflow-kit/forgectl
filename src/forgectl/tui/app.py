@@ -29,7 +29,7 @@ from textual.widgets.option_list import Option
 
 from forgectl.errors import ForgectlError
 
-from . import columns, filtering, render, safe, sections
+from . import columns, filtering, render, safe, sections, style
 from . import query as ql
 from .opener import Opener, OpenRefused, is_openable
 from .query_screen import PanelActions, QueryScreen
@@ -1104,6 +1104,8 @@ class BrowseApp(App[None]):
             self._snapshot_arrived(pr, self._failed_state(self._states.get(pr), error))
 
     def _show_detail(self, pr: str, detail: render.Detail, diff_note: str | None) -> None:
+        if pr != self._detail_pr:  # another PR starts on its first check
+            self.query_one("#checks", OptionList).highlighted = None
         self._detail_pr = pr
         self._detail_url = detail.url
         self._detail_checks = detail.checks
@@ -1140,13 +1142,26 @@ class BrowseApp(App[None]):
         if not is_open or detail is None or name in self._painted:
             return
         self._painted.add(name)
-        body.update(safe.plain(detail.texts[name]))
+        body.update(style.body(name, detail.texts, detail.lines, self._dark()))
         if name == "ci":
             checks = self.query_one("#checks", OptionList)
+            kept = checks.highlighted  # a repaint (a theme change) keeps the selected check
             checks.clear_options()
-            checks.add_options([Option(safe.plain(label)) for label in detail.check_labels])
+            dark = self._dark()
+            checks.add_options([Option(style.check_label(x, dark)) for x in detail.check_labels])
             if detail.checks:
-                checks.highlighted = 0
+                checks.highlighted = min(kept or 0, len(detail.check_labels) - 1)
+
+    def _dark(self) -> bool:
+        """Whether the app theme is dark: the colors of the detail pane follow it."""
+        return bool(self.current_theme.dark)
+
+    def watch_theme(self) -> None:
+        """A new theme repaints the open sections in its colors."""
+        if self._detail is not None and self.is_mounted:
+            self._painted.clear()
+            for name in sections.NAMES:
+                self._paint_section(name)
 
     def _pane_has_focus(self) -> bool:
         focused = self.focused

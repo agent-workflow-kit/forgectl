@@ -1,6 +1,6 @@
 [project]
 name = "forgectl"
-version = "0.29.0"
+version = "0.30.0"
 description = "Normalized access to pull/merge requests across GitHub and GitLab"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-tui = ["textual>=8.2,<9"]
+tui = ["textual>=8.2,<9", "rich>=14", "pygments>=2.19", "markdown-it-py>=3"]
 
 [project.scripts]
 forgectl = "forgectl.cli:main"
