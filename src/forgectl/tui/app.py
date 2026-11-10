@@ -479,9 +479,12 @@ class BrowseApp(App[None]):
         hidden = [r.pr for r in columns.order(hidden_rows, self._states, self._order_mode)]
         return first + rest + hidden
 
-    def _start_snapshots(self, wanted: set[str] | None, skip: str | None = None) -> bool:
+    def _start_snapshots(
+        self, wanted: set[str] | None, skip: str | None = None, listed: bool | None = None
+    ) -> bool:
         """Start a round of per-row snapshots (all rows, or those in ``wanted``, but not
-        ``skip``); False when there is nothing to load."""
+        ``skip``); False when there is nothing to load. ``listed=False`` marks a round that
+        must not move the refresh time (a single-row refresh)."""
         self._snap_token += 1
         self._snap_done = 0
         order = [
@@ -503,7 +506,9 @@ class BrowseApp(App[None]):
         else:
             self._paint_bar()
         if order and self.concurrency:
-            self.run_worker(self._load_snapshots(self._snap_token, order), group="snapshots")
+            self.run_worker(
+                self._load_snapshots(self._snap_token, order, listed), group="snapshots"
+            )
             return True
         return False
 
@@ -525,7 +530,9 @@ class BrowseApp(App[None]):
             return columns.RowState(columns.LOADED, previous.summary, error=error, stale=True)
         return columns.RowState(columns.FAILED, error=error)
 
-    async def _load_snapshots(self, token: int, order: list[str]) -> None:
+    async def _load_snapshots(
+        self, token: int, order: list[str], listed: bool | None = None
+    ) -> None:
         """At most ``self.concurrency`` snapshot reads at once; a failure marks only its row."""
         queue = deque(order)
 
@@ -554,7 +561,7 @@ class BrowseApp(App[None]):
             await asyncio.gather(*(lane() for _ in range(self.concurrency)))
         finally:
             if token == self._snap_token:
-                self._finish_refresh()
+                self._finish_refresh(listed=listed)
                 stale = sum(1 for st in self._states.values() if st.stale)
                 if stale:
                     self._status(f"{stale} snapshot(s) not refreshed; showing the last good data")
@@ -766,11 +773,15 @@ class BrowseApp(App[None]):
         if row is None:
             self._status("nothing to refresh: no PR highlighted")
             return
+        if self._detail_loading == row.pr:  # a detail load for it is on its way
+            self._status("a refresh is already running")
+            return
         if self._busy:  # a round of snapshots is running; it covers this row
             self._status("a refresh is already running")
             return
-        if not self._start_snapshots({row.pr}):
-            self._finish_refresh()
+        if not self._start_snapshots({row.pr}, listed=False):
+            self._finish_refresh(listed=False)
+            self._status("not refreshed: snapshots are off or the PR is not listed")
 
     def action_reload_list(self) -> None:
         """R: `prs`, then every row's snapshot, then the PR in the detail pane. Never started

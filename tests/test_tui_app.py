@@ -8,6 +8,7 @@ import re
 import stat
 import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -596,7 +597,7 @@ def test_repeated_enter_and_r_on_the_same_pr_load_it_once() -> None:
         await wait_until(pilot, lambda: ("snapshot", PR1) in source.calls)
         await pilot.press("enter", "r", "enter", "r")
         await pilot.pause()
-        assert "already loading" in status_of(app)
+        assert "already running" in status_of(app)
         source.gate.set()
         await settle(app, pilot)
 
@@ -930,6 +931,85 @@ def test_a_failed_row_refresh_marks_the_row_stale_and_does_not_open_the_pane() -
         assert app.focused is not None and app.focused.id == "list"
 
     drive(source, script, concurrency=2)
+
+
+_SENTINEL_TIME = datetime(2000, 1, 2, 3, 4, 5)
+
+
+def test_row_only_r_does_not_move_the_refreshed_time() -> None:
+    source = basic_source()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down")
+        await settle(app, pilot)
+        app._last_refresh = _SENTINEL_TIME
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert app._last_refresh == _SENTINEL_TIME
+
+    drive(source, script, concurrency=2)
+
+
+def test_a_failing_row_only_r_does_not_move_the_refreshed_time() -> None:
+    base = basic_source()
+    source = _FailingRefresh(
+        authored=base.authored,
+        requested=base.requested,
+        snapshots=base.snapshots,
+        diffs=base.diffs,
+    )
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down")
+        await settle(app, pilot)
+        source.fail = True
+        app._last_refresh = _SENTINEL_TIME
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert app._last_refresh == _SENTINEL_TIME
+
+    drive(source, script, concurrency=2)
+
+
+def test_r_says_so_when_snapshots_are_off() -> None:
+    source = basic_source()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down", "r")
+        await settle(app, pilot)
+        assert "not refreshed" in status_of(app)
+
+    drive(source, script, concurrency=0)
+
+
+def test_r_says_so_when_the_row_is_not_listed() -> None:
+    source = basic_source()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down")
+        await settle(app, pilot)
+        app._unlisted = {PR1, PR2}
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert "not refreshed" in status_of(app)
+
+    drive(source, script, concurrency=2)
+
+
+def test_r_with_the_pane_closed_while_its_detail_loads_reads_the_pr_once() -> None:
+    source = gated_basic("snapshot")
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down", "enter")
+        await wait_until(pilot, lambda: ("snapshot", PR1) in source.calls)
+        await pilot.press("escape", "r")
+        await pilot.pause()
+        assert "already running" in status_of(app)
+        source.gate.set()
+        await settle(app, pilot)
+
+    drive(source, script, concurrency=0)
+    assert source.calls.count(("snapshot", PR1)) == 1
 
 
 def test_r_during_a_running_refresh_does_not_start_another_read() -> None:
