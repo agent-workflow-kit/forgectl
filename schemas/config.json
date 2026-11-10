@@ -264,6 +264,16 @@
       },
       "additionalProperties": false
     },
+    "hidden_repos": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 255,
+        "pattern": "^[A-Za-z0-9.:*?-]+(/(?!\\.\\.?(/|$))[A-Za-z0-9._*?-]+)+(?![\\s\\S])"
+      },
+      "default": [],
+      "description": "Repo ids (host/path) whose PRs no listing shows, `prs` and `browse` alike; * and ? are wildcards that also match /, everything else is literal, matched ASCII case-insensitively against the whole id. Commands naming one PR are not affected. Replaces on merge like any list."
+    },
     "activity": {
       "type": "object",
       "properties": {

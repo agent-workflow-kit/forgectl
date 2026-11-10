@@ -24,11 +24,12 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from . import model as m
+from .activity import ignored as matches_any
 from .backends import create_backend
 from .config import BUILT_IN_HOSTS, Config
 from .errors import EXIT_BY_CODE, REQUIRED_DETAILS_BY_CODE, ForgectlError
@@ -161,6 +162,39 @@ def _check_logins(env: ReadEnv, host: str, args: PrsArgs) -> None:
             bind_login(value, backend)
 
 
+MAX_LIMIT = 1000  # `--limit` and both backends' search cap
+
+
+def list_visible(backend: Any, query: m.PrQuery, hidden: tuple[str, ...]) -> m.PrPage:
+    """``backend.list_prs`` without the PRs of ``config.hidden_repos``, which are dropped before
+    the limit counts. The backend is given a skip predicate and applies it while paging, so a
+    hidden PR costs no further request and never takes a place among the ``limit + 1`` visible
+    items it fills; the filter here is a safety net. The ask is ``limit + 1`` (at most
+    ``MAX_LIMIT``), so a hidden item past the limit cannot make the list incomplete, and there is
+    never a second ask. A query for one hidden repo is an empty complete page without a call."""
+    if not hidden:
+        return backend.list_prs(query)
+    if query.repo is not None and matches_any(query.repo.id, hidden):
+        return m.PrPage(
+            items=(),
+            complete=True,
+            rate_limit=m.RateLimit(host=query.host, remaining=None, reset_at=None),
+        )
+
+    def skip(repo: str) -> bool:
+        return matches_any(repo, hidden)
+
+    ask = min(query.limit + 1, MAX_LIMIT)
+    page = backend.list_prs(replace(query, limit=ask), skip=skip)
+    kept = tuple(i for i in page.items if not skip(i.repo))
+    # more kept items than the limit: the caller's merge cuts them, so the list is not whole
+    return m.PrPage(
+        items=kept,
+        complete=page.complete and len(kept) <= query.limit,
+        rate_limit=page.rate_limit,
+    )
+
+
 @dataclass(frozen=True)
 class PrsArgs:
     repo: Any  # a bound RepoRef or None
@@ -224,7 +258,8 @@ def run_prs(env: ReadEnv, args: PrsArgs, *, now: datetime | None = None) -> dict
                 updated_since=since,
                 limit=args.limit,
             )
-            pages.append((host, create_backend(env.hosts.backend(host), env).list_prs(query)))
+            backend = create_backend(env.hosts.backend(host), env)
+            pages.append((host, list_visible(backend, query, config.hidden_repos)))
         except ForgectlError as error:
             failures.append((host, error))
     if failures and len(queried) == 1:
