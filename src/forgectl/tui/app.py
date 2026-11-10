@@ -268,7 +268,8 @@ class BrowseApp(App[None]):
     CSS = """
     #main { height: 1fr; }
     #left { width: 3fr; }
-    #detail { width: 2fr; display: none; border-left: solid $primary; padding: 0 1; }
+    /* min-width: a pane of zero cells makes Textual's text wrapping raise (#107) */
+    #detail { width: 2fr; min-width: 12; display: none; border-left: solid $primary; padding: 0 1; }
     #filter { display: none; }
     #header { height: 1; text-style: bold; padding: 0 2; }  /* the list's border and padding;
        constant column names, the sort arrow and the cursor */
