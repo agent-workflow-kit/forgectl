@@ -10,12 +10,12 @@ What is read, over the project id the merge request's own answer gives:
 - `/reviewers` (request states) and `/notes` (the newest `requested review from` system note per
   reviewer: its id is the request's `instance`, its time `requested_at`);
 - `/approvals` and the project's approval settings, through the backend's own `_reviewers`, so the
-  table of `latest_by_reviewer` is built by the same code as in `show` and compared with `show`'s;
+  table of `latest_by_reviewer` is `show`'s single reading, not read or compared again (#117);
 - `/discussions` (threads and general comments; system notes and drafts left out);
 - `/versions`, else the head commit, for `head.pushed_at`.
 
 The merge request is read once more after the parts: its head must still be the one `show` read.
-A difference (head, identity, reviewer table, a repeated discussion) means the MR moved while it
+A difference (head, identity, a repeated discussion) means the MR moved while it
 was read; the whole reading is repeated once, then `upstream_error`.
 
 Every GitLab behavior assumed here that no real host has confirmed is marked `UNVERIFIED`.
