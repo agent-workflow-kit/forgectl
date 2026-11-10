@@ -1178,4 +1178,5 @@ class GitLabBackend:
     def merge(self, pr: m.PR, *, sha: str, method: str | None) -> m.MergeAnswer:
         raise _not_yet("merge", 22)  # TODO(#22): GitLab merge
 
+
 __all__ = ["MAX_PAGES", "READINESS_UNKNOWN", "GitLabBackend", "UntilKnown"]
