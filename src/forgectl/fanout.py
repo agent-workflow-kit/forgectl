@@ -24,11 +24,12 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from . import model as m
+from .activity import ignored as matches_any
 from .backends import create_backend
 from .config import BUILT_IN_HOSTS, Config
 from .errors import EXIT_BY_CODE, REQUIRED_DETAILS_BY_CODE, ForgectlError
@@ -161,6 +162,27 @@ def _check_logins(env: ReadEnv, host: str, args: PrsArgs) -> None:
             bind_login(value, backend)
 
 
+MAX_LIMIT = 1000  # `--limit` and both backends' search cap
+
+
+def list_visible(backend: Any, query: m.PrQuery, hidden: tuple[str, ...]) -> m.PrPage:
+    """``backend.list_prs`` without the PRs of ``config.hidden_repos``, which are dropped before
+    the limit counts: while hidden items left fewer than ``limit + 1`` kept ones and the host may
+    hold more, the backend is asked again for twice as many (at most ``MAX_LIMIT``). ``complete``
+    is the backend's own, so hiding alone never makes it false; the backend's list stays the
+    source of truth, the search syntax is not used to exclude."""
+    if not hidden:
+        return backend.list_prs(query)
+    ask = query.limit
+    while True:
+        page = backend.list_prs(replace(query, limit=ask))
+        kept = tuple(i for i in page.items if not matches_any(i.repo, hidden))
+        dropped = len(kept) != len(page.items)
+        if not dropped or len(kept) > query.limit or page.complete or ask >= MAX_LIMIT:
+            return m.PrPage(items=kept, complete=page.complete, rate_limit=page.rate_limit)
+        ask = min(MAX_LIMIT, ask * 2)
+
+
 @dataclass(frozen=True)
 class PrsArgs:
     repo: Any  # a bound RepoRef or None
@@ -224,7 +246,8 @@ def run_prs(env: ReadEnv, args: PrsArgs, *, now: datetime | None = None) -> dict
                 updated_since=since,
                 limit=args.limit,
             )
-            pages.append((host, create_backend(env.hosts.backend(host), env).list_prs(query)))
+            backend = create_backend(env.hosts.backend(host), env)
+            pages.append((host, list_visible(backend, query, config.hidden_repos)))
         except ForgectlError as error:
             failures.append((host, error))
     if failures and len(queried) == 1:

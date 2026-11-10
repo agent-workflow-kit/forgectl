@@ -88,7 +88,7 @@ def test_example_keys_are_exactly_the_models_keys() -> None:
 def test_example_values_equal_the_schema_defaults() -> None:
     props = SCHEMA["properties"]
     data = example_data()
-    for key in ("gh_bin", "glab_bin", "retries", "hosts", "repos"):
+    for key in ("gh_bin", "glab_bin", "retries", "hosts", "repos", "hidden_repos"):
         assert data[key] == props[key]["default"], key
     assert data["timeout"] == props["timeout"]["default"] == "60s"
     assert data["hooks"] == props["hooks"]["default"] == {}
@@ -1429,6 +1429,7 @@ def test_hash_is_sha256_of_sorted_key_json_of_the_merged_config_after_defaults(
         "retries": 5,
         "hosts": {},
         "repos": {},
+        "hidden_repos": [],
         "activity": {"ignore_authors": []},
         "browse": {"refresh_interval": 120.0, "full_refresh_every": 5, "concurrency": 4},
         "hooks": {"pre-merge": [], "post-merge": [], "pre-post": [], "post-post": []},

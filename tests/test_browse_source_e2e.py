@@ -284,3 +284,24 @@ async def _settle(app: BrowseApp, pilot: Pilot[None]) -> None:
     await pilot.pause()
     await app.workers.wait_for_complete()
     await pilot.pause()
+
+
+def test_a_hidden_repo_gets_no_row_and_no_snapshot_in_browse(
+    forged: FakeForges, tmp_path: Path
+) -> None:
+    hidden = tmp_path / "hidden.yaml"
+    hidden.write_text(
+        "retries: 0\nme:\n  github: user-1\nhidden_repos: ['GitHub.com/user-7/*']\nhosts:\n"
+        "  github.com:\n    token_env: TOK_A\n"
+        f"  {GHE}:\n    backend: github\n    token_env: TOK_B\n",
+        encoding="utf-8",
+    )
+    two_hosts_one_failing(forged)
+    snapshot_and_diff_fakes(forged)
+    got = load_list(LiveSource(config_path=str(hidden)))
+    assert got.rows == []
+    assert got.complete is False  # the GHE failure only, not the hiding
+    assert [e for e in got.errors if GHE not in e] == []
+    assert all(c.argv[-1] != "snapshot" for c in forged.calls("gh"))
+    queries = [c for c in forged.calls("gh") if "ForgectlPrs" in (c.stdin or "")]
+    assert queries and len(queries) == len(forged.calls("gh")), "only list queries were made"
