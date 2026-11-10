@@ -19,6 +19,7 @@ from textual.pilot import Pilot
 from textual.widgets import OptionList
 
 from forgectl.errors import ForgectlError
+from forgectl.tui import columns
 from forgectl.tui import run as tui_run
 from forgectl.tui.app import BrowseApp
 from forgectl.tui.refresh import RateLimits, host_of
@@ -641,6 +642,53 @@ def test_the_detail_pane_snapshot_also_refreshes_its_row() -> None:
         await pilot.press("r")
         await settle(app, pilot)
         assert "✗" in prompt_of(app, prefix(GH, 1))
+
+    run(source, script)
+
+
+def test_a_superseded_detail_read_still_refreshes_its_row() -> None:
+    source = three()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        a, b = prefix(GH, 1), prefix(GH, 2)
+        source.snapshots[a] = snap(1, ci="failing")
+        source.hold = True
+        app._start_detail(a)
+        await until(pilot, lambda: source.running > 0)
+        app._start_detail(b)  # replaces A's request before its read returns
+        source.gate.set()
+        await settle(app, pilot)
+        assert "✗" in prompt_of(app, a)
+
+    run(source, script)
+
+
+def test_a_superseded_detail_read_that_fails_marks_its_row_stale() -> None:
+    source = three()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        a, b = prefix(GH, 1), prefix(GH, 2)
+        source.failing.add(a)
+        source.hold = True
+        app._start_detail(a)
+        await until(pilot, lambda: source.running > 0)
+        app._start_detail(b)
+        source.gate.set()
+        await settle(app, pilot)
+        assert "[stale: upstream_error]" in prompt_of(app, a)
+
+    run(source, script)
+
+
+def test_a_detail_read_that_fails_on_a_still_loading_row_marks_it_failed() -> None:
+    source = three()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        a = prefix(GH, 1)
+        app._states[a] = columns.RowState(columns.LOADING)
+        app._row_failed(a, "upstream_error")
+        assert app._states[a].status == columns.FAILED
+        assert app._states[a].error == "upstream_error"
 
     run(source, script)
 

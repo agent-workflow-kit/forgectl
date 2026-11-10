@@ -648,7 +648,7 @@ class BrowseApp(App[None]):
         outcome = ""
         try:
             snap = await in_thread(self.source.snapshot, pr)
-            self._row_refreshed(pr, snap, token)
+            self._row_refreshed(pr, snap)
             try:
                 diff: dict[str, Any] | None = await in_thread(self.source.diff, pr)
             except ForgectlError as err:
@@ -658,10 +658,10 @@ class BrowseApp(App[None]):
             detail = await in_thread(render.detail_of, snap, diff)
         except ForgectlError as err:
             outcome = f"{err.code}: {err.message}"
-            self._row_failed(pr, safe.line(err.code, 60), token)
+            self._row_failed(pr, safe.line(err.code, 60))
         except Exception as exc:  # a source bug or bad data must not take the UI down
             outcome = self._internal(exc)
-            self._row_failed(pr, outcome, token)
+            self._row_failed(pr, outcome)
         finally:
             if token == self._detail_token:
                 self._detail_loading = None
@@ -676,9 +676,9 @@ class BrowseApp(App[None]):
         self._detail_note = outcome
         self._status(outcome)
 
-    def _row_refreshed(self, pr: str, snap: dict[str, Any], token: int) -> None:
+    def _row_refreshed(self, pr: str, snap: dict[str, Any]) -> None:
         """The detail's snapshot is also the row's fresh data."""
-        if token != self._detail_token or pr not in self._row_by_pr:
+        if pr not in self._row_by_pr:
             return
         try:
             state = columns.RowState(columns.LOADED, columns.summarize(snap))
@@ -687,10 +687,10 @@ class BrowseApp(App[None]):
             return
         self._snapshot_arrived(pr, state)
 
-    def _row_failed(self, pr: str, error: str, token: int) -> None:
-        state = self._states.get(pr)
-        if token == self._detail_token and state is not None and state.status == columns.LOADED:
-            self._snapshot_arrived(pr, self._failed_state(state, error))
+    def _row_failed(self, pr: str, error: str) -> None:
+        """A failed detail read marks its row: stale, or failed if it never loaded."""
+        if pr in self._row_by_pr:
+            self._snapshot_arrived(pr, self._failed_state(self._states.get(pr), error))
 
     def _show_detail(self, pr: str, detail: render.Detail, diff_note: str | None) -> None:
         self._detail_pr = pr
