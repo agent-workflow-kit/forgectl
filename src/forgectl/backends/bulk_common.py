@@ -32,8 +32,10 @@ HOST_STOPS = frozenset(
 )
 
 #: ``network_error`` (a reset, a timeout, an unreadable answer) is one failed request: the page is
-#: halved and asked again and a PR it cannot read falls back to the per-PR path. It ends a host's
-#: run only once the command's time budget is spent or after this many failures in a row.
+#: halved and asked again and a PR it cannot read falls back to the per-PR path. After this many
+#: failures in a row no further bulk request is made to the host, but the PRs not yet read are
+#: left to the per-PR path (which counts its own failures in a row); only the spent time budget
+#: or a ``HOST_STOPS`` code ends the host's run altogether.
 MAX_NETWORK_FAILURES = 3
 
 
@@ -62,6 +64,8 @@ class BulkRead:
     stopped: ForgectlError | None = None
     #: why the whole host uses the per-PR path (a failed capability probe), logged with --verbose
     reason: str | None = None
+    #: the repr of the first unexpected exception met while reading (a reader bug), for --verbose
+    bug: str | None = None
 
 
 def chunked[T](items: Sequence[T], size: int) -> list[list[T]]:
@@ -83,45 +87,51 @@ def run_pages(
     A page that fails (``ForgectlError`` that does not end the run) is split in two halves, each
     asked once more; a half that fails too is unresolved (``bulk_unavailable``) and the size of
     the pages after it is the half. A page of one PR is asked twice before it is given up. A
-    failure that ends the run (``ends_run``, or ``MAX_NETWORK_FAILURES`` ``network_error`` in a
-    row) leaves this page and every later PR unresolved with that code and sets
-    ``result.stopped``.
+    failure that ends the run (``ends_run``) leaves this page and every later PR unresolved with
+    that code and sets ``result.stopped``. ``MAX_NETWORK_FAILURES`` ``network_error`` in a row
+    only stops the bulk requests: this page and every later PR are ``bulk_unavailable`` (the
+    per-PR path reads them) and ``result.stopped`` stays unset.
     """
     result = BulkRead()
     pending = chunked(list(refs), size)
     current = size
     index = 0
     stopped: ForgectlError | None = None
+    halted: ForgectlError | None = None  # too many network failures in a row: no more requests
     network_failures = 0
 
     def attempt(page: list[PrRef]) -> ForgectlError | None:
-        nonlocal stopped, network_failures
+        nonlocal stopped, halted, network_failures
         try:
             ask(page, result)
         except ForgectlError as error:
             network_failures = network_failures + 1 if error.code == "network_error" else 0
-            if ends_run(error, exhausted) or network_failures >= MAX_NETWORK_FAILURES:
+            if ends_run(error, exhausted):
                 stopped = error
                 give_up_stop(result, page, error)
+            elif network_failures >= MAX_NETWORK_FAILURES:
+                halted = error
+                give_up(page, error)
             return error
         network_failures = 0
         return None
 
-    def give_up(page: list[PrRef], error: ForgectlError) -> None:
+    def give_up(page: Sequence[PrRef], error: ForgectlError) -> None:
         for ref in page:
-            result.unresolved.setdefault(ref, Unresolved(BULK_UNAVAILABLE, _line(error)))
+            if ref not in result.snapshots:
+                result.unresolved.setdefault(ref, Unresolved(BULK_UNAVAILABLE, _line(error)))
 
-    while index < len(pending) and stopped is None:
+    while index < len(pending) and stopped is None and halted is None:
         page = pending[index]
         index += 1
         failure = attempt(page)
-        if failure is None or stopped is not None:
+        if failure is None or stopped is not None or halted is not None:
             continue
         # the page failed: halve and ask each half once more
         current = max(min_size, shrink(min(current, len(page))))
         if len(page) == 1:
             again = attempt(page)
-            if again is not None and stopped is None:
+            if again is not None and stopped is None and halted is None:
                 give_up(page, again)
             continue
         middle = (len(page) + 1) // 2
@@ -129,8 +139,11 @@ def run_pages(
             if stopped is not None:
                 give_up_stop(result, half, stopped)
                 continue
+            if halted is not None:
+                give_up(half, halted)
+                continue
             again = attempt(half)
-            if again is not None and stopped is None:
+            if again is not None and stopped is None and halted is None:
                 give_up(half, again if again.code != "internal" else failure)
         # later pages use the smaller size
         if current < size:
@@ -140,6 +153,9 @@ def run_pages(
         for later in pending[index:]:
             give_up_stop(result, later, stopped)
         result.stopped = stopped
+    elif halted is not None:
+        for later in pending[index:]:
+            give_up(later, halted)
     return result
 
 

@@ -298,7 +298,8 @@ class _Run:
                     raise
                 code = BULK_UNAVAILABLE if error.code == "upstream_error" else error.code
                 built.append((ref, Unresolved(code, error.message)))
-            except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+            except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as bug:
+                result.bug = result.bug or repr(bug)
                 built.append((ref, Unresolved(BULK_UNAVAILABLE, "unusable answer")))
         # the page is whole: nothing is stored before every alias has been looked at
         for ref, outcome in built:

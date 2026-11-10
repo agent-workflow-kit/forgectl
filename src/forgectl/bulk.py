@@ -6,7 +6,9 @@ the per-PR ``snapshot`` (the source of truth), unless ``--bulk-only`` asks to be
 Once a host's run has ended on a rate limit, a credential failure or the spent time budget no
 further request is made to it: every PR of it not yet read is reported with that code, with or
 without ``--bulk-only`` (interface: ``snapshots``). A ``network_error`` alone is one failed
-request: it ends the run only with the budget spent or after ``MAX_NETWORK_FAILURES`` in a row.
+request: it ends the run only with the budget spent. After ``MAX_NETWORK_FAILURES`` in a row the
+bulk requests to the host stop, and the PRs not yet read go to the per-PR path (which counts its
+own failures in a row the same way).
 """
 
 from __future__ import annotations
@@ -102,7 +104,7 @@ def _exhausted(env: ReadEnv) -> Callable[[], bool]:
     return lambda: env.gateway.budget.remaining() <= 0
 
 
-def _bulk_host(env: ReadEnv, host: str, refs: list[PrRef]) -> BulkRead:
+def _bulk_host(env: ReadEnv, host: str, refs: list[PrRef], verbose: bool = False) -> BulkRead:
     """One host's bulk run. A failure of the whole run, whatever it is, is every PR of the host
     unresolved and never a crash: the other hosts' results are kept."""
     try:
@@ -116,6 +118,8 @@ def _bulk_host(env: ReadEnv, host: str, refs: list[PrRef]) -> BulkRead:
         return result
     except Exception as error:  # a reader bug must not lose the other hosts' results
         text = f"unusable answer ({type(error).__name__})"
+        if verbose:  # a systematic bug must not hide behind the type name
+            emit_warning(f"snapshots: {host}: unexpected {_line(repr(error))}")
         result = BulkRead(reason=text)
         for ref in refs:
             result.unresolved[ref] = Unresolved(BULK_UNAVAILABLE, text)
@@ -133,20 +137,25 @@ def run_snapshots(
     fallback: list[PrRef] = []
     stopped: dict[str, ForgectlError] = {}
     for host, host_refs in by_host.items():
-        read = _bulk_host(env, host, host_refs)
+        read = _bulk_host(env, host, host_refs, verbose)
         if read.reason and verbose:
             emit_warning(f"snapshots: {host}: {read.reason}")
+        if read.bug and verbose:
+            emit_warning(f"snapshots: {host}: unexpected {_line(read.bug)}")
         for ref, snap in read.snapshots.items():
             found[ref] = snap.to_dict()
         if read.stopped is not None:
             stopped[host] = read.stopped
         network_failures = 0
+        fallback_stop = False  # the stop was met by the per-PR path, not by the bulk reader
         for ref in host_refs:
             if ref in found:
                 continue
             why = read.unresolved.get(ref) or Unresolved(BULK_UNAVAILABLE, "not read")
-            if host in stopped and why.code == BULK_UNAVAILABLE:
-                # a PR the host's run ended before it was read: the code of the stop
+            if fallback_stop and why.code == BULK_UNAVAILABLE:
+                # a PR left unread by a stop met in the per-PR path: the code of the stop. A PR the
+                # bulk reader declined before a stop of its own run keeps its own reason (the
+                # reader marked the PRs the stop cut off with the stop's code)
                 why = Unresolved(stopped[host].code, stopped[host].message)
             if bulk_only or host in stopped:
                 failed[ref] = {"code": why.code, "message": _line(why.message)}
@@ -161,6 +170,7 @@ def run_snapshots(
                 network_failures = network_failures + 1 if error.code == "network_error" else 0
                 if ends_run(error, _exhausted(env)) or network_failures >= MAX_NETWORK_FAILURES:
                     stopped[host] = error
+                    fallback_stop = True
             except Exception as error:  # a bug of the per-PR path costs this PR, not the command
                 failed[ref] = {
                     "code": "internal",

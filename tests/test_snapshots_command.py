@@ -216,6 +216,81 @@ def test_one_network_error_in_the_fallback_costs_that_pr_only(fake_forges: FakeF
     assert out["errors"] == []
 
 
+def test_consecutive_bulk_network_failures_leave_every_pr_to_the_per_pr_fallback(
+    fake_forges: FakeForges,
+) -> None:
+    router = BulkRouter(lambda r: down(), per_pr_answers())
+    refs = [ref(n) for n in range(7, 12)]
+    out = bulk.run_snapshots(make(fake_forges, router, retries=0).env, refs)
+    assert len(router.bulk_sizes) == 3  # the bulk requests stopped after three in a row
+    assert len(out["fallback"]) == 5  # and every PR was read per PR (the recording is PR 7's)
+    assert out["errors"] == [] and [i["number"] for i in out["items"]] == [7]
+
+
+def test_a_decline_before_a_stop_keeps_its_own_reason_and_the_cut_off_get_the_stop_code(
+    fake_forges: FakeForges,
+) -> None:
+    def answer(request: dict[str, Any]) -> Any:
+        first = numbers_of(request)[0]
+        if first > 25:
+            return http(
+                429, {"message": "API rate limit exceeded"}, headers={"retry-after": "3600"}
+            )
+        if first == 1:
+            return cut_checks(request)
+        return bulk_answer(*numbers_of(request))
+
+    router = BulkRouter(answer, per_pr_answers())
+    refs = [ref(n) for n in range(1, 31)]
+    out = bulk.run_snapshots(make(fake_forges, router, retries=3).env, refs)
+    codes = {f["pr"]: f["error"]["code"] for f in out["failed"]}
+    # PR 1 was declined by the bulk reader (a cut part) and never read per PR: its own reason
+    assert codes[str(ref(1))] == BULK_UNAVAILABLE
+    assert {codes[str(ref(n))] for n in range(26, 31)} == {"rate_limited"}
+    assert len(codes) == 6
+
+
+def test_a_crashing_bulk_reader_is_warned_with_its_repr_under_verbose(
+    fake_forges: FakeForges, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import types
+
+    def boom(env: Any, host: str, refs: Any) -> Any:
+        raise TypeError("odd shape")
+
+    monkeypatch.setitem(bulk.BULK_READERS, "github", "forgectl.test_stub_reader")
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "forgectl.test_stub_reader",
+        types.SimpleNamespace(read_bulk=boom),
+    )
+    router = BulkRouter()
+    bulk.run_snapshots(
+        make(fake_forges, router).env, [ref(7), ref(8)], bulk_only=True, verbose=True
+    )
+    err = capsys.readouterr().err
+    assert err.count("TypeError('odd shape')") == 1
+    bulk.run_snapshots(make(fake_forges, router).env, [ref(7)], bulk_only=True)
+    assert "odd shape" not in capsys.readouterr().err
+
+
+def test_a_bug_in_one_pr_of_the_reader_is_warned_with_its_repr_under_verbose(
+    fake_forges: FakeForges, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from forgectl.backends import github_bulk
+
+    def boom(self: Any, *args: Any, **kwargs: Any) -> Any:
+        raise TypeError("odd item")
+
+    monkeypatch.setattr(github_bulk._Run, "_item", boom)
+    router = BulkRouter(others=per_pr_answers())
+    out = bulk.run_snapshots(
+        make(fake_forges, router).env, [ref(7), ref(8)], bulk_only=True, verbose=True
+    )
+    assert len(out["failed"]) == 2
+    assert capsys.readouterr().err.count("TypeError('odd item')") == 1
+
+
 def test_a_crashing_bulk_reader_costs_its_host_only(
     fake_forges: FakeForges, monkeypatch: pytest.MonkeyPatch
 ) -> None:

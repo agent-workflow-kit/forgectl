@@ -313,6 +313,7 @@ class _Run:
         self._reset: dict[int, bool | None] = {}
         self._heads: dict[tuple[int, int], tuple[str | None, bool | None]] = {}
         self.readings = 0
+        self.bug: str | None = None  # the repr of the first reader bug, for --verbose
 
     # -- one request ---------------------------------------------------------------------------
 
@@ -403,7 +404,8 @@ class _Run:
                 else error.code
             )
             return Unresolved(code, error.message)
-        except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as bug:
+            self.bug = self.bug or repr(bug)
             return Unresolved(BULK_UNAVAILABLE, "unusable answer")
 
     @staticmethod
@@ -923,6 +925,7 @@ def read_bulk(
             raise
         result.stopped = error
         give_up_stop(result, [r for r in refs if r not in result.snapshots], error)
+        result.bug = run.bug
         return result
     missing = [r for r in refs if r not in result.snapshots and r not in result.unresolved]
     if missing:
@@ -930,4 +933,5 @@ def read_bulk(
         result.snapshots.update(more.snapshots)
         result.unresolved.update(more.unresolved)
         result.stopped = more.stopped
+    result.bug = run.bug
     return result

@@ -434,7 +434,7 @@ def test_one_transient_network_failure_halves_the_page_and_every_pr_is_read(
     assert router.bulk_sizes[:3] == [25, 13, 12]
 
 
-def test_repeated_network_failures_end_the_host_run_after_three_in_a_row(
+def test_repeated_network_failures_stop_bulk_requests_but_do_not_stop_the_host(
     fake_forges: FakeForges,
 ) -> None:
     router = BulkRouter(lambda _r: down_result())
@@ -442,9 +442,36 @@ def test_repeated_network_failures_end_the_host_run_after_three_in_a_row(
     refs = [ref(n) for n in range(1, 61)]
     got = read_bulk(r.env, "github.com", refs, now=lambda: NOW)
     assert router.bulk_sizes == [25, 13, 12]
-    assert got.stopped is not None and got.stopped.code == "network_error"
-    assert len(got.unresolved) == 60 and got.snapshots == {}
-    assert {u.code for u in got.unresolved.values()} == {"network_error", BULK_UNAVAILABLE}
+    # no hard stop: every PR is left to the per-PR path
+    assert got.stopped is None and got.snapshots == {}
+    assert len(got.unresolved) == 60
+    assert {u.code for u in got.unresolved.values()} == {BULK_UNAVAILABLE}
+
+
+def test_three_failures_in_a_row_leave_the_readable_prs_after_them_unresolved_not_stopped(
+    fake_forges: FakeForges,
+) -> None:
+    """Ten PRs in pages of two; the requests that include PR 2 or 3 fail: [1,2] [1] ok [2] [3]
+    [3] again is three in a row, so bulk requests stop, with PRs 2 to 10 unresolved (the per-PR
+    path reads them) and the host not stopped."""
+
+    def answer(request: dict[str, Any]) -> Any:
+        from .bulk_support import numbers_of
+
+        if {2, 3} & set(numbers_of(request)):
+            return down_result()
+        return answer_for(request)
+
+    router = BulkRouter(answer)
+    r = rig(fake_forges, router, retries=0)
+    got = read_bulk(
+        r.env, "github.com", [ref(n) for n in range(1, 11)], page_size=2, now=lambda: NOW
+    )
+    assert router.bulk_sizes == [2, 1, 1, 1, 1]  # pages are one PR after the first failure
+    assert got.stopped is None
+    assert [s.number for s in got.snapshots] == [1]
+    assert sorted(u for u in (k.number for k in got.unresolved)) == list(range(2, 11))
+    assert {u.code for u in got.unresolved.values()} == {BULK_UNAVAILABLE}
 
 
 def test_a_network_failure_with_the_budget_spent_ends_the_host_run_at_once(
