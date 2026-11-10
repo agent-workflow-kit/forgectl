@@ -15,7 +15,7 @@ Normalized access to pull and merge requests on GitHub and GitLab: reading, post
 
 The adapters are internal to forgectl. Other forges are not pluggable by users in v1.
 
-Python dependencies: `pyyaml` and `pydantic` (config, design guide section 3). `textual` only in the extra `forgectl[tui]`, so cron and shared use do not pull it in. No HTTP library: all network access goes through `gh` and `glab`. Test-only: `jsonschema` and `referencing` validate every `--json` output against `schemas/` (a `referencing` registry keyed by `$id`), so a schema and the code cannot drift; neither is installed for users.
+Python dependencies: `pyyaml` and `pydantic` (config, design guide section 3). `textual`, `rich`, `pygments` and `markdown-it-py` only in the extra `forgectl[tui]` (Rich and Pygments are Textual's own dependencies, declared because the detail pane colors markdown, diffs and code with them; `markdown-it-py` is the parser Rich's Markdown uses, mapped to styles by forgectl so forge text is never parsed as markup), so cron and shared use do not pull it in. No HTTP library: all network access goes through `gh` and `glab`. Test-only: `jsonschema` and `referencing` validate every `--json` output against `schemas/` (a `referencing` registry keyed by `$id`), so a schema and the code cannot drift; neither is installed for users.
 
 ## Decisions
 

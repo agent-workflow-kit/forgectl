@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.12"
 
 [[package]]
@@ -81,6 +81,9 @@ dependencies = [
 
 [package.optional-dependencies]
 tui = [
+    { name = "markdown-it-py" },
+    { name = "pygments" },
+    { name = "rich" },
     { name = "textual" },
 ]
 
@@ -98,8 +101,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "markdown-it-py", marker = "extra == 'tui'", specifier = ">=3" },
     { name = "pydantic", specifier = ">=2.9" },
+    { name = "pygments", marker = "extra == 'tui'", specifier = ">=2.19" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "rich", marker = "extra == 'tui'", specifier = ">=14" },
     { name = "textual", marker = "extra == 'tui'", specifier = ">=8.2,<9" },
 ]
 provides-extras = ["tui"]

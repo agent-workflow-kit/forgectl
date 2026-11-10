@@ -6,12 +6,13 @@ Nothing here knows about widgets.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from . import safe
 from .opener import URL_MAX_LENGTH, is_openable
 from .source import Row
+from .style import Markdown
 
 MAX_THREADS = 200
 MAX_COMMENTS_PER_THREAD = 50
@@ -152,17 +153,21 @@ def _reviews_out(snap: dict[str, Any]) -> _Budget:
             continue
         head = f"  review {safe.line(review.get('state'))} by {_login(review.get('author'))}"
         body = review.get("body")
-        out.add(head, *([_indent(safe.text(body, COMMENT_LIMIT))] if body else []))
+        out.add(head, *([Markdown(safe.text(body, COMMENT_LIMIT), 4)] if body else []))
     if not latest and not reviews:
         out.note("  (none)")
     return out
 
 
-def _joined(out: _Budget) -> str:
-    lines = out.lines
+def _lines(out: _Budget) -> list[str]:
+    lines = list(out.lines)
     if out.full:
         lines.append(f"  ... {out.skipped} more not shown")
-    return "\n".join(lines)
+    return lines
+
+
+def _joined(out: _Budget) -> str:
+    return "\n".join(_lines(out))
 
 
 def reviews_text(snap: dict[str, Any], out: _Budget | None = None) -> str:
@@ -170,6 +175,10 @@ def reviews_text(snap: dict[str, Any], out: _Budget | None = None) -> str:
 
 
 def comments_text(snap: dict[str, Any], reviews: _Budget | None = None) -> str:
+    return _joined(_comments_out(snap, reviews))
+
+
+def _comments_out(snap: dict[str, Any], reviews: _Budget | None = None) -> _Budget:
     """The comment threads within what the reviews leave of ``REST_BUDGET``."""
     reviews = reviews if reviews is not None else _reviews_out(snap)
     out = _Budget(REST_BUDGET - reviews.used)
@@ -193,7 +202,7 @@ def comments_text(snap: dict[str, Any], reviews: _Budget | None = None) -> str:
                 continue
             out.add(
                 f"    @{_login(comment.get('author'))}:",
-                _indent(safe.text(comment.get("body"), COMMENT_LIMIT), 6),
+                Markdown(safe.text(comment.get("body"), COMMENT_LIMIT), 6),
             )
     if not threads:
         out.note("  (none)")
@@ -202,7 +211,7 @@ def comments_text(snap: dict[str, Any], reviews: _Budget | None = None) -> str:
             out.skip(len(threads) - MAX_THREADS)
         else:
             out.note(f"  ... {len(threads) - MAX_THREADS} more threads not shown")
-    return _joined(out)
+    return out
 
 
 def changes_text(diff: dict[str, Any] | None) -> str:
@@ -246,6 +255,9 @@ class Detail:
     check_labels: list[str]
     texts: dict[str, str]  # the body of each section, by name (``sections.NAMES``)
     counts: dict[str, str]  # the header count of a section, numbers only; absent: none
+    # The lines of a section whose bodies are markdown (``style.Markdown`` entries), so the
+    # pane can style them; ``texts`` has the same lines joined, as plain text.
+    lines: dict[str, list[str]] = field(default_factory=dict)
 
 
 def check_labels_of(checks: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
@@ -271,6 +283,7 @@ def detail_of(snap: dict[str, Any], diff: dict[str, Any] | None) -> Detail:
     url = snap.get("url")
     checks, labels = check_labels_of(checks_of(snap))
     reviews = _reviews_out(snap)
+    comments_out = _comments_out(snap, reviews)
     return Detail(
         url=url if isinstance(url, str) else None,
         checks=checks,
@@ -280,13 +293,13 @@ def detail_of(snap: dict[str, Any], diff: dict[str, Any] | None) -> Detail:
             "description": description_text(snap),
             "changes": changes_text(diff),
             "ci": ci_text(snap),
-            "comments": comments_text(snap, reviews),
+            "comments": "\n".join(_lines(comments_out)),
             "reviews": reviews_text(snap, reviews),
         },
         counts=counts_of(snap),
+        lines={
+            "description": [Markdown(description_text(snap), 0)],
+            "comments": _lines(comments_out),
+            "reviews": _lines(reviews),
+        },
     )
-
-
-def _indent(text: str, n: int = 4) -> str:
-    pad = " " * n
-    return "\n".join(pad + line for line in text.split("\n"))

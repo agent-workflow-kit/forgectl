@@ -28,7 +28,7 @@ from textual.widgets.option_list import Option
 
 from forgectl.errors import ForgectlError
 
-from . import columns, render, safe, sections
+from . import columns, render, safe, sections, style
 from .opener import Opener, OpenRefused, is_openable
 from .refresh import BACKOFF_FACTOR, RateLimits, host_of, needs_snapshot
 from .source import DataSource, Listing, Row, load_list
@@ -906,13 +906,25 @@ class BrowseApp(App[None]):
         if not is_open or detail is None or name in self._painted:
             return
         self._painted.add(name)
-        body.update(safe.plain(detail.texts[name]))
+        body.update(style.body(name, detail.texts, detail.lines, self._dark()))
         if name == "ci":
             checks = self.query_one("#checks", OptionList)
             checks.clear_options()
-            checks.add_options([Option(safe.plain(label)) for label in detail.check_labels])
+            dark = self._dark()
+            checks.add_options([Option(style.check_label(x, dark)) for x in detail.check_labels])
             if detail.checks:
                 checks.highlighted = 0
+
+    def _dark(self) -> bool:
+        """Whether the app theme is dark: the colors of the detail pane follow it."""
+        return bool(self.current_theme.dark)
+
+    def watch_theme(self) -> None:
+        """A new theme repaints the open sections in its colors."""
+        if self._detail is not None and self.is_mounted:
+            self._painted.clear()
+            for name in sections.NAMES:
+                self._paint_section(name)
 
     def _pane_has_focus(self) -> bool:
         focused = self.focused
