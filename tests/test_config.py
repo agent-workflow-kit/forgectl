@@ -93,6 +93,11 @@ def test_example_values_equal_the_schema_defaults() -> None:
     assert data["timeout"] == props["timeout"]["default"] == "60s"
     assert data["hooks"] == props["hooks"]["default"] == {}
     assert data["activity"] == props["activity"]["default"] == {}
+    assert data["browse"] == props["browse"]["default"] == {}
+    browse_props = props["browse"]["properties"]
+    assert browse_props["refresh_interval"]["default"] == "120s"
+    assert browse_props["full_refresh_every"]["default"] == 5
+    assert browse_props["concurrency"]["default"] == 4
     assert props["activity"]["properties"]["ignore_authors"]["default"] == []
     for key, prop in props["me"]["properties"].items():
         assert data["me"][key] == prop["default"], key
@@ -115,6 +120,42 @@ def test_activity_ignore_authors_loads_and_defaults_to_empty(home: Path) -> None
     ],
 )
 def test_activity_refuses_a_bad_ignore_list(home: Path, text: str) -> None:
+    with pytest.raises(ForgectlError) as caught:
+        load(home, text)
+    assert caught.value.code == "config_invalid"
+
+
+def test_browse_defaults_and_values(home: Path) -> None:
+    browse = load(home, "").config.browse
+    assert (browse.refresh_interval, browse.full_refresh_every, browse.concurrency) == (120.0, 5, 4)
+    text = "browse: {refresh_interval: 30s, full_refresh_every: 3, concurrency: 8}\n"
+    browse = load(home, text).config.browse
+    assert (browse.refresh_interval, browse.full_refresh_every, browse.concurrency) == (30.0, 3, 8)
+
+
+@pytest.mark.parametrize("value", ["0", "0.0"])
+def test_browse_refresh_interval_accepts_zero_to_disable(home: Path, value: str) -> None:
+    assert load(home, f"browse: {{refresh_interval: {value}}}\n").config.browse.refresh_interval == 0
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "browse: {refresh_interval: -1}\n",
+        "browse: {refresh_interval: abc}\n",
+        'browse: {refresh_interval: "0"}\n',
+        "browse: {refresh_interval: true}\n",
+        "browse: {refresh_interval: 0s}\n",
+        "browse: {full_refresh_every: 0}\n",
+        "browse: {full_refresh_every: 2.5}\n",
+        "browse: {full_refresh_every: 1001}\n",
+        "browse: {concurrency: 0}\n",
+        "browse: {concurrency: 17}\n",
+        "browse: {concurrency: true}\n",
+        "browse: {interval: 5}\n",
+    ],
+)
+def test_browse_refuses_bad_values(home: Path, text: str) -> None:
     with pytest.raises(ForgectlError) as caught:
         load(home, text)
     assert caught.value.code == "config_invalid"
@@ -1336,6 +1377,7 @@ def test_hash_is_sha256_of_sorted_key_json_of_the_merged_config_after_defaults(
         "hosts": {},
         "repos": {},
         "activity": {"ignore_authors": []},
+        "browse": {"refresh_interval": 120.0, "full_refresh_every": 5, "concurrency": 4},
         "hooks": {"pre-merge": [], "post-merge": [], "pre-post": [], "post-post": []},
     }
     assert loaded.config_hash == hashlib.sha256(canonical(expected).encode()).hexdigest()

@@ -67,6 +67,16 @@ activity: {}
 # activity:
 #   ignore_authors: ["dependabot[bot]", "renovate*"]
 
+# `browse`. refresh_interval: seconds between automatic refreshes (a duration; the number 0 turns
+# them off); the flag --interval wins. full_refresh_every: every Nth automatic refresh
+# re-snapshots every PR, the others only those that may have changed (1 to 1000).
+# concurrency: snapshot reads at once (1 to 16).
+browse: {}
+# browse:
+#   refresh_interval: 120s
+#   full_refresh_every: 5
+#   concurrency: 4
+
 # Hooks, each a list of entries (default []). cmd runs through sh -c in its own process group.
 # Exit 0 continues; on a pre- hook, exit 13 escalates and any other failure or a timeout vetoes;
 # post- failures are logged and warned, never fatal. The payload is JSON on stdin and never holds

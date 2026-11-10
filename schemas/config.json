@@ -281,6 +281,40 @@
       "required": [],
       "default": {}
     },
+    "browse": {
+      "type": "object",
+      "properties": {
+        "refresh_interval": {
+          "anyOf": [
+            {
+              "const": 0
+            },
+            {
+              "$ref": "#/$defs/duration"
+            }
+          ],
+          "default": "120s",
+          "description": "Seconds between the automatic refreshes of `browse`; the number 0 turns them off. The flag --interval wins."
+        },
+        "full_refresh_every": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 5,
+          "description": "Every Nth automatic refresh re-snapshots every PR; the others only the PRs that may have changed."
+        },
+        "concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16,
+          "default": 4,
+          "description": "Snapshot reads `browse` runs at once."
+        }
+      },
+      "additionalProperties": false,
+      "required": [],
+      "default": {}
+    },
     "hooks": {
       "type": "object",
       "properties": {

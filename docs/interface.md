@@ -788,6 +788,8 @@ Reads fire none.
 | `repos.<id>.merge_method` | null | `squash`, `merge` or `rebase` |
 | `activity.ignore_authors` | `[]` | logins whose comments and reviews [`activity`](#activity) ignores; glob patterns allowed; replaces on merge like any list |
 | `browse.refresh_interval` | `120s` | seconds between automatic refreshes in [`browse`](#tui); `0` disables them; the flag `browse --interval` wins |
+| `browse.full_refresh_every` | `5` | every Nth automatic refresh of [`browse`](#tui) re-snapshots every PR (1 to 1000) |
+| `browse.concurrency` | `4` | snapshot reads `browse` runs at once (1 to 16) |
 | `hooks.<name>` | `[]` | [Hooks](#hooks) |
 
 Per-repo overrides hold only `merge_method` in v1: no setting lowers a safety rule, so none can be relaxed per repo. A duration is a positive number or a numeric string, in seconds, or `<number><unit>` with unit `ms`, `s`, `m`, `h` or `d`; `browse.refresh_interval` alone also accepts `0`, which disables the refresh. `api_prefix` is only for declared hosts and null for GitHub; it has 1 to 8 segments of 1 to 64 characters from `A-Za-z0-9._-`, none of them `.` or `..`, and no trailing slash. A host key has labels of at most 63 characters and a name of at most 253, and a GitHub host's key has no port (`gh` refuses one); either failure exits 2 (`config_invalid`) naming the key. A built-in host's `backend` must match. A hook's `cmd` is not empty.
