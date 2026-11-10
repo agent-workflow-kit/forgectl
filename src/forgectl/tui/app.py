@@ -1,6 +1,6 @@
 """The `browse` app: a list, a detail pane, and one action (open in a browser). Read-only.
 
-There is no write action here: no merge (TODO(#60)), no post. Forge text reaches the screen
+There is no write action here: no merge (todo(#60)), no post. Forge text reaches the screen
 only through ``safe`` and ``render``, as ``Content`` that is never parsed as markup.
 """
 
@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections import deque
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
+from rich.cells import cell_len
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -21,9 +24,12 @@ from textual.widgets.option_list import Option
 
 from forgectl.errors import ForgectlError
 
-from . import render, safe
+from . import columns, render, safe
 from .opener import Opener, OpenRefused, is_openable
 from .source import DataSource, Listing, Row, load_list
+
+DEFAULT_CONCURRENCY = 4  # snapshots in flight at once; a small default
+# todo(#59): config key for snapshot concurrency (and its schema entry)
 
 HELP = """\
 q       quit
@@ -33,8 +39,20 @@ enter   open the detail pane for the highlighted PR
 esc     close the detail pane or the filter
 o       open the PR in a browser; on a check in the detail pane, open the check
         (only an http or https url is opened)
+s       switch the order: by repo (default) or needs-attention first
+a       filter: authored by me
+v       filter: review requested from me
+f       filter: CI failing
+n       filter: new comments from others
+        (filters combine as an intersection; the status bar names them)
 r       refresh selected (the PR in the detail pane, else the highlighted PR)
 R       refresh all (both lists, then the PR in the detail pane)
+
+columns: PR  badge  CI  approvals  review  comments  age  title
+  CI: ✓ passing, ✗ failing, … pending, - none, · loading, ! snapshot failed
+  comments: c total, u unresolved threads, n new from others since the push,
+            r threads awaiting my reply
+  age: since the last push / since the last update
 
 browse is read-only: no merge, no post.
 Press any key to close this help."""
@@ -86,11 +104,13 @@ class BrowseApp(App[None]):
     ENABLE_COMMAND_PALETTE = False  # its screenshot command would write forge text to a file
     CSS = """
     #main { height: 1fr; }
-    #left { width: 1fr; }
+    #left { width: 3fr; }
     #detail { width: 2fr; display: none; border-left: solid $primary; padding: 0 1; }
     #filter { display: none; }
+    #list { text-wrap: nowrap; text-overflow: ellipsis; }
     #checks { height: auto; max-height: 12; }
-    #status { height: 1; dock: bottom; }
+    #footer { dock: bottom; height: 2; }
+    #bar, #status { height: 1; }
     HelpScreen { align: center middle; }
     #help { width: 76; height: auto; border: round $primary; padding: 1 2; background: $surface; }
     """
@@ -100,6 +120,11 @@ class BrowseApp(App[None]):
         Binding("slash", "filter", "filter"),
         Binding("escape", "close", "close"),
         Binding("o", "open", "open"),
+        Binding("s", "sort", "order"),
+        Binding("a", "toggle_filter('authored')", "authored"),
+        Binding("v", "toggle_filter('requested')", "requested"),
+        Binding("f", "toggle_filter('ci-failing')", "ci failing"),
+        Binding("n", "toggle_filter('new-comments')", "new comments"),
         Binding("r", "refresh_selected", "refresh"),
         Binding("R", "reload_list", "reload"),
     ]
@@ -110,16 +135,32 @@ class BrowseApp(App[None]):
         opener: Opener,
         *,
         focus: str | None = None,
+        concurrency: int = DEFAULT_CONCURRENCY,
+        clock: Callable[[], datetime] = columns.utc_now,
     ) -> None:
         super().__init__()
+        self.concurrency = max(0, concurrency)  # 0: the rows' snapshots are not loaded
+        self.clock = clock
         self.source = source
         self.opener = opener
         self.focus_pr = focus
         self.intent = "back"
         self.selected: str | None = None
-        self.merged: list[str] = []  # TODO(#60): PRs merged from here; empty until `m` exists
+        self.merged: list[str] = []  # todo(#60): PRs merged from here; empty until `m` exists
         self._rows: list[Row] = []
         self._visible: list[Row] = []
+        self._states: dict[str, columns.RowState] = {}
+        self._order_mode = columns.SORT_REPO
+        self._list_filters: set[str] = set()
+        self._shown_prs: list[str] = []  # the PRs in the option list, in order
+        self._snap_token = 0  # a newer list load stops the snapshot pool of an older one
+        # One limiter for every round: reads of an older round still in flight keep their slots,
+        # so a reload cannot put more than ``concurrency`` snapshot reads on the wire.
+        self._snap_slots = asyncio.Semaphore(max(1, self.concurrency))
+        self._row_by_pr: dict[str, Row] = {}
+        self._pr_width = 0
+        self._snap_done = 0
+        self._snap_total = 0
         self._filter = ""
         self._loading = False
         self._opened = False  # an `o` succeeded: `selected` is the PR it acted on
@@ -150,7 +191,9 @@ class BrowseApp(App[None]):
                 yield Static(safe.plain(""), id="facts", markup=False)
                 yield OptionList(id="checks")
                 yield Static(safe.plain(""), id="rest", markup=False)
-        yield Static(safe.plain(""), id="status", markup=False)
+        with Vertical(id="footer"):
+            yield Static(safe.plain(""), id="bar", markup=False)
+            yield Static(safe.plain(""), id="status", markup=False)
 
     def on_mount(self) -> None:
         self.query_one("#list", OptionList).focus()
@@ -192,31 +235,154 @@ class BrowseApp(App[None]):
                 notes.append("list incomplete")
             self._list_note = "; ".join(notes) if notes else None
             self._rows = listing.rows
+            self._row_by_pr = {r.pr: r for r in self._rows}
+            # todo(#59): keep a row's last good data while it refreshes, and mark it stale.
+            self._states = {r.pr: columns.RowState() for r in self._rows}
             self._apply_filter()
             self._paint(self._list_note or f"{len(self._rows)} PRs", self._detail_note)
+            self._start_snapshots()
         finally:
             self._loading = False
         if refresh_detail and self._detail_pr is not None and self._detail_shown():
             self._start_detail(self._detail_pr)
 
+    def _state(self, row: Row) -> columns.RowState:
+        return self._states.get(row.pr) or columns.RowState()
+
     def _apply_filter(self) -> None:
-        """Rebuild the visible rows; the highlighted PR stays highlighted while it is shown."""
+        """Rebuild the visible rows; the highlighted PR stays highlighted while it is shown.
+
+        When only cell text changed (a snapshot arrived) the prompts are replaced in place, so
+        the scroll position does not move.
+        """
         kept = self._highlighted_row()
         needle = self._filter.strip().lower()
         try:
-            visible = [r for r in self._rows if not needle or needle in render.row_haystack(r)]
-            options = [Option(safe.plain(render.row_text(r))) for r in visible]
+            ordered = columns.order(self._rows, self._states, self._order_mode)
+            visible = [
+                r
+                for r in ordered
+                if columns.matches(r, self._state(r), self._list_filters)
+                and (not needle or needle in render.row_haystack(r))
+            ]
+            now = self.clock()
+            parts = [columns.cells(r, self._state(r), now) for r in visible]
+            width = min(60, max((cell_len(p[0]) for p in parts), default=0))
+            prompts = [safe.plain(columns.row_line(p, width)) for p in parts]
         except Exception as exc:  # bad data reaches the status line, not a traceback
             self._list_note = self._internal(exc)
             self._status("")
             return
         self._visible = visible
+        self._pr_width = width
         olist = self.query_one("#list", OptionList)
-        olist.clear_options()
-        olist.add_options(options)
-        if visible:
-            prs = [r.pr for r in visible]
-            olist.highlighted = prs.index(kept.pr) if kept and kept.pr in prs else 0
+        prs = [r.pr for r in visible]
+        if prs == self._shown_prs and olist.option_count == len(prs):
+            for i, prompt in enumerate(prompts):
+                olist.replace_option_prompt_at_index(i, prompt)
+        else:
+            self._shown_prs = prs
+            olist.clear_options()
+            olist.add_options([Option(p) for p in prompts])
+            if visible:
+                olist.highlighted = prs.index(kept.pr) if kept and kept.pr in prs else 0
+        self._paint_bar()
+
+    def _paint_bar(self) -> None:
+        parts = [f"{len(self._visible)}/{len(self._rows)} PRs", f"order: {self._order_mode}"]
+        if self._list_filters:
+            parts.append(f"filters: {columns.filters_text(self._list_filters)}")
+        if self._snap_total:
+            failed = sum(1 for s in self._states.values() if s.status == columns.FAILED)
+            progress = f"snapshots {self._snap_done}/{self._snap_total}"
+            parts.append(progress + (f" ({failed} failed)" if failed else ""))
+        self.query_one("#bar", Static).update(safe.plain(safe.line(" | ".join(parts), 500)))
+
+    # -- snapshots: one per row, loaded progressively -----------------------------------------
+
+    def _snapshot_order(self) -> list[str]:
+        """The rows in the viewport first, then the other rows in display order.
+
+        Every row is one line, so the scroll offset is an index into the shown rows. Rows the
+        filters hide come last, in the order they would be shown.
+        """
+        olist = self.query_one("#list", OptionList)
+        start = max(0, int(olist.scroll_y))
+        height = max(1, olist.size.height)
+        shown = list(self._shown_prs)
+        first = shown[start : start + height]
+        taken = set(first)
+        rest = [p for p in shown if p not in taken]
+        seen = set(shown)
+        hidden_rows = [r for r in self._rows if r.pr not in seen]
+        hidden = [r.pr for r in columns.order(hidden_rows, self._states, self._order_mode)]
+        return first + rest + hidden
+
+    def _start_snapshots(self) -> None:
+        self._snap_token += 1
+        self._snap_done = 0
+        self._snap_total = len(self._rows) if self.concurrency else 0
+        self._paint_bar()
+        if self._rows and self.concurrency:
+            self.run_worker(
+                self._load_snapshots(self._snap_token, self._snapshot_order()), group="snapshots"
+            )
+
+    async def _load_snapshots(self, token: int, order: list[str]) -> None:
+        """At most ``self.concurrency`` snapshot reads at once; a failure marks only its row."""
+        queue = deque(order)
+
+        async def lane() -> None:
+            while queue and token == self._snap_token:
+                pr = queue.popleft()
+                async with self._snap_slots:  # held until the read ends, even after a reload
+                    if token != self._snap_token:
+                        return
+                    try:
+                        snap = await in_thread(self.source.snapshot, pr)
+                        state = columns.RowState(columns.LOADED, columns.summarize(snap))
+                    except ForgectlError as err:
+                        state = columns.RowState(columns.FAILED, error=safe.line(err.code, 60))
+                    except Exception as exc:  # a source bug or bad data marks the row only
+                        state = columns.RowState(columns.FAILED, error=self._internal(exc))
+                if token != self._snap_token:  # a newer list replaced this one
+                    return
+                self._snapshot_arrived(pr, state)
+
+        await asyncio.gather(*(lane() for _ in range(self.concurrency)))
+
+    def _snapshot_arrived(self, pr: str, new: columns.RowState) -> None:
+        """Store a row's new state. Only that row's text is redrawn unless the snapshot moves
+        it: into or out of the filtered list, or to another place in the attention order."""
+        old = self._state(self._row_by_pr[pr]) if pr in self._row_by_pr else columns.RowState()
+        self._states[pr] = new
+        self._snap_done += 1
+        row = self._row_by_pr.get(pr)
+        if row is None:
+            self._paint_bar()
+            return
+        moves = columns.matches(row, old, self._list_filters) != columns.matches(
+            row, new, self._list_filters
+        )
+        if self._order_mode == columns.SORT_ATTENTION:
+            moves = moves or columns.attention_rank(old) != columns.attention_rank(new)
+        if moves:
+            self._apply_filter()
+            return
+        if pr not in self._shown_prs:  # hidden before and after: nothing to draw
+            self._paint_bar()
+            return
+        olist = self.query_one("#list", OptionList)
+        index = self._shown_prs.index(pr)
+        try:
+            parts = columns.cells(row, new, self.clock())
+            olist.replace_option_prompt_at_index(
+                index, safe.plain(columns.row_line(parts, self._pr_width))
+            )
+        except Exception as exc:  # bad data reaches the status line, not a traceback
+            self._list_note = self._internal(exc)
+            self._status("")
+        self._paint_bar()
 
     def _highlighted_row(self) -> Row | None:
         index = self.query_one("#list", OptionList).highlighted
@@ -312,6 +478,17 @@ class BrowseApp(App[None]):
     def action_quit_app(self) -> None:
         self.exit()
 
+    def action_sort(self) -> None:
+        modes = columns.SORT_MODES
+        self._order_mode = modes[(modes.index(self._order_mode) + 1) % len(modes)]
+        self._apply_filter()
+        self._status(f"order: {self._order_mode}")
+
+    def action_toggle_filter(self, name: str) -> None:
+        self._list_filters ^= {name}
+        self._apply_filter()
+        self._status(f"filters: {columns.filters_text(self._list_filters) or 'none'}")
+
     def action_help(self) -> None:
         self.push_screen(HelpScreen())
 
@@ -336,7 +513,7 @@ class BrowseApp(App[None]):
 
     def action_refresh_selected(self) -> None:
         """The PR in the visible detail pane, else the highlighted row's PR (opening it)."""
-        # TODO(#59): refresh only what may have changed, and the automatic refresh.
+        # todo(#59): refresh only what may have changed, and the automatic refresh.
         if self._detail_pr is not None and self._detail_shown():
             self._start_detail(self._detail_pr)
             return
@@ -347,7 +524,7 @@ class BrowseApp(App[None]):
         self._start_detail(row.pr)
 
     def action_reload_list(self) -> None:
-        # TODO(#59): R refreshes all: `prs`, then every row's snapshot; selection and scroll
+        # todo(#59): R refreshes all: `prs`, then every row's snapshot; selection and scroll
         # position survive any refresh. Until the rows carry snapshots, R reloads both `prs`
         # calls and then the PR in the visible detail pane.
         if self._loading:

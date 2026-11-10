@@ -85,6 +85,7 @@ def make_snapshot(
     comments: list[dict[str, Any]] | None = None,
     reviews: list[dict[str, Any]] | None = None,
     branch: str = "feature",
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     item = make_item(number, repo=repo, title=title, login=login)
     checks = [make_check()] if checks is None else checks
@@ -166,6 +167,7 @@ def make_snapshot(
         "pushed_at_source": None,
     }
     snap["base"] = {"ref": "main", "sha": SHA_B, "is_default": True}
+    snap.update(extra or {})
     return snap
 
 
