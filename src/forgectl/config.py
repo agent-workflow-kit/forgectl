@@ -263,11 +263,25 @@ DetailSection = Literal["facts", "description", "changes", "ci", "comments", "re
 DetailSections = Annotated[tuple[DetailSection, ...], BeforeValidator(_as_tuple)]
 
 
+def _browse_query(value: str) -> str:
+    """The text of a ``browse`` query that parses; the error carries the position."""
+    from .tui import query  # here: the parser has no dependencies, and nothing imports it back
+
+    result = query.parse(value)
+    if isinstance(result, query.ParseError):
+        raise ValueError(str(result))
+    return value
+
+
+BrowseQuery = Annotated[str, AfterValidator(_browse_query)]
+
+
 class Browse(_Model):
     refresh_interval: IntervalOrOff = 120.0  # seconds between automatic refreshes; 0 is off
     full_refresh_every: Annotated[int, Field(strict=True, ge=1, le=1000)] = 5
     concurrency: Annotated[int, Field(strict=True, ge=1, le=16)] = 4  # snapshot reads at once
     detail_collapsed: DetailSections = ("changes",)  # detail pane sections that start collapsed
+    query: BrowseQuery = ""  # the starting filter and order of the list; empty: none
 
 
 class Hooks(_Model):
@@ -770,6 +784,14 @@ def _config_home(env: Mapping[str, str]) -> Path:
         except (KeyError, OSError):
             raise _invalid("HOME", "cannot locate the home directory") from None
     return Path(home) / ".config"
+
+
+def config_directory(config_path: str | None, env: Mapping[str, str]) -> Path:
+    """The directory that holds the config file in use, whose ``config.d`` is read after it:
+    ``--config``'s directory, else ``<config home>/forgectl``."""
+    if config_path is not None:
+        return Path(os.path.abspath(config_path)).parent
+    return _config_home(env) / "forgectl"
 
 
 # --- the result ----------------------------------------------------------------------------------
