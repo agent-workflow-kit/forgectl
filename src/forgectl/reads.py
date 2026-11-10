@@ -41,6 +41,8 @@ T = TypeVar("T")
 #: Backoff for a retried read: ``BACKOFF_FIRST`` seconds, doubling, at most ``BACKOFF_CAP``.
 BACKOFF_FIRST = 1.0
 BACKOFF_CAP = 8.0
+#: A wait inside a cancellable read is slept in slices of this many seconds.
+CANCEL_SLICE = 0.1
 #: A wait must leave at least this much of the budget for the call after it.
 MIN_LEFT = 1.0
 #: What a retry covers: 429 and secondary limits (``rate_limited``), 5xx and a host answer that
@@ -77,7 +79,16 @@ class ReadEnv:
     def _wait(self, seconds: float) -> None:
         # the wait is part of the command's budget, so retrying never overruns it
         with self.gateway.budget.spending():
-            self.sleep(seconds)
+            if not self.gateway.cancellable:
+                self.sleep(seconds)
+                return
+            left = seconds  # a cancellable read waits in slices, so a cancel ends the wait early
+            while left > 0:
+                self.gateway.check_cancelled()
+                step = min(left, CANCEL_SLICE)
+                self.sleep(step)
+                left -= step
+            self.gateway.check_cancelled()
 
     def wait(self, seconds: float) -> None:
         """Wait inside the command's budget, as a retry does (a caller polling a verification)."""

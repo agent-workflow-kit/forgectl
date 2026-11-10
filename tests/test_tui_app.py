@@ -18,7 +18,7 @@ from textual.content import Content
 from textual.pilot import Pilot
 from textual.widgets import Input, OptionList, Static
 
-from forgectl.errors import ForgectlError
+from forgectl.errors import Cancelled, ForgectlError
 from forgectl.tui import render, sections
 from forgectl.tui.app import BrowseApp, HelpScreen
 from forgectl.tui.opener import BrowserOpener
@@ -693,6 +693,18 @@ def test_errors_from_the_source_reach_the_status_line_inert() -> None:
         assert app.is_running
 
     drive(Failing(), script)
+
+
+def test_a_cancelled_list_load_ends_quietly() -> None:
+    class Closed(FakeSource):
+        def prs(self, **kwargs: Any) -> dict[str, Any]:
+            raise Cancelled("prs")
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        assert "internal" not in content_of(app, "#status").plain
+        assert app.is_running
+
+    drive(Closed(), script)
 
 
 def test_partial_errors_and_incomplete_lists_show_in_the_status_line() -> None:

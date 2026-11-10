@@ -48,11 +48,12 @@ import threading
 import time
 import urllib.parse
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from .errors import ForgectlError
+from .errors import Cancelled, ForgectlError
 from .sanitize import sanitize_line
 
 if TYPE_CHECKING:  # the watchdog imports this module with the standard library only
@@ -555,6 +556,7 @@ class Runner(Protocol):
         max_stdout: int,
         max_stderr: int,
         on_start: Callable[[int, int], None] | None,
+        on_reap: Callable[[int, int], None] | None = None,
     ) -> ProcessResult: ...
 
 
@@ -578,6 +580,7 @@ class _Leader:
         self.pidfd: int | None = None
         self.kqueue: Any = None
         self.exited = False
+        self.on_reap: Callable[[int, int], None] | None = None
         self.mode = "waitid" if _HAS_WAITID else "kqueue" if _HAS_KQUEUE else "poll"
         if self.mode == "waitid" and hasattr(os, "pidfd_open"):
             with contextlib.suppress(OSError):
@@ -604,6 +607,7 @@ class _Leader:
         """A leader that opens nothing: for cleanup when building the real one failed."""
         leader = cls.__new__(cls)
         leader.proc, leader.pidfd, leader.kqueue, leader.exited = proc, None, None, False
+        leader.on_reap = None
         leader.mode = "waitid" if _HAS_WAITID else "poll"
         return leader
 
@@ -662,7 +666,13 @@ class _Leader:
 
     def reap(self) -> None:
         try:
-            self.proc.wait(timeout=REAP_WAIT)
+            if self.on_reap is not None:  # the owner stops tracking the group while the PID is held
+                try:
+                    self.on_reap(self.proc.pid, self.proc.pid)
+                finally:
+                    self.proc.wait(timeout=REAP_WAIT)
+            else:
+                self.proc.wait(timeout=REAP_WAIT)
         except subprocess.TimeoutExpired:
             raise _error(
                 "internal", f"child {self.proc.pid} did not exit after SIGKILL; not reaped"
@@ -779,6 +789,7 @@ def run_process(
     max_stdout: int = MAX_STDOUT,
     max_stderr: int = MAX_STDERR,
     on_start: Callable[[int, int], None] | None = None,
+    on_reap: Callable[[int, int], None] | None = None,
 ) -> ProcessResult:
     """Run ``argv`` (no shell) as the leader of a new process group and collect its output.
 
@@ -788,7 +799,9 @@ def run_process(
     SIGHUP held until the leader is reaped, and propagates: a second signal or a failed reap is
     noted on it, except that a signal during the cleanup of an ordinary error is raised in its
     place (the error is its context), so a signal is never lost. Only the PID started here, and
-    the group it leads, are ever signaled; the leader is reaped last.
+    the group it leads, are ever signaled; the leader is reaped last. ``on_reap(pid, pgid)`` runs
+    just before the reap, while the leader is still unreaped, so an owner that signals the group
+    on its own can stop doing so before the number is free.
     """
     if not timeout > 0 or math.isinf(timeout):
         raise ValueError("timeout must be positive and finite")
@@ -805,6 +818,7 @@ def run_process(
     masked = True
     try:
         leader = _Leader(proc)
+        leader.on_reap = on_reap
         masked = False
         _restore_signals(old_mask)  # a signal held during the spawn is delivered here, covered
         if on_start is not None:
@@ -1328,6 +1342,27 @@ class ExecutableMissing(Exception):
         self.name = name
 
 
+@dataclass(frozen=True)
+class CallScope:
+    """What a caller that owns a read wants of every gateway built in its thread meanwhile.
+
+    ``cancelled`` is checked before each host call (true: ``Cancelled``, nothing sent).
+    ``on_spawn(pid, pgid)`` sees each child at launch, and ``on_done()`` runs when that call has
+    ended and its child is reaped, so the caller knows which groups are alive. ``on_reap(pid,
+    pgid)`` runs just before the runner reaps a child, while its PID is still held. The scope
+    applies to the read paths only (``api`` and ``run_external``), never to ``spawn_detached``.
+    """
+
+    cancelled: Callable[[], bool] | None = None
+    on_spawn: Callable[[int, int], None] | None = None
+    on_done: Callable[[], None] | None = None
+    on_reap: Callable[[int, int], None] | None = None
+
+
+CALL_SCOPE: ContextVar[CallScope | None] = ContextVar("forgectl_call_scope", default=None)
+"""Set by ``tui.source_live`` around one read on a worker thread; read when a Gateway is built."""
+
+
 class Gateway:
     """One command's forge access: a budget, the configured executables and a runner.
 
@@ -1353,11 +1388,37 @@ class Gateway:
         self.budget = Budget(config.timeout_for(None) if timeout is None else timeout)
         self._environ = environ
         self._runner = runner
-        self._on_spawn = on_spawn
+        scope = CALL_SCOPE.get()
+        self._cancelled = None if scope is None else scope.cancelled
+        self._on_done = None if scope is None else scope.on_done
+        self._on_reap = None if scope is None else scope.on_reap
+        self._on_spawn = on_spawn  # the explicit one serves every spawn, including detached
+        self._read_spawn = on_spawn if on_spawn is not None or scope is None else scope.on_spawn
         self._max_stdout = max_stdout
         self._max_stderr = max_stderr
         #: The rate-limit headers of every answer this command received, success or failure.
         self.rate_readings: list[RateReading] = []
+
+    def _reap_kwargs(self) -> dict[str, Any]:
+        """``on_reap`` for the runner, only when a scope asked (a plain runner may not take it)."""
+        return {} if self._on_reap is None else {"on_reap": self._on_reap}
+
+    @property
+    def cancellable(self) -> bool:
+        """Whether a caller's scope can cancel this gateway's reads."""
+        return self._cancelled is not None
+
+    def check_cancelled(self) -> None:
+        """Raise ``Cancelled`` when the read this gateway serves was cancelled: called before
+        each host call, so an abandoned read makes no further call."""
+        if self._cancelled is None:
+            return
+        try:
+            stop = self._cancelled()
+        except Exception as exc:  # the caller's callable: its text may hold anything
+            raise _error("internal", f"cancelled: {type(exc).__name__}") from exc
+        if stop:
+            raise Cancelled("cancelled")
 
     def lowest_rate(self, host: str | None = None) -> RateReading | None:
         """The reading with the lowest ``remaining`` (of ``host``, or of every host); the
@@ -1414,6 +1475,7 @@ class Gateway:
         endpoint = build_endpoint(segments, query)
         stdin = None if body is None else _encode_body(body)
         extra = _header_args(headers, has_body=body is not None)
+        self.check_cancelled()  # before the token lookup, which may start a process
         exe = self._executable(target)
         argv = self._argv(exe, target, method, endpoint, extra, has_body=body is not None)
         remaining = self.budget.remaining()
@@ -1435,13 +1497,16 @@ class Gateway:
                         timeout=remaining,
                         max_stdout=self._max_stdout,
                         max_stderr=self._max_stderr,
-                        on_start=self._on_spawn,
+                        on_start=self._read_spawn,
+                        **self._reap_kwargs(),
                     )
             except (FileNotFoundError, PermissionError, NotADirectoryError):
                 raise self._missing(target) from None
             finally:
                 if write:
                     self.budget.grant_write_reserve()
+                if self._on_done is not None:
+                    self._on_done()
         return self._classify(
             result,
             target,
@@ -1739,6 +1804,7 @@ class Gateway:
         programming error (``ValueError``). Raises ``ExecutableMissing`` when ``argv[0]`` is not on
         an absolute ``PATH`` entry.
         """
+        self.check_cancelled()
         if not argv or not all(isinstance(a, str) and "\0" not in a for a in argv):
             raise ValueError("argv must be non-empty strings without NUL")
         if mode not in ("hook", "browser", "token_command"):
@@ -1764,10 +1830,14 @@ class Gateway:
                     timeout=timeout,
                     max_stdout=max_stdout,
                     max_stderr=max_stderr,
-                    on_start=self._on_spawn,
+                    on_start=self._read_spawn,
+                    **self._reap_kwargs(),
                 )
             except (FileNotFoundError, PermissionError, NotADirectoryError):
                 raise ExecutableMissing(argv[0]) from None
+            finally:
+                if self._on_done is not None:
+                    self._on_done()
 
     def inherited_environment(
         self, token_env_names: Collection[str] = (), extra_env: Mapping[str, str] | None = None
