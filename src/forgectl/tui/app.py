@@ -29,8 +29,11 @@ from textual.widgets.option_list import Option
 
 from forgectl.errors import ForgectlError
 
-from . import columns, render, safe, sections, style
+from . import columns, filtering, render, safe, sections, style
+from . import query as ql
 from .opener import Opener, OpenRefused, is_openable
+from .query_screen import PanelActions, QueryScreen
+from .query_store import QueryStore
 from .refresh import BACKOFF_FACTOR, RateLimits, host_of, needs_snapshot
 from .source import DataSource, Listing, Row, load_list
 from .source_live import Cancelled
@@ -68,15 +71,22 @@ HELP_KEYS: list[tuple[str, str]] = [
     ),
     (
         "s",
-        "switch the order: by repo (default) or needs-attention first (also drops a column sort)",
+        "switch the order: by repo (default) or needs-attention first (also drops a column or "
+        "ORDER BY sort)",
     ),
-    ("a", "filter: authored by me"),
-    ("v", "filter: review requested from me"),
-    ("f", "filter: CI failing"),
+    (
+        "F",
+        "the query panel: a form and a query line in step, e.g. `ci IN (failing, pending) AND "
+        "NOT draft ORDER BY age DESC`; enter applies, escape cancels, Up and Down in the line "
+        "step through the history",
+    ),
+    ("D", "set the current query as the default (writes config.d/90-browse-query.yaml)"),
+    ("a", "quick filter: authored by me (a preset that edits the query)"),
+    ("v", "quick filter: review requested from me"),
+    ("f", "quick filter: CI failing"),
     (
         "n",
-        "filter: new comments from others "
-        "(filters combine as an intersection; the status bar names them)",
+        "quick filter: new comments from others (each key adds its term with AND, or removes it)",
     ),
     ("r", "refresh selected (the PR in the detail pane, else the highlighted row only)"),
     (
@@ -285,6 +295,8 @@ class BrowseApp(App[None]):
         Binding("o", "open", "open"),
         Binding("s", "sort", "order"),
         Binding("H", "header_focus", "header"),
+        Binding("F", "query", "query"),
+        Binding("D", "set_default", "set default"),
         Binding("a", "toggle_filter('authored')", "authored"),
         Binding("v", "toggle_filter('requested')", "requested"),
         Binding("f", "toggle_filter('ci-failing')", "ci failing"),
@@ -310,6 +322,8 @@ class BrowseApp(App[None]):
         refresh_interval: float = 0,
         full_refresh_every: int = DEFAULT_FULL_REFRESH_EVERY,
         detail_collapsed: Iterable[str] = sections.DEFAULT_COLLAPSED,
+        query: str = "",
+        store: QueryStore | None = None,
     ) -> None:
         super().__init__()
         # Seconds between automatic refreshes; 0, less, or not a number means off.
@@ -343,11 +357,16 @@ class BrowseApp(App[None]):
         self._states: dict[str, columns.RowState] = {}
         self._order_mode = columns.SORT_REPO  # the preset `s` cycles
         # The one sort state (a column sort replaces the preset while it is set). Set it with
-        # ``set_sort``. todo(#105): the query line's ORDER BY sets this same tuple.
-        self._sort: columns.SortState = ()
+        # ``set_sort``: the header and the query's ORDER BY both do. With ``_where`` it is the
+        # active query.
+        start = ql.parse(query)
+        start = start if isinstance(start, ql.Query) else ql.Query()  # config checked it already
+        self._sort: columns.SortState = filtering.sort_of(start.order)
+        self._where: ql.Node | None = start.where
+        self._default_query = ql.format_query(start)  # `browse.query`, or what "set default" wrote
+        self._store = store or QueryStore()  # without one, the history stays in memory
         self._cursor = "pr"  # the header cursor's column
         self._rebuild_pending = False  # a rebuild after snapshot arrivals is queued
-        self._list_filters: set[str] = set()
         self._shown_prs: list[str] = []  # the PRs in the option list, in order
         self._snap_token = 0  # a newer list load stops the snapshot pool of an older one
         # One limiter for every round: reads of an older round still in flight keep their slots,
@@ -583,13 +602,13 @@ class BrowseApp(App[None]):
             visible = [
                 r
                 for r in ordered
-                if columns.matches(r, self._state(r), self._list_filters)
+                if filtering.matches(self._where, r, self._state(r), self.clock())
                 and (not needle or needle in render.row_haystack(r))
             ]
             now = self.clock()
             parts = [columns.cells(r, self._state(r), now) for r in visible]
             width = min(columns.PR_MAX_WIDTH, max((cell_len(p[0]) for p in parts), default=0))
-            width = max(width, cell_len(columns.COLUMNS[0].header) + 1)  # room for an arrow
+            width = max(width, cell_len(columns.COLUMNS[0].header) + 2)  # an arrow and its position
             self._pr_width = width
             self._painted_view = self._view_width()
             self._hoffset = columns.clamp_offset(self._hoffset, width, self._painted_view)
@@ -627,8 +646,9 @@ class BrowseApp(App[None]):
         rates = self._rates.text(self.clock())
         if rates:  # early, so a narrow terminal clips the later parts first
             parts.append(rates)
-        if self._list_filters:
-            parts.append(f"filters: {columns.filters_text(self._list_filters)}")
+        text = self.query_text()
+        if text:
+            parts.append(f"query: {text}")
         if self._snap_total:
             failed = sum(1 for s in self._states.values() if s.status == columns.FAILED)
             progress = f"snapshots {self._snap_done}/{self._snap_total}"
@@ -772,11 +792,13 @@ class BrowseApp(App[None]):
         if old.changed and not new.stale:
             new.changed = True  # a second read of identical data must not lose the highlight
         self._states[pr] = new
+        self._refresh_panel()
         if row is None:
             self._paint_bar()
             return
-        moves = columns.matches(row, old, self._list_filters) != columns.matches(
-            row, new, self._list_filters
+        now = self.clock()
+        moves = filtering.matches(self._where, row, old, now) != filtering.matches(
+            self._where, row, new, now
         )
         if self._sort:
             moves = moves or columns.sort_values(self._sort, row, old) != columns.sort_values(
@@ -835,12 +857,95 @@ class BrowseApp(App[None]):
     def _order_text(self) -> str:
         return columns.sort_text(self._sort) or self._order_mode
 
-    def set_sort(self, sort: columns.SortState) -> None:
-        """The one way to change the sort (the header, and later the query's ORDER BY): rebuild
-        the list, keep the highlighted PR, and name the order in the status."""
+    def set_sort(self, sort: columns.SortState, *, announce: bool = True) -> None:
+        """The one way to change the sort (the header and the query's ORDER BY): rebuild the
+        list, keep the highlighted PR, and name the order in the status."""
         self._sort = sort
         self._apply_filter()
-        self._status(f"order: {self._order_text()}")
+        if announce:
+            self._status(f"order: {self._order_text()}")
+
+    # -- the query --------------------------------------------------------------------------
+
+    def current_query(self) -> ql.Query:
+        return ql.Query(self._where, filtering.order_of(self._sort))
+
+    def query_text(self) -> str:
+        return ql.format_query(self.current_query())
+
+    def set_query(self, q: ql.Query, note: str | None = None) -> None:
+        """Make ``q`` the active query: its filter, and its ORDER BY through ``set_sort``."""
+        self._where = q.where
+        self.set_sort(filtering.sort_of(q.order), announce=False)
+        self._status(note or f"query: {self.query_text() or 'none'}")
+
+    def action_query(self) -> None:
+        self.push_screen(QueryScreen(self._panel_actions()))
+
+    def action_set_default(self) -> None:
+        self._set_default(self.query_text())
+
+    def _panel_actions(self) -> PanelActions:
+        return PanelActions(
+            text=self.query_text(),
+            default=lambda: self._default_query,
+            history=lambda: list(self._store.entries),
+            host_note=(
+                "List (from the host, fixed): PRs authored by me and PRs with a review requested "
+                "from me. The query only narrows them."
+            ),
+            apply=self._panel_apply,
+            clear=lambda: self.set_query(ql.Query(), "query cleared"),
+            set_default=self._set_default,
+            reset_default=self._reset_default,
+            report=self._panel_report,
+        )
+
+    def _panel_apply(self, text: str) -> None:
+        parsed = ql.parse(text)
+        if not isinstance(parsed, ql.Query):  # the panel checked; never apply what does not parse
+            self._status(f"not applied: {parsed}")
+            return
+        self.set_query(parsed)
+        note = self._store.add(text)
+        if note:
+            self._status(f"query: {self.query_text() or 'none'}; {note}")
+
+    def _reset_default(self) -> None:
+        parsed = ql.parse(self._default_query)
+        self.set_query(
+            parsed if isinstance(parsed, ql.Query) else ql.Query(), "query reset to the default"
+        )
+
+    def _set_default(self, text: str) -> str:
+        """Write ``text`` as ``browse.query`` into the drop-in; the message is also the status."""
+        try:
+            path = self._store.write_default(text)
+        except (OSError, ValueError) as err:
+            message = f"default not saved: {safe.line(getattr(err, 'strerror', None) or err, 100)}"
+        else:
+            canonical = ql.canonical(text)
+            self._default_query = canonical if isinstance(canonical, str) else ""
+            message = f"default saved to {safe.line(str(path), 200)}"
+        self._status(message)
+        return message
+
+    def _refresh_panel(self) -> None:
+        """A snapshot arrived: an open query panel counts again."""
+        top = self.screen_stack[-1] if self.screen_stack else None
+        if isinstance(top, QueryScreen) and top.is_mounted:
+            top.refresh_report()
+
+    def _panel_report(self, where: ql.Node | None) -> str:
+        now = self.clock()
+        needle = self._filter.strip().lower()  # the `/` text filter, as on screen
+        rows = [r for r in self._rows if not needle or needle in render.row_haystack(r)]
+        shown = sum(1 for r in rows if filtering.matches(where, r, self._state(r), now))
+        undecided = filtering.unknown_count(where, rows, self._states, now)
+        text = f"{shown} of {len(rows)} PRs match" + (" (with the / text filter)" if needle else "")
+        if undecided:
+            text += f"; {undecided} hidden because their snapshot has not loaded"
+        return text
 
     def _sortable_cursor(self) -> str:
         return self._cursor if self._cursor in columns.SORTABLE else columns.SORTABLE[0]
@@ -1109,9 +1214,12 @@ class BrowseApp(App[None]):
         self._status(f"order: {self._order_text()}")
 
     def action_toggle_filter(self, name: str) -> None:
-        self._list_filters ^= {name}
-        self._apply_filter()
-        self._status(f"filters: {columns.filters_text(self._list_filters) or 'none'}")
+        """A quick filter is a preset: it switches its term in the query, which the panel shows."""
+        toggled = ql.toggle_term(self.current_query(), ql.PRESETS[name])
+        if not ql.fits(toggled):  # e.g. the 51st condition: the query stays as it was
+            self._status("not toggled: the query would be too long or have too many conditions")
+            return
+        self.set_query(toggled)
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen())

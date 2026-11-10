@@ -17,6 +17,15 @@ from forgectl.tui.opener import BrowserOpener, OpenRefused, is_openable
 
 
 @pytest.fixture(autouse=True)
+def no_ambient_browser(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Whatever the invoking shell exports, no test here sees it: a developer's BROWSER or
+    DISPLAY must not change which program the opener picks. A test that needs one passes it in
+    the environment it hands ``BrowserOpener``."""
+    for name in ("BROWSER", "DISPLAY", "WAYLAND_DISPLAY"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def private_home(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """The harness refuses a child without a HOME under the test's private directory; the opener
     passes only what its allowlist finds in the test's environment, so give each child the
@@ -297,3 +306,11 @@ def test_no_token_variable_of_any_kind_reaches_the_opener(
     assert set(opener._env()) == {"PATH", "HOME"}
     opener.open("https://github.com/acme/widgets/pull/1")
     _wait_for(log)
+
+
+@linux_only
+def test_the_default_environment_is_the_processs_own_so_the_fixture_clears_it() -> None:
+    environ = BrowserOpener()._env()
+    assert "BROWSER" not in environ
+    assert "DISPLAY" not in environ
+    assert "WAYLAND_DISPLAY" not in environ
