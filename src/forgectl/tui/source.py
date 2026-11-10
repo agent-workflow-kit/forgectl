@@ -45,6 +45,7 @@ class Listing:
     rows: list[Row]
     complete: bool
     errors: list[str]
+    rate_limits: list[Any] = field(default_factory=list)  # the ``rate_limit`` of each answer
 
 
 def load_list(source: DataSource) -> Listing:
@@ -56,6 +57,7 @@ def load_list(source: DataSource) -> Listing:
     rows: dict[str, Row] = {}
     complete = True
     errors: list[str] = []
+    rate_limits: list[Any] = []
     for role, author, requested in (("requested", None, "me"), ("authored", "me", None)):
         try:
             answer = source.prs(author=author, review_requested_from=requested)
@@ -64,6 +66,7 @@ def load_list(source: DataSource) -> Listing:
             errors.append(f"{role}: {err.code}: {err.message}")
             continue
         complete = complete and bool(answer.get("complete", False))
+        rate_limits.append(answer.get("rate_limit"))
         for err_item in answer.get("errors") or []:
             text = f"{err_item.get('host')}: {err_item.get('code')}: {err_item.get('message')}"
             if text not in errors:  # both calls ask every host, so a host fails twice
@@ -74,4 +77,4 @@ def load_list(source: DataSource) -> Listing:
     # updated_at descending, then pr ascending (two stable sorts)
     ordered = sorted(rows.values(), key=lambda r: r.pr)
     ordered.sort(key=lambda r: str(r.item.get("updated_at", "")), reverse=True)
-    return Listing(rows=ordered, complete=complete, errors=errors)
+    return Listing(rows=ordered, complete=complete, errors=errors, rate_limits=rate_limits)

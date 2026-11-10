@@ -67,6 +67,9 @@ class RowState:
     status: str = LOADING
     summary: Summary | None = None
     error: str | None = None  # short and sanitized: "code" of the failed snapshot
+    stale: bool = False  # the last refresh failed; ``summary`` is the last good data
+    refreshing: bool = False  # a refresh is under way; ``summary`` is the previous data
+    changed: bool = False  # the last refresh changed what the row shows; cleared by a keypress
 
 
 def _d(value: Any) -> dict[str, Any]:
@@ -184,6 +187,13 @@ def cells(row: Row, state: RowState, now: datetime) -> list[str]:
     else:
         ci, approvals, decision, comments = "·", "", "", "loading..."
         badge = badge_cell(item, None)
+    marker = ""
+    if state.refreshing:
+        marker = "[refreshing]"
+    elif state.stale:
+        marker = f"[stale: {state.error or 'refresh failed'}]"
+    elif state.changed:
+        marker = "[changed]"
     return [
         safe.line(item.get("pr")),
         badge,
@@ -195,6 +205,7 @@ def cells(row: Row, state: RowState, now: datetime) -> list[str]:
         safe.line(item.get("title")),
         "@" + _login(item.get("author")),
         "+".join(sorted(row.roles)),
+        marker,
     ]
 
 
