@@ -52,6 +52,7 @@ HANDLER_MODULES: tuple[str, ...] = (
     "forgectl.snapshot_reads",  # snapshot, comments, reviews, ci (#12)
     "forgectl.exportcmd",
     "forgectl.merge",  # merge (#21)
+    "forgectl.browse",
 )
 
 _loaded = False
