@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import signal
+from argparse import Namespace
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -12,9 +14,10 @@ from forgectl import registry
 from forgectl.cli import main
 from forgectl.errors import EXIT_BY_CODE, ForgectlError, refused
 from forgectl.humanactions import Tty, require_confirmation
+from forgectl.output import would_refuse_result
 from forgectl.registry import Invocation
 
-from .cli_schema_check import validate
+from .harness.schemas import validate
 
 PR = "github.com/o/r#1"
 H1 = "a" * 40
@@ -267,14 +270,144 @@ HOSTILE: list[tuple[str, list[str]]] = [
 ]
 
 
-@pytest.mark.parametrize("argv", [a for _, a in HOSTILE], ids=[n for n, _ in HOSTILE])
+HOSTILE_PR = frozenset({"empty pr", "double dash then flag as pr"})  # a bad PR is invalid_pr
+
+
+@pytest.mark.parametrize(("name", "argv"), HOSTILE, ids=[n for n, _ in HOSTILE])
 def test_hostile_input_is_usage_error_exit_2(
-    argv: list[str], capsys: pytest.CaptureFixture[str]
+    name: str, argv: list[str], capsys: pytest.CaptureFixture[str]
 ) -> None:
     code, out, err = run(capsys, ["--json", *argv])
     assert code == 2, (out, err)
-    assert envelope(out)["code"] in {"usage"}
-    assert "usage" in err
+    code_name = envelope(out)["code"]
+    assert code_name == ("invalid_pr" if name in HOSTILE_PR else "usage")
+    assert code_name in err
+
+
+# `-h` is the help flag only when it is exactly `-h`; `-h<anything>` must not be read as it.
+URL_LOOKALIKE = "-https://github.com/o/r/pull/1"
+HELP_LOOKALIKES = ["-hh", "-hx", "-h=x", URL_LOOKALIKE, "-help", "-h-h"]
+# Every subparser shares the same `_Parser`, so the full token list runs against one
+# representative command and every command gets the single URL-shaped token.
+REPRESENTATIVE = "show"
+
+
+@pytest.fixture
+def private_home(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+
+
+def _help_free(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, str, str]:
+    try:
+        code = main(["--json", *argv], tty=NO_TTY)
+    except SystemExit as exc:  # a help or version exit leaks out of main
+        pytest.fail(f"{argv} exited via SystemExit({exc.code})")
+    out, err = capsys.readouterr()
+    assert "usage: forgectl" not in out, out
+    return code, out, err
+
+
+@pytest.mark.usefixtures("private_home")
+@pytest.mark.parametrize("bad", HELP_LOOKALIKES)
+def test_help_lookalike_after_the_command_is_usage(
+    bad: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = _help_free([*VALID[REPRESENTATIVE], bad], capsys)
+    assert code == 2, (out, err)
+    assert envelope(out)["code"] == "usage"
+
+
+@pytest.mark.usefixtures("private_home")
+@pytest.mark.parametrize("bad", HELP_LOOKALIKES)
+def test_help_lookalike_in_pr_position_is_usage(
+    bad: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    valid = VALID[REPRESENTATIVE]
+    code, out, err = _help_free([valid[0], bad, *valid[1:]], capsys)
+    assert code == 2, (out, err)
+    assert envelope(out)["code"] == "usage"
+
+
+@pytest.mark.usefixtures("private_home")
+@pytest.mark.parametrize("command", sorted(VALID))
+def test_url_lookalike_in_pr_position_is_usage_for_every_command(
+    command: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    valid = VALID[command]
+    code, out, err = _help_free([valid[0], URL_LOOKALIKE, *valid[1:]], capsys)
+    assert code == 2, (out, err)
+    assert envelope(out)["code"] == "usage"
+
+
+# The PR-position and before-command tests are the ones that catch #51. The option-value,
+# `--timeout`/`--config` value and `--` tests pin behavior argparse already gives (it reads
+# `-hx` as an option, not a value, for nargs=None), as a guard against regressions.
+@pytest.mark.usefixtures("private_home")
+@pytest.mark.parametrize("bad", HELP_LOOKALIKES)
+@pytest.mark.parametrize(
+    "argv",
+    [
+        [],
+        ["--timeout", "{bad}"],
+        ["--config", "{bad}"],
+    ],
+    ids=["before-command", "as-timeout-value", "as-config-value"],
+)
+def test_help_lookalike_in_global_position_is_usage(
+    argv: list[str], bad: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    argv = [a.replace("{bad}", bad) for a in argv] or [bad]
+    code, out, err = _help_free([*argv, "whoami"], capsys)
+    assert code == 2, (out, err)
+    assert envelope(out)["code"] == "usage"
+
+
+@pytest.mark.usefixtures("private_home")
+@pytest.mark.parametrize("bad", HELP_LOOKALIKES)
+def test_help_lookalike_as_an_option_value_is_usage(
+    bad: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for argv in (
+        ["comment", PR, "--body-file", bad],
+        ["merge", PR, "--expected-head", bad, "--expected-base", "main"],
+        ["prs", "--author", bad],
+        ["prs", "--author", "me", "--limit", bad],
+    ):
+        code, out, err = _help_free(argv, capsys)
+        assert code == 2, (argv, out, err)
+        assert envelope(out)["code"] == "usage"
+
+
+@pytest.mark.usefixtures("private_home")
+@pytest.mark.parametrize("bad", HELP_LOOKALIKES)
+def test_help_lookalike_after_double_dash_is_never_help(
+    bad: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # After `--` it is a positional value, never a flag; it must not print help or exit 0.
+    code, out, err = _help_free(["show", "--", bad], capsys)
+    assert code != 0, (out, err)
+
+
+@pytest.mark.usefixtures("private_home")
+@pytest.mark.parametrize(
+    ("command", "flag"),
+    [(REPRESENTATIVE, "--help"), *((command, "-h") for command in sorted(VALID))],
+)
+def test_exact_help_flag_still_exits_zero(
+    command: str, flag: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main([command, flag], tty=NO_TTY)
+    assert exc.value.code == 0
+    assert "usage: forgectl" in capsys.readouterr().out
+
+
+@pytest.mark.usefixtures("private_home")
+@pytest.mark.parametrize("bad", ["-v", "-q", "-V", "-j", "-vq", "-hv", "-vh"])
+def test_no_other_short_flags_exist(bad: str, capsys: pytest.CaptureFixture[str]) -> None:
+    code, out, err = _help_free(["show", PR, bad], capsys)
+    assert code == 2, (out, err)
 
 
 def test_usage_error_without_json_prints_text_only(capsys: pytest.CaptureFixture[str]) -> None:
@@ -306,10 +439,10 @@ def test_error_message_and_stderr_are_sanitized(capsys: pytest.CaptureFixture[st
 def test_parse_error_never_echoes_raw_control_characters(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    code, out, err = run(capsys, ["--json", "nope\x1b[31m‮"])
+    code, out, err = run(capsys, ["--json", "nope\x1b[31m\u202e"])
     assert code == 2
     assert "\x1b" not in out + err
-    assert "‮" not in out + err
+    assert "\u202e" not in out + err
 
 
 @pytest.mark.parametrize(
@@ -324,15 +457,17 @@ def test_parse_error_never_echoes_raw_control_characters(
     ],
 )
 def test_global_flags_parse_in_either_position(
-    argv: list[str], capsys: pytest.CaptureFixture[str]
+    argv: list[str], capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    reaches_handler(capsys, argv, "show")
+    config = tmp_path / "c.yaml"  # `--config` must name a file that exists
+    config.write_text("", encoding="utf-8")
+    reaches_handler(capsys, [str(config) if a == "c.yaml" else a for a in argv], "show")
 
 
 def test_a_positional_after_double_dash_is_not_a_flag(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    code, out, _ = run(capsys, ["--json", "show", "--", "--not-a-flag"])
+    code, out, _ = run(capsys, ["--json", "show", "--", "github.com/o/r#1"])
     assert code == 1
     assert envelope(out)["message"] == "show: not implemented yet"
 
@@ -506,10 +641,10 @@ def test_success_without_json_prints_readable_text(capsys: pytest.CaptureFixture
 
 
 def test_human_output_is_never_raw(capsys: pytest.CaptureFixture[str]) -> None:
-    registry.HANDLERS["show"] = lambda inv: {"title": "evil\x1b]0;x\x07‮"}
+    registry.HANDLERS["show"] = lambda inv: {"title": "evil\x1b]0;x\x07\u202e"}
     code, out, _ = run(capsys, ["show", PR])
     assert code == 0
-    assert "\x1b" not in out and "‮" not in out and "\x07" not in out
+    assert "\x1b" not in out and "\u202e" not in out and "\x07" not in out
 
 
 @pytest.mark.parametrize("code_name", sorted(EXIT_BY_CODE))
@@ -732,7 +867,9 @@ def test_partial_results_without_output_is_the_envelope(
 # --- signals ------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("sig", "expected"), [(signal.SIGTERM, 143), (signal.SIGINT, 130)])
+@pytest.mark.parametrize(
+    ("sig", "expected"), [(signal.SIGTERM, 143), (signal.SIGINT, 130), (signal.SIGHUP, 129)]
+)
 def test_a_signal_exits_128_plus_n_with_no_envelope(
     sig: signal.Signals, expected: int, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -916,17 +1053,13 @@ def test_human_output_is_one_line_per_field(capsys: pytest.CaptureFixture[str]) 
 # --- would_refuse echoes argv, so it sanitizes it --------------------------------------------
 
 
-def test_dry_run_would_refuse_sanitizes_the_echoed_input(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    registry.HANDLERS["resolve"] = refusing("not_open", details={"state": "closed"})
-    argv = ["--json", "resolve", "x\x1b[31m\u202e\udcff\nz", "--thread", "t\x07\ud800", "--dry-run"]
-    code, out, _ = run(capsys, argv)
-    assert code == 20
-    result = json.loads(out)
+def test_dry_run_would_refuse_sanitizes_the_echoed_input() -> None:
+    """The parsers already refuse control characters in `pr` and `--thread`; the echo is
+    sanitized anyway, in case a parsed value ever carries one."""
+    args = Namespace(pr="x\x1b[31m\u202e\udcff\nz", thread="t\x07\ud800")
+    result = would_refuse_result("resolve", args, refused("not_open", "m", details={"state": "c"}))
     assert result["pr"] == "x<U+001B>[31m<U+202E><U+DCFF><U+000A>z"
     assert result["thread_id"] == "t<U+0007><U+D800>"
-    assert "\x1b" not in out and "\u202e" not in out
 
 
 def test_dry_run_plan_values_from_the_handler_are_sanitized(

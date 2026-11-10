@@ -1,0 +1,38 @@
+{
+  "errors": [],
+  "hosts": [
+    {
+      "backend": "github",
+      "host": "ghe.example.test",
+      "id": "1001",
+      "login": "user-2",
+      "me": "user-2",
+      "me_matches_login": true,
+      "scopes": null,
+      "token_source": "token_env"
+    },
+    {
+      "backend": "github",
+      "host": "github.com",
+      "id": "1001",
+      "login": "user-1",
+      "me": "user-1",
+      "me_matches_login": true,
+      "scopes": [
+        "repo",
+        "read:org"
+      ],
+      "token_source": "token_env"
+    },
+    {
+      "backend": "gitlab",
+      "host": "gitlab.com",
+      "id": null,
+      "login": null,
+      "me": null,
+      "me_matches_login": null,
+      "scopes": null,
+      "token_source": "none"
+    }
+  ]
+}
