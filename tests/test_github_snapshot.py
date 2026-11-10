@@ -1065,7 +1065,12 @@ def test_ordinary_commits_after_the_last_event_give_the_newest_commit_time(
     make: Callable[..., Rig],
 ) -> None:
     docs = push_doc(force("2026-10-02T08:30:00Z", OTHER), commit("2026-10-02T09:15:00Z"))
-    assert pushed(snap(make, ForgectlPush=docs)) == ("2026-10-02T09:15:00Z", "push_event")
+    assert pushed(snap(make, ForgectlPush=docs)) == ("2026-10-02T09:15:00Z", "commit_date")
+
+
+def test_a_backdated_commit_is_a_commit_date_never_a_push_event(make: Callable[..., Rig]) -> None:
+    docs = push_doc(commit("2025-01-01T00:00:00Z"))
+    assert pushed(snap(make, ForgectlPush=docs)) == ("2025-01-01T00:00:00Z", "commit_date")
 
 
 def test_the_newer_of_event_and_commit_wins(make: Callable[..., Rig]) -> None:
@@ -1774,7 +1779,7 @@ def test_r1_6_a_push_time_within_five_minutes_of_the_reading_is_kept(
     make: Callable[..., Rig],
 ) -> None:
     out = snap(make, ForgectlPush=push_doc(commit("2026-10-02T12:05:05Z")))
-    assert pushed(out) == ("2026-10-02T12:05:05Z", "push_event")
+    assert pushed(out) == ("2026-10-02T12:05:05Z", "commit_date")
 
 
 def test_r1_7_a_malformed_push_page_one_then_a_good_one_recovers(make: Callable[..., Rig]) -> None:

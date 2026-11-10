@@ -1241,9 +1241,10 @@ def read_head_push(reader: _Reader, head: str, now: Now = utc_now) -> m.PushTime
 
     A ``HeadRefForcePushedEvent`` to this head sha gives its ``createdAt``, a host time, as
     ``push_event``; with none, the newest ``PullRequestCommit`` of this sha gives its committer
-    date as ``push_event``; with neither, the head commit's own date is ``commit_date``. A
-    committer date is chosen by whoever made the commit, so it never wins over a host event, and
-    any time later than the reading plus ``FUTURE_SKEW`` is not trusted (interface: Push time).
+    date as ``commit_date``; with neither, the head commit's own date is ``commit_date``. A
+    committer date is chosen by whoever made the commit, so it is never labelled ``push_event``
+    and never wins over a host event, and any time later than the reading plus ``FUTURE_SKEW`` is
+    not trusted (interface: Push time).
 
     Every page is checked inside its retried call; once the retries are spent on an answer that
     is not the documented shape, the push time is unknown and the snapshot is not failed. A wrong
@@ -1314,11 +1315,12 @@ def _read_head_push(reader: _Reader, head: str, now: Now) -> m.PushTime | None:
             seen=frozenset(seen),
             backward=True,
         )
-    best = forced or committed
     found_time: m.PushTime | None = None
     when_parsed: datetime | None = None
-    if best is not None:
-        when_parsed, found_time = best[0], m.PushTime(at=best[1], source="push_event")
+    if forced is not None:
+        when_parsed, found_time = forced[0], m.PushTime(at=forced[1], source="push_event")
+    elif committed is not None:
+        when_parsed, found_time = committed[0], m.PushTime(at=committed[1], source="commit_date")
     else:
         commit = _opt_obj(repo.get("object"), "the head commit")
         if commit is not None and commit.get("oid") == head:
