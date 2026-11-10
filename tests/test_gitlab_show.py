@@ -472,9 +472,7 @@ def test_every_other_protocol_method_is_a_typed_not_yet_error(
     fake: FakeGitLab, tmp_path: Path
 ) -> None:
     backend = make_backend(fake, tmp_path)
-    for call in (
-        lambda: backend.merge(cast(m.PR, None), sha=HEAD, method=None),
-    ):
+    for call in (lambda: backend.merge(cast(m.PR, None), sha=HEAD, method=None),):
         with pytest.raises(ForgectlError) as raised:
             call()
         assert raised.value.code == "internal"
