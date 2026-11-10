@@ -41,6 +41,22 @@ def diff(value: object, limit: int = DIFF_LIMIT) -> str:
     return _sanitize_diff(_cut(value, limit))
 
 
+def inline(value: str) -> str:
+    """Text a parser produced from already-sanitized text (an entity can decode to a new
+    unsafe character): sanitized again with no cut, tab and LF marked, as in a one-line field."""
+    if "\n" not in value and "\t" not in value and value.isascii() and value.isprintable():
+        return value
+    return _sanitize_line(value)
+
+
+def block(value: str) -> str:
+    """As ``inline`` for multi-line text (code): tab and LF stay."""
+    flat = value.replace("\n", "").replace("\t", "")
+    if flat.isascii() and flat.isprintable():
+        return value
+    return _sanitize_text(value)
+
+
 def plain(value: str) -> Content:
     """``value`` as display content with no markup parsing."""
     return Content(value)

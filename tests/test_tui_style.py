@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 import pytest
+from pygments.token import Number
 from textual.content import Content
 from textual.pilot import Pilot
 from textual.widgets import OptionList
@@ -362,3 +363,266 @@ def test_the_pane_paints_styled_sections_and_repaints_for_a_theme() -> None:
         assert app.is_running
 
     drive(source, script)
+
+
+# -- round 1 review fixes ---------------------------------------------------------------------
+
+
+DIFF_STYLES = {
+    f"on {style.DARK.add_bg}",
+    f"on {style.DARK.del_bg}",
+    f"bold {style.DARK.ok}",
+    f"bold {style.DARK.bad}",
+    style.DARK.ok,
+    style.DARK.bad,
+    style.DARK.quiet,
+    "dim",
+}
+
+
+def lexed(content: Content, start: int) -> bool:
+    """Whether a Pygments token style (not a diff style) is on the content after ``start``."""
+    return any(s.start >= start and str(s.style) not in DIFF_STYLES for s in content.spans)
+
+
+def only_background(content: Content) -> bool:
+    return all(str(s.style).startswith("on ") for s in content.spans)
+
+
+@pytest.mark.parametrize(
+    ("lang", "opener"),
+    [("perl", "s{"), ("html", "<!--"), ("lua", "[=["), ("cpp", 'R"('), ("rust", 'r#"')],
+)
+def test_a_hostile_fence_over_the_lex_cap_is_plain_and_fast(lang: str, opener: str) -> None:
+    code = "\n".join([opener * 3] * 150)  # over the line cap
+    started = time.monotonic()
+    content = style.markdown(f"```{lang}\n{code}\n```", True)
+    assert time.monotonic() - started < 1.5
+    assert only_background(content)
+    big = "x = 1  # " + "a" * 100 + "\n"
+    content = style.markdown(f"```python\n{big * 60}```", True)  # over the character cap
+    assert only_background(content)
+
+
+def test_a_small_fence_under_the_caps_is_still_highlighted() -> None:
+    assert not only_background(style.markdown("```python\ndef f():\n    return 1\n```", True))
+
+
+def test_a_hostile_diff_is_fast_and_the_oversize_hunk_stays_plain() -> None:
+    body = "".join(f"+s{{{i}\n" for i in range(150))
+    text = f"--- a/x.perl\n+++ b/x.perl\n@@ -0,0 +1,150 @@\n{body}"
+    started = time.monotonic()
+    content = style.diff(text, True)
+    assert time.monotonic() - started < 1.5
+    assert content.plain == text
+    assert style.DARK.pygments not in str(content.spans)
+    assert all(
+        str(s.style) in {f"on {style.DARK.add_bg}", f"bold {style.DARK.ok}", style.DARK.ok}
+        for s in content.spans
+        if s.start > text.index("@@ -0,0") + 20
+    )
+
+
+def test_one_lex_is_capped_in_characters_and_lines() -> None:
+    lexer = style.lexer_for_language("python")
+    assert lexer is not None
+    assert style.highlight_lines("x\n" * 101, lexer, style.DARK) is None
+    assert style.highlight_lines("x" * (style.MAX_LEX_CHARS + 1), lexer, style.DARK) is None
+    assert style.highlight_lines("x = 1\n" * 99 + "x = 1", lexer, style.DARK) is not None
+    effort = style.Effort()
+    assert not effort.allows(style.MAX_LEX_CHARS + 1, 1)
+    assert not effort.allows(1, style.MAX_LEX_LINES + 1)
+    assert effort.chars == style.HIGHLIGHT_CHARS  # a refused block spends nothing
+
+
+def test_many_hostile_comments_fall_back_to_plain_text_within_the_budget() -> None:
+    hostile = ("![[***[" * 700)[:4000]
+    entries = [style.Markdown(hostile, 4) for _ in range(45)]
+    started = time.monotonic()
+    content = style.threaded(entries, True)  # type: ignore[arg-type]
+    assert time.monotonic() - started < 1.5
+    assert_inert(content)
+    assert content.plain.split("\n")[-1] == "    " + hostile  # past the budget: shown as is
+    assert content.plain.split("\n")[0] != "    " + hostile  # the first ones were rendered
+
+
+def test_the_markdown_budget_is_spent_once_per_paint() -> None:
+    effort = style.Effort(markdown_chars=10)
+    assert effort.allows_markdown(8)
+    assert not effort.allows_markdown(8)
+    assert not style.Effort(markdown_seconds=-1).allows_markdown(1)
+    plain = style.markdown("**x**", True, 2, style.Effort(markdown_chars=1))
+    assert plain.plain == "  **x**" and plain.spans == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "> " * 25 + "a",
+        "- " * 10 + "x",
+        "- " * 10 + "x\n\nafter the deep item",
+        "".join("  " * i + "- n\n" for i in range(12)) + "\nend",
+        "> " * 30 + "- " * 10 + "text",
+    ],
+)
+def test_content_past_the_parsers_nesting_limit_is_kept_as_text(body: str) -> None:
+    content = style.markdown(body, True, 2)
+    assert content.plain == "\n".join("  " + x for x in body.split("\n"))
+    assert_inert(content)
+
+
+@pytest.mark.parametrize(
+    "entity",
+    [
+        "&#x202E;",
+        "&#x200B;",
+        "&#x2028;",
+        "&NewLine;",
+        "&Tab;",
+        "&ZeroWidthSpace;",
+        "&lrm;",
+        "&shy;",
+        "&NoBreak;",
+    ],
+)
+def test_an_entity_cannot_bring_back_an_unsafe_character(entity: str) -> None:
+    body = (
+        f"a {entity} b\n\n[x{entity}y](http://e.example/p{entity}q)\n\n| h |\n|---|\n| c{entity}d |"
+    )
+    for dark in (True, False):
+        content = style.markdown(body, dark)
+        assert "<U+" in content.plain
+        for ch in content.plain:
+            if ch != "\n":
+                assert ch.isprintable() or ch == " ", repr(ch)
+        assert_inert(content)
+        table_line = next(x for x in content.plain.split("\n") if x.startswith("c"))
+        assert table_line.startswith("c<U+") and table_line.endswith("d")
+
+
+def line_spans(content: Content, n: int) -> list[str]:
+    rows = content.plain.split("\n")
+    start = sum(len(r) + 1 for r in rows[:n])
+    return [str(s.style) for s in content.spans if start <= s.start < start + len(rows[n])]
+
+
+def test_status_words_are_colored_only_on_the_real_fact_lines() -> None:
+    snap = make_snapshot(
+        1,
+        title="review: approved",
+        branch="x review: approved",
+        extra={"labels": ["review: approved", "state: merged", "mergeable: true"]},
+    )
+    snap["review_decision"] = "changes_requested"
+    content = style.facts(render.facts_text(snap), True)
+    rows = content.plain.split("\n")
+    assert rows[3].startswith("branch: x review: approved") and rows[7].startswith("labels:")
+    assert line_spans(content, 3) == [style.DARK.quiet]  # only the label
+    assert line_spans(content, 7) == [style.DARK.quiet]
+    assert has_style(content, "changes_requested", style.DARK.bad)
+    assert has_style(content, "open", style.DARK.ok)
+
+
+def test_an_inflated_hunk_count_does_not_swallow_the_next_files_headers() -> None:
+    text = (
+        "--- a/x.py\n+++ b/x.py\n@@ -1,99 +1,99 @@\n+x = 1\n"
+        "diff --git a/y.zzz b/y.zzz\n--- a/y.zzz\n+++ b/y.zzz\n@@ -1 +1 @@\n+def z(): pass\n"
+    )
+    content = style.diff(text, True)
+    assert has_style(content, "diff --git a/y.zzz b/y.zzz", f"bold {style.DARK.file_head}")
+    assert has_style(content, "+++ b/y.zzz", f"bold {style.DARK.file_head}")
+    assert not lexed(content, content.plain.index("def z"))  # y.zzz has no lexer
+
+
+def test_old_and_new_sides_are_lexed_apart() -> None:
+    text = '--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-x = """old\n+x = 1\n'
+    content = style.diff(text, True)
+    one = content.plain.index("+x = 1") + 5
+    assert any(
+        s.start <= one < s.end and str(s.style) == style._token_style("monokai", Number.Integer)
+        for s in content.spans
+    )  # the 1 is a number, not the rest of the removed line's string
+
+
+def test_crlf_diffs_are_highlighted() -> None:
+    text = "--- a/x.py\r\n+++ b/x.py\r\n@@ -1 +1 @@\r\n-x = 1\r\n+def f(): return 2\r\n"
+    content = style.diff(text, True)
+    assert content.plain == text.replace("\r\n", "\n")
+    assert lexed(content, content.plain.index("+def"))
+    assert has_style(content, "+def f(): return 2", f"on {style.DARK.add_bg}")
+
+
+def test_a_quoted_git_path_selects_its_lexer() -> None:
+    text = (
+        'diff --git "a/caf\\303\\251.py" "b/caf\\303\\251.py"\n'
+        '--- "a/caf\\303\\251.py"\n+++ "b/caf\\303\\251.py"\n@@ -1 +1 @@\n+def f(): return 2\n'
+    )
+    content = style.diff(text, True)
+    assert lexed(content, text.index("+def"))
+    assert style._unquote('"a\\tb\\"c\\\\d"') == 'a\tb"c\\d'
+    assert style._unquote("plain.py") == "plain.py"
+
+
+def test_split_is_linear_and_keeps_span_order() -> None:
+    body = "\n".join("*a* `b`" for _ in range(10_000))[:20_000]
+    started = time.monotonic()
+    style.markdown(body, True)
+    assert time.monotonic() - started < 0.6
+    many = "\n".join(["a"] * 10_000)
+    started = time.monotonic()
+    out = style._split(many, [(2 * i, 2 * i + 1, "b") for i in range(10_000)])
+    assert (
+        time.monotonic() - started < 0.2 and len(out) == 10_000 and out[9_999][1] == [(0, 1, "b")]
+    )
+    pieces = style._split("ab\ncd", [(0, 5, "outer"), (1, 2, "inner"), (3, 4, "x")])
+    assert pieces == [
+        ("ab", [(0, 2, "outer"), (1, 2, "inner")]),
+        ("cd", [(0, 2, "outer"), (0, 1, "x")]),
+    ]
+
+
+def test_nested_lists_and_quotes_keep_every_marker_and_no_extra_blank() -> None:
+    assert style.markdown("- - a\n  - b", True).plain == "• • a\n  • b"
+    assert style.markdown("-\n- x", True).plain.split("\n")[0].strip() == "•"
+    assert style.markdown("-\n- x", True).plain.split("\n")[1] == "• x"
+    assert style.markdown("- > quote\n- b", True).plain == "• │ quote\n• b"
+    assert style.markdown("> - a\n> - b", True).plain == "│ • a\n│ • b"
+
+
+def test_theme_change_keeps_the_selected_check() -> None:
+    source = FakeSource(
+        authored=[make_item(1)],
+        snapshots={
+            PR1: make_snapshot(1, checks=[make_check(f"c{i}", "passing", None) for i in range(4)])
+        },
+        diffs={PR1: make_diff(PR1, DIFF)},
+    )
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("enter")
+        await settle(app, pilot)
+        await pilot.press("3")
+        await settle(app, pilot)
+        checks = app.query_one("#checks", OptionList)
+        checks.highlighted = 2
+        app.theme = "textual-light"
+        await settle(app, pilot)
+        assert checks.highlighted == 2
+
+    drive(source, script)
+
+
+@pytest.mark.parametrize("language", ["mcschema", "tnt"])
+def test_lexers_that_never_return_are_not_used(language: str) -> None:
+    assert style.lexer_for_language(language) is None
+    started = time.monotonic()
+    content = style.markdown(f"```{language}\n<!--\n<\n```", True)
+    assert time.monotonic() - started < 1.0
+    assert only_background(content)
+
+
+def test_the_worst_block_under_the_caps_lexes_in_well_under_a_second() -> None:
+    code = "\n".join(["s{" * 15] * 100)[: style.MAX_LEX_CHARS]
+    started = time.monotonic()
+    style.markdown(f"```perl\n{code}\n```", True)
+    assert time.monotonic() - started < 1.0

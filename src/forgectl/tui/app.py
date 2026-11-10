@@ -909,11 +909,12 @@ class BrowseApp(App[None]):
         body.update(style.body(name, detail.texts, detail.lines, self._dark()))
         if name == "ci":
             checks = self.query_one("#checks", OptionList)
+            kept = checks.highlighted  # a repaint (a theme change) keeps the selected check
             checks.clear_options()
             dark = self._dark()
             checks.add_options([Option(style.check_label(x, dark)) for x in detail.check_labels])
             if detail.checks:
-                checks.highlighted = 0
+                checks.highlighted = min(kept or 0, len(detail.check_labels) - 1)
 
     def _dark(self) -> bool:
         """Whether the app theme is dark: the colors of the detail pane follow it."""
