@@ -349,6 +349,12 @@
             "changes"
           ],
           "description": "The detail pane sections of `browse` that start collapsed; the others start open. A list replaces on merge like any list. A section toggles with its number key (1 facts, 2 description, 3 changes, 4 ci, 5 comments, 6 reviews)."
+        },
+        "query": {
+          "type": "string",
+          "maxLength": 1000,
+          "default": "",
+          "description": "The query `browse` starts with: a filter and an `ORDER BY` in the query language of interface.md (for example `authored AND ci = failing ORDER BY age DESC`). Empty is no filter and the default order. The grammar is checked at load (an invalid query is `config_invalid`), which the schema cannot express. The `browse` action `set as default` writes it to `config.d/90-browse-query.yaml`."
         }
       },
       "additionalProperties": false,
