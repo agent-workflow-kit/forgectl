@@ -18,7 +18,7 @@ from typing import Any
 from rich.cells import cell_len
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.events import Event, Key
 from textual.screen import ModalScreen
@@ -37,37 +37,58 @@ from .source_live import Cancelled
 DEFAULT_CONCURRENCY = 4  # snapshots in flight at once; `browse.concurrency` sets it
 DEFAULT_FULL_REFRESH_EVERY = 5  # `browse.full_refresh_every`
 
-HELP = """\
-q       quit
-?       this help
-/       filter the list (enter keeps it, escape clears it)
-enter   open the detail pane for the highlighted PR
-esc     close the detail pane or the filter
-o       open the PR in a browser; on a check in the detail pane, open the check
-        (only an http or https url is opened)
-left    scroll the list sideways by one column (or h); the PR and note columns stay
-right   scroll the list sideways by one column the other way (or l)
-s       switch the order: by repo (default) or needs-attention first
-a       filter: authored by me
-v       filter: review requested from me
-f       filter: CI failing
-n       filter: new comments from others
-        (filters combine as an intersection; the status bar names them)
-r       refresh selected (the PR in the detail pane, else the highlighted PR)
-R       refresh all (both lists, every row, then the detail pane)
-        rows keep their last data meanwhile ([refreshing]); a failed refresh keeps it
-        and marks the row [stale: code]; [changed] marks a row whose data changed, until
-        the next refresh or a key; the timed refresh re-reads only what may have changed
+# The help is data, one logical line per entry; the widgets wrap it to the terminal width. Adding a
+# key is one new row here (and its Binding). A test compares these keys with BrowseApp.BINDINGS;
+# a binding whose Textual key name differs from its label needs a KEY_LABELS entry in that test.
+HELP_KEYS: list[tuple[str, str]] = [
+    ("q", "quit"),
+    ("?", "this help"),
+    ("/", "filter the list (enter keeps it, escape clears it)"),
+    ("enter", "open the detail pane for the highlighted PR"),
+    ("esc", "close the detail pane or the filter"),
+    (
+        "o",
+        "open the PR in a browser; on a check in the detail pane, open the check "
+        "(only an http or https url is opened)",
+    ),
+    ("left", "scroll the list sideways by one column (or h); the PR and note columns stay"),
+    ("right", "scroll the list sideways by one column the other way (or l)"),
+    ("s", "switch the order: by repo (default) or needs-attention first"),
+    ("a", "filter: authored by me"),
+    ("v", "filter: review requested from me"),
+    ("f", "filter: CI failing"),
+    (
+        "n",
+        "filter: new comments from others "
+        "(filters combine as an intersection; the status bar names them)",
+    ),
+    ("r", "refresh selected (the PR in the detail pane, else the highlighted row only)"),
+    (
+        "R",
+        "refresh all (both lists, every row, then the detail pane): rows keep their last data "
+        "meanwhile ([refreshing]); a failed refresh keeps it and marks the row [stale: code]; "
+        "[changed] marks a row whose data changed, until the next refresh or a key; the timed "
+        "refresh re-reads only what may have changed",
+    ),
+]
 
-columns: PR  note  badge  CI  appr  rev  comments  age  title  author  roles
-  note: [refreshing], [stale: code] or [changed]
-  CI: ✓ passing, ✗ failing, … pending, - none, · loading, ! snapshot failed
-  comments: c total, u unresolved threads, n new from others since the push,
-            r threads awaiting my reply
-  age: since the last push / since the last update
+HELP_COLUMNS = "columns: PR, note, badge, CI, appr, rev, comments, age, title, author, roles"
 
-browse is read-only: no merge, no post.
-Press any key to close this help."""
+HELP_LEGEND: list[tuple[str, str]] = [
+    ("note", "[refreshing], [stale: code] or [changed]"),
+    ("CI", "✓ passing, ✗ failing, … pending, - none, · loading, ! snapshot failed"),
+    (
+        "comments",
+        "c total, u unresolved threads, n new from others since the push, "
+        "r threads awaiting my reply",
+    ),
+    ("age", "since the last push / since the last update"),
+]
+
+HELP_NOTES = [
+    "browse is read-only: no merge, no post.",
+    "Press any other key to close this help; arrows, PgUp and PgDn scroll.",
+]
 
 
 def in_thread[T](fn: Callable[..., T], *args: Any) -> asyncio.Future[T]:
@@ -103,13 +124,51 @@ def in_thread[T](fn: Callable[..., T], *args: Any) -> asyncio.Future[T]:
     return future
 
 
+HELP_MIN_WIDTH = 30  # the help box never shrinks below this, unless the screen itself is narrower
+
+HELP_SCROLL_KEYS = {
+    "up": "scroll_up", "k": "scroll_up", "down": "scroll_down", "j": "scroll_down",
+    "pageup": "scroll_page_up", "pagedown": "scroll_page_down",
+    "home": "scroll_home", "end": "scroll_end",
+}  # fmt: skip
+
+
+def _key_column_width() -> int:
+    """One key column width for every help table, from the longest key label."""
+    return max(1, *(cell_len(key) for key, _ in (*HELP_KEYS, *HELP_LEGEND)))
+
+
+def _help_table(rows: list[tuple[str, str]], table_id: str) -> Grid:
+    """A two-column table: a key column sized from the data, a description column that wraps."""
+    cells: list[Static] = []
+    for key, description in rows:
+        cells.append(Static(safe.plain(key), classes="help-key", markup=False))
+        cells.append(Static(safe.plain(description), classes="help-desc", markup=False))
+    grid = Grid(*cells, id=table_id, classes="help-table")
+    grid.styles.grid_columns = f"{_key_column_width() + 1} 1fr"  # +1: a gap before the text
+    return grid
+
+
 class HelpScreen(ModalScreen[None]):
     def compose(self) -> ComposeResult:
-        yield Static(safe.plain(HELP), id="help", markup=False)
+        with VerticalScroll(id="help"):
+            yield _help_table(HELP_KEYS, "help-keys")
+            yield Static(safe.plain(HELP_COLUMNS), classes="help-para", markup=False)
+            yield _help_table(HELP_LEGEND, "help-legend")
+            for note in HELP_NOTES:
+                yield Static(safe.plain(note), classes="help-para", markup=False)
+
+    def on_resize(self) -> None:
+        # CSS min-width would push the box past a screen narrower than it, so cap it here
+        self.query_one("#help").styles.min_width = min(HELP_MIN_WIDTH, self.size.width)
 
     def on_key(self, event: Key) -> None:
         event.stop()
-        self.dismiss(None)
+        action = HELP_SCROLL_KEYS.get(event.key)
+        if action is None:
+            self.dismiss(None)
+        else:
+            getattr(self.query_one("#help"), action)(animate=False)
 
 
 class RowList(OptionList):
@@ -149,7 +208,13 @@ class BrowseApp(App[None]):
     #footer { dock: bottom; height: 2; }
     #bar, #status { height: 1; }
     HelpScreen { align: center middle; }
-    #help { width: 76; height: auto; border: round $primary; padding: 1 2; background: $surface; }
+    #help {
+        width: 90%; max-width: 100; height: auto; max-height: 100%;
+        border: round $primary; padding: 1 2; background: $surface;
+    }
+    .help-table { grid-size: 2; grid-columns: 10 1fr; grid-rows: auto; height: auto; }
+    .help-key, .help-desc { height: auto; }
+    .help-para { height: auto; margin-top: 1; }
     """
     BINDINGS = [
         Binding("q", "quit_app", "quit"),
@@ -518,9 +583,12 @@ class BrowseApp(App[None]):
         hidden = [r.pr for r in columns.order(hidden_rows, self._states, self._order_mode)]
         return first + rest + hidden
 
-    def _start_snapshots(self, wanted: set[str] | None, skip: str | None = None) -> bool:
+    def _start_snapshots(
+        self, wanted: set[str] | None, skip: str | None = None, listed: bool | None = None
+    ) -> bool:
         """Start a round of per-row snapshots (all rows, or those in ``wanted``, but not
-        ``skip``); False when there is nothing to load."""
+        ``skip``); False when there is nothing to load. ``listed=False`` marks a round that
+        must not move the refresh time (a single-row refresh)."""
         self._snap_token += 1
         self._snap_done = 0
         order = [
@@ -542,7 +610,9 @@ class BrowseApp(App[None]):
         else:
             self._paint_bar()
         if order and self.concurrency:
-            self.run_worker(self._load_snapshots(self._snap_token, order), group="snapshots")
+            self.run_worker(
+                self._load_snapshots(self._snap_token, order, listed), group="snapshots"
+            )
             return True
         return False
 
@@ -564,7 +634,9 @@ class BrowseApp(App[None]):
             return columns.RowState(columns.LOADED, previous.summary, error=error, stale=True)
         return columns.RowState(columns.FAILED, error=error)
 
-    async def _load_snapshots(self, token: int, order: list[str]) -> None:
+    async def _load_snapshots(
+        self, token: int, order: list[str], listed: bool | None = None
+    ) -> None:
         """At most ``self.concurrency`` snapshot reads at once; a failure marks only its row."""
         queue = deque(order)
 
@@ -593,7 +665,7 @@ class BrowseApp(App[None]):
             await asyncio.gather(*(lane() for _ in range(self.concurrency)))
         finally:
             if token == self._snap_token:
-                self._finish_refresh()
+                self._finish_refresh(listed=listed)
                 stale = sum(1 for st in self._states.values() if st.stale)
                 if stale:
                     self._status(f"{stale} snapshot(s) not refreshed; showing the last good data")
@@ -839,7 +911,8 @@ class BrowseApp(App[None]):
             self.query_one("#list", OptionList).focus()
 
     def action_refresh_selected(self) -> None:
-        """The PR in the visible detail pane, else the highlighted row's PR (opening it)."""
+        """The PR in the visible detail pane (row and detail), else only the highlighted row.
+        With the pane closed it never opens it."""
         if self._detail_pr is not None and self._detail_shown():
             self._start_detail(self._detail_pr)
             return
@@ -847,7 +920,15 @@ class BrowseApp(App[None]):
         if row is None:
             self._status("nothing to refresh: no PR highlighted")
             return
-        self._start_detail(row.pr)
+        if self._detail_loading == row.pr:  # a detail load for it is on its way
+            self._status("a refresh is already running")
+            return
+        if self._busy:  # a round of snapshots is running; it covers this row
+            self._status("a refresh is already running")
+            return
+        if not self._start_snapshots({row.pr}, listed=False):
+            self._finish_refresh(listed=False)
+            self._status("not refreshed: snapshots are off or the PR is not listed")
 
     def action_reload_list(self) -> None:
         """R: `prs`, then every row's snapshot, then the PR in the detail pane. Never started

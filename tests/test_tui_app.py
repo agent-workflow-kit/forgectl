@@ -8,17 +8,19 @@ import re
 import stat
 import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
+from textual.binding import Binding
 from textual.content import Content
 from textual.pilot import Pilot
 from textual.widgets import Input, OptionList, Static
 
 from forgectl.errors import ForgectlError
 from forgectl.tui import render
-from forgectl.tui.app import BrowseApp
+from forgectl.tui.app import BrowseApp, HelpScreen
 from forgectl.tui.opener import BrowserOpener
 
 from .harness.schemas import validate
@@ -186,19 +188,217 @@ def test_q_typed_into_the_filter_does_not_quit() -> None:
     drive(basic_source(), script)
 
 
-def test_help_lists_the_keys_and_any_key_closes_it() -> None:
+def help_text_of(app: BrowseApp) -> str:
+    return "\n".join(
+        as_content(w.content).plain for w in app.screen.query("#help Static").results(Static)
+    )
+
+
+def test_help_lists_the_keys_and_other_keys_close_it() -> None:
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         await pilot.press("question_mark")
         await pilot.pause()
-        help_text = as_content(app.screen.query_one("#help", Static).content).plain
-        for key in ("q ", "? ", "/ ", "enter", "o ", "r ", "R "):
-            assert key in help_text
+        keys = [
+            as_content(w.content).plain
+            for w in app.screen.query("#help-keys .help-key").results(Static)
+        ]
+        for key in ("q", "?", "/", "enter", "o", "r", "R"):
+            assert key in keys
+        help_text = help_text_of(app)
         assert "refresh selected" in help_text and "refresh all" in help_text
         await pilot.press("x")
         await pilot.pause()
         assert not app.screen.query("#help")
 
     drive(basic_source(), script)
+
+
+KEY_LABELS = {"question_mark": "?", "slash": "/", "escape": "esc"}
+
+
+def test_every_binding_is_in_the_help() -> None:
+    from forgectl.tui.app import HELP_KEYS
+
+    documented = {key for key, _ in HELP_KEYS}
+    # An unusual Textual key name (not a single character) needs an entry in KEY_LABELS.
+    bound = {
+        KEY_LABELS.get(key, key)
+        for b in BrowseApp.BINDINGS
+        if isinstance(b, Binding)
+        for key in b.key.split(",")
+    }
+    # `enter`, `left` and `right` are handled by the list widget (RowList), not a BrowseApp binding.
+    on_list = {"enter", "left", "right"}
+    assert documented - on_list == bound, (documented - on_list) ^ bound
+
+
+def test_help_source_has_no_hard_line_breaks() -> None:
+    from forgectl.tui import app as app_module
+
+    texts = [t for row in (*app_module.HELP_KEYS, *app_module.HELP_LEGEND) for t in row]
+    texts += [app_module.HELP_COLUMNS, *app_module.HELP_NOTES]
+    assert all("\n" not in t and "  " not in t for t in texts)
+
+
+@pytest.mark.parametrize("width", [80, 120, 200])
+def test_help_reflows_to_the_terminal_width(width: int) -> None:
+    async def go() -> None:
+        app = BrowseApp(basic_source(), FakeOpener(), concurrency=0)
+        async with app.run_test(size=(width, 60)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            box = app.screen.query_one("#help")
+            assert box.region.width <= width
+            assert box.virtual_size.width <= box.size.width  # no horizontal scroll
+            assert box.max_scroll_y == 0  # tall enough here: everything is visible
+            for table in app.screen.query(".help-table"):
+                keys = list(table.query(".help-key").results(Static))
+                descs = list(table.query(".help-desc").results(Static))
+                assert len({k.region.x for k in keys}) == 1  # the key column stays aligned
+                assert len({d.region.x for d in descs}) == 1
+                for key, desc in zip(keys, descs, strict=True):
+                    content = as_content(desc.content)
+                    assert desc.region.right <= box.content_region.right
+                    lines = content.wrap(desc.region.width)
+                    shown = " ".join(" ".join(line.plain for line in lines).split())
+                    assert shown == " ".join(content.plain.split())
+                    assert desc.region.height == len(content.wrap(desc.region.width))
+                    assert desc.region.y == key.region.y
+            if width == 200:  # the box is capped at 100 columns, so wrapping stops growing
+                for desc in app.screen.query("#help-keys .help-desc").results(Static):
+                    content = as_content(desc.content)
+                    assert desc.region.height == len(content.wrap(desc.region.width))
+
+    asyncio.run(go())
+
+
+def test_help_wraps_more_on_a_narrow_terminal() -> None:
+    async def heights(width: int) -> int:
+        app = BrowseApp(basic_source(), FakeOpener(), concurrency=0)
+        async with app.run_test(size=(width, 80)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            return sum(w.region.height for w in app.screen.query(".help-desc").results(Static))
+
+    assert asyncio.run(heights(80)) > asyncio.run(heights(200))
+
+
+def test_help_descriptions_keep_a_usable_width_on_a_narrow_terminal() -> None:
+    async def go() -> None:
+        app = BrowseApp(basic_source(), FakeOpener(), concurrency=0)
+        async with app.run_test(size=(30, 80)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            for desc in app.screen.query(".help-desc").results(Static):
+                assert desc.region.width >= 10
+
+    asyncio.run(go())
+
+
+def test_help_key_column_fits_the_longest_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    from forgectl.tui import app as app_module
+
+    long_key = "ctrl+shift+pgdn"  # 15 cells, wider than any real key label
+    monkeypatch.setattr(
+        app_module, "HELP_KEYS", [*app_module.HELP_KEYS, (long_key, "a very long key")]
+    )
+
+    async def go() -> None:
+        app = BrowseApp(basic_source(), FakeOpener(), concurrency=0)
+        async with app.run_test(size=(100, 80)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            keys = list(app.screen.query(".help-key").results(Static))
+            assert {k.region.width for k in keys} == {len(long_key) + 1}
+            assert all(k.region.height == 1 for k in keys)  # no key label wrapped
+
+    asyncio.run(go())
+
+
+def test_help_scrolls_when_the_screen_is_short() -> None:
+    async def go() -> None:
+        app = BrowseApp(basic_source(), FakeOpener(), concurrency=0)
+        async with app.run_test(size=(80, 12)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            box = app.screen.query_one("#help")
+            assert box.max_scroll_y > 0
+            assert box.region.height <= 12
+            last = list(app.screen.query(".help-para").results(Static))[-1]
+            assert not box.region.contains_region(last.region)
+            box.scroll_end(animate=False)
+            await pilot.pause()
+            assert box.region.contains_region(last.region)
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("key", ["down", "j", "end", "pagedown"])
+def test_help_forward_keys_scroll_it_and_do_not_close_it(key: str) -> None:
+    async def go() -> None:
+        app = BrowseApp(basic_source(), FakeOpener(), concurrency=0)
+        async with app.run_test(size=(80, 12)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            await pilot.press(key)
+            await pilot.pause()
+            assert isinstance(app.screen, HelpScreen)
+            assert app.screen.query_one("#help").scroll_y > 0
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("key", ["up", "k", "home", "pageup"])
+def test_help_backward_keys_scroll_it_and_do_not_close_it(key: str) -> None:
+    async def go() -> None:
+        app = BrowseApp(basic_source(), FakeOpener(), concurrency=0)
+        async with app.run_test(size=(80, 12)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            box = app.screen.query_one("#help")
+            box.scroll_end(animate=False)
+            await pilot.pause()
+            before = box.scroll_y
+            assert before > 0
+            await pilot.press(key)
+            await pilot.pause()
+            assert isinstance(app.screen, HelpScreen)
+            assert box.scroll_y < before
+
+    asyncio.run(go())
+
+
+def test_help_other_keys_close_it() -> None:
+    async def go() -> None:
+        app = BrowseApp(basic_source(), FakeOpener(), concurrency=0)
+        async with app.run_test(size=(80, 12)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            await pilot.press("x")
+            await pilot.pause()
+            assert not app.screen.query("#help")
+
+    asyncio.run(go())
+
+
+def test_help_box_never_exceeds_a_very_narrow_screen() -> None:
+    async def go() -> None:
+        app = BrowseApp(basic_source(), FakeOpener(), concurrency=0)
+        async with app.run_test(size=(20, 40)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            assert app.screen.query_one("#help").region.width <= 20
+
+    asyncio.run(go())
 
 
 def test_refresh_keys_refetch() -> None:
@@ -597,7 +797,7 @@ def test_repeated_enter_and_r_on_the_same_pr_load_it_once() -> None:
         await wait_until(pilot, lambda: ("snapshot", PR1) in source.calls)
         await pilot.press("enter", "r", "enter", "r")
         await pilot.pause()
-        assert "already loading" in status_of(app)
+        assert "already running" in status_of(app)
         source.gate.set()
         await settle(app, pilot)
 
@@ -824,19 +1024,209 @@ def test_r_refreshes_the_pr_in_the_visible_pane_not_the_highlighted_row() -> Non
     assert [c for c in source.calls if c[0] == "snapshot"] == [("snapshot", PR1)] * 2
 
 
-def test_r_after_escape_opens_the_highlighted_row_not_the_hidden_pr() -> None:
+def test_r_with_the_pane_closed_refreshes_only_the_row() -> None:
     source = basic_source()
+    seen: dict[str, Any] = {}
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down")
+        await settle(app, pilot)
+        olist = app.query_one("#list", OptionList)
+        seen["highlighted"] = olist.highlighted
+        seen["mark"] = len(source.calls)
+        await pilot.press("r")
+        await settle(app, pilot)
+        seen["after"] = list(source.calls[seen["mark"] :])
+        seen["shown"] = app.query_one("#detail").display
+        seen["focus"] = app.focused.id if app.focused else None
+        seen["highlighted_after"] = olist.highlighted
+
+    drive(source, script, concurrency=2)
+    assert len(seen["after"]) == 1
+    assert seen["after"][0][0] == "snapshot"
+    assert seen["shown"] is False
+    assert seen["focus"] == "list"
+    assert seen["highlighted_after"] == seen["highlighted"]
+
+
+def test_r_with_the_pane_open_reloads_the_row_and_the_detail() -> None:
+    source = basic_source()
+    seen: dict[str, Any] = {}
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down", "enter")
+        await settle(app, pilot)
+        seen["mark"] = len(source.calls)
+        await pilot.press("r")
+        await settle(app, pilot)
+        seen["after"] = list(source.calls[seen["mark"] :])
+        seen["shown"] = app.query_one("#detail").display
+
+    drive(source, script, concurrency=2)
+    assert seen["after"] == [("snapshot", PR1), ("diff", PR1)]
+    assert seen["shown"] is True
+
+
+def test_r_after_escape_refreshes_the_highlighted_row_and_keeps_the_pane_closed() -> None:
+    source = basic_source()
+    seen: dict[str, Any] = {}
 
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         await pilot.press("down", "enter")  # PR1
         await settle(app, pilot)
-        await pilot.press("escape", "up", "r")  # pane hidden, PR2 highlighted
+        await pilot.press("escape", "up")  # pane hidden, PR2 highlighted
+        seen["mark"] = len(source.calls)
+        await pilot.press("r")
         await settle(app, pilot)
-        assert app.query_one("#detail").display is True
-        assert "Theirs" in content_of(app, "#facts").plain
+        seen["after"] = list(source.calls[seen["mark"] :])
+        seen["shown"] = app.query_one("#detail").display
 
-    drive(source, script)
-    assert [c for c in source.calls if c[0] == "snapshot"] == [("snapshot", PR1), ("snapshot", PR2)]
+    drive(source, script, concurrency=2)
+    assert seen["after"] == [("snapshot", PR2)]
+    assert seen["shown"] is False
+
+
+def test_r_with_an_empty_list_does_nothing_and_says_so() -> None:
+    source = FakeSource()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert "nothing to refresh" in status_of(app)
+        assert app.query_one("#detail").display is False
+
+    drive(source, script, concurrency=2)
+    assert [c[0] for c in source.calls] == ["prs"] * 2
+
+
+class _FailingRefresh(FakeSource):
+    """Snapshots answer until ``fail`` is set, then fail."""
+
+    fail = False
+
+    def snapshot(self, pr: str) -> dict[str, Any]:
+        if self.fail:
+            self.calls.append(("snapshot", pr))
+            raise ForgectlError("upstream_error", "down")
+        return super().snapshot(pr)
+
+
+def test_a_failed_row_refresh_marks_the_row_stale_and_does_not_open_the_pane() -> None:
+    base = basic_source()
+    source = _FailingRefresh(
+        authored=base.authored,
+        requested=base.requested,
+        snapshots=base.snapshots,
+        diffs=base.diffs,
+    )
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down")
+        await settle(app, pilot)
+        source.fail = True
+        await pilot.press("r")
+        await settle(app, pilot)
+        # the note column is 12 cells wide, so the code is cut; the row still shows it is stale
+        assert any("[stale: up" in p.plain for p in list_prompts(app))
+        assert app.query_one("#detail").display is False
+        assert app.focused is not None and app.focused.id == "list"
+
+    drive(source, script, concurrency=2)
+
+
+_SENTINEL_TIME = datetime(2000, 1, 2, 3, 4, 5)
+
+
+def test_row_only_r_does_not_move_the_refreshed_time() -> None:
+    source = basic_source()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down")
+        await settle(app, pilot)
+        app._last_refresh = _SENTINEL_TIME
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert app._last_refresh == _SENTINEL_TIME
+
+    drive(source, script, concurrency=2)
+
+
+def test_a_failing_row_only_r_does_not_move_the_refreshed_time() -> None:
+    base = basic_source()
+    source = _FailingRefresh(
+        authored=base.authored,
+        requested=base.requested,
+        snapshots=base.snapshots,
+        diffs=base.diffs,
+    )
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down")
+        await settle(app, pilot)
+        source.fail = True
+        app._last_refresh = _SENTINEL_TIME
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert app._last_refresh == _SENTINEL_TIME
+
+    drive(source, script, concurrency=2)
+
+
+def test_r_says_so_when_snapshots_are_off() -> None:
+    source = basic_source()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down", "r")
+        await settle(app, pilot)
+        assert "not refreshed" in status_of(app)
+
+    drive(source, script, concurrency=0)
+
+
+def test_r_says_so_when_the_row_is_not_listed() -> None:
+    source = basic_source()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down")
+        await settle(app, pilot)
+        app._unlisted = {PR1, PR2}
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert "not refreshed" in status_of(app)
+
+    drive(source, script, concurrency=2)
+
+
+def test_r_with_the_pane_closed_while_its_detail_loads_reads_the_pr_once() -> None:
+    source = gated_basic("snapshot")
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down", "enter")
+        await wait_until(pilot, lambda: ("snapshot", PR1) in source.calls)
+        await pilot.press("escape", "r")
+        await pilot.pause()
+        assert "already running" in status_of(app)
+        source.gate.set()
+        await settle(app, pilot)
+
+    drive(source, script, concurrency=0)
+    assert source.calls.count(("snapshot", PR1)) == 1
+
+
+def test_r_during_a_running_refresh_does_not_start_another_read() -> None:
+    source = gated_basic("snapshot")
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await wait_until(pilot, lambda: any(c[0] == "snapshot" for c in source.calls))
+        await pilot.press("r")
+        await pilot.pause()
+        assert "already running" in status_of(app)
+        source.gate.set()
+        await settle(app, pilot)
+
+    drive(source, script, wait=False, concurrency=1)
+    snaps = [c for c in source.calls if c[0] == "snapshot"]
+    assert sorted(snaps) == [("snapshot", PR1), ("snapshot", PR2)]
 
 
 def test_R_without_a_pane_reloads_only_the_lists() -> None:

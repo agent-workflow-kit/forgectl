@@ -742,10 +742,10 @@ def test_forge_text_in_titles_and_blockers_cannot_act_as_markup() -> None:
 
 
 def test_the_help_lists_the_sort_and_filter_keys() -> None:
-    from forgectl.tui.app import HELP
+    from forgectl.tui.app import HELP_KEYS
 
-    for key in ("s ", "a ", "v ", "f ", "n ", "left ", "right "):
-        assert any(line.startswith(key) for line in HELP.splitlines()), key
+    for key in ("s", "a", "v", "f", "n", "left", "right"):
+        assert key in [k for k, _ in HELP_KEYS], key
 
 
 def test_slice_cells_counts_cells_when_a_combining_mark_offsets_a_wide_char() -> None:
