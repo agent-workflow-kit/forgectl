@@ -392,6 +392,26 @@ def test_quit_stops_the_timer() -> None:
     run(source, script, interval=0.1)
 
 
+@pytest.mark.parametrize("how", ["ctrl+q", "exit"])
+def test_every_exit_path_stops_the_timer_and_a_late_tick_starts_nothing(how: str) -> None:
+    source = three()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        assert app.refresh_timer is not None
+        base = source.count("prs")
+        if how == "exit":
+            app.exit()  # the path ctrl+q, errors and other callers all take
+        else:
+            await pilot.press("ctrl+q")
+        assert app.refresh_timer is None
+        app._tick()  # a tick that was already due when the exit began
+        assert not app._busy
+        await pilot.pause()
+        assert source.count("prs") == base
+
+    run(source, script, interval=0.1)
+
+
 # -- automatic refresh: what it re-reads -------------------------------------------------------
 
 
