@@ -483,6 +483,8 @@ class BrowseApp(App[None]):
         try:
             try:
                 listing: Listing = await in_thread(load_list, self.source)
+            except Cancelled:
+                return  # the source was closed (quitting): nothing to show
             except Exception as exc:  # a source bug must not take the UI down
                 self._list_note = self._internal(exc)  # the rows on screen stay
                 self._paint(self._list_note, self._detail_note)

@@ -147,7 +147,9 @@ def _kill_group(pid: int, pgid: int) -> None:
     """SIGKILL the group of a child this process started, if its leader is not reaped yet.
 
     The caller only passes tracked groups (see ``_Call``), which is what guards a reaped leader
-    on every platform. Where ``os.waitid`` exists the leader is checked as well: it is ours, so
+    where the gateway can observe the leader's exit without reaping it (``waitid`` on Linux,
+    kqueue on macOS); its poll-mode fallback reaps before the group is untracked. Where
+    ``os.waitid`` exists the leader is checked as well: it is ours, so
     ``waitid(WNOWAIT)`` answers for exactly that PID without reaping it, and
     ``ChildProcessError`` means it is gone and its number may belong to another process now.
     """
@@ -163,7 +165,8 @@ def _kill_group(pid: int, pgid: int) -> None:
 class _Call:
     """The process groups of one read that are alive now: added at launch, removed (under the
     source lock) just before the gateway reaps the leader, so a group listed here has an
-    unreaped leader."""
+    unreaped leader. That holds where the gateway has ``waitid`` or kqueue (Linux and macOS); its
+    poll-mode fallback reaps inside ``proc.poll()``, before the removal runs."""
 
     def __init__(self) -> None:
         self.groups: set[tuple[int, int]] = set()
