@@ -1152,13 +1152,19 @@ class GitLabBackend:
         return gitlab_snapshot.snapshot(self, ref)
 
     def diff(self, ref: PrRef) -> m.DiffResult:
-        raise _not_yet("diff", 18)  # TODO(#18): GitLab diff
+        from . import gitlab_diff  # a late import: gitlab_diff reads this module's helpers
+
+        return gitlab_diff.diff_result(self, ref)
 
     def compare(self, ref: PrRef, from_sha: str, to_sha: str) -> m.CompareResult:
-        raise _not_yet("compare", 18)  # TODO(#18): GitLab compare
+        from . import gitlab_diff
+
+        return gitlab_diff.compare_result(self, ref, from_sha, to_sha)
 
     def files(self, ref: PrRef) -> m.FilesResult:
-        raise _not_yet("files", 18)  # TODO(#18): GitLab files
+        from . import gitlab_diff
+
+        return gitlab_diff.files_result(self, ref)
 
     def comments(self, ref: PrRef) -> m.CommentsResult:
         from . import gitlab_snapshot  # (#16)
