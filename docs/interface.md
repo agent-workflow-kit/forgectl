@@ -840,7 +840,7 @@ The default list is the union of requested-from-you and authored-by-you, as two 
 | repo and number, title | the `prs` item |
 | badge | state, draft and the first blocker |
 | CI glyph | `ci.state` |
-| approvals | `approvals`; on GitLab over `approvals` plus the `approvals_left` of the approval rule forgectl already reads, such as `1/2`; on GitHub, which reports no required count in the model, the bare count |
+| approvals | the bare `approvals` count on both hosts; the `1/2` form over the required count (on GitLab `approvals` plus the `approvals_left` of the approval rule) arrives with #86, because the snapshot does not expose the required count yet |
 | comments | `activity`: `comments_total`, `unresolved_threads`, `others_since_push` (new since push) and `awaiting_my_reply` |
 | age | since `head.pushed_at` (blank when it is null) and since `updated_at` |
 

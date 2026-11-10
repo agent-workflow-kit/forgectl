@@ -7,9 +7,12 @@ Activity), and the counts here are shown as given: this module never recomputes 
 the push", so an author in ``activity.ignore_authors`` cannot move a row.
 
 Fields read from the snapshot (all optional, anything of the wrong type counts as unknown):
-``ci.state``, ``approvals``, ``approvals_left`` (assumed; see ``required_approvals``),
-``review_decision``, ``blocked_by[0].code``, ``head.pushed_at``, ``updated_at``, and
+``ci.state``, ``approvals``, ``review_decision``, ``blocked_by[0].code``, ``head.pushed_at``,
+``updated_at``, ``complete`` and
 ``activity.{comments_total, unresolved_threads, others_since_push, awaiting_my_reply}``.
+
+Every fixed-width cell is cut and padded by terminal cell width, so wide characters keep the
+later columns aligned, and a row is one line.
 """
 
 from __future__ import annotations
@@ -17,6 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+
+from rich.cells import cell_len, set_cell_size
 
 from . import safe
 from .source import Row
@@ -46,7 +51,6 @@ class Summary:
 
     ci_state: str | None = None
     approvals: int | None = None
-    approvals_left: int | None = None
     review_decision: str | None = None
     blocker: str | None = None
     pushed_at: str | None = None
@@ -55,6 +59,7 @@ class Summary:
     unresolved_threads: int | None = None
     others_since_push: int | None = None
     awaiting_my_reply: int | None = None
+    complete: bool = True  # False: the snapshot says part of its data could not be read
 
 
 @dataclass
@@ -84,7 +89,6 @@ def summarize(snap: dict[str, Any]) -> Summary:
     return Summary(
         ci_state=_word(_d(snap.get("ci")).get("state")),
         approvals=_count(snap.get("approvals")),
-        approvals_left=_count(snap.get("approvals_left")),
         review_decision=_word(snap.get("review_decision")),
         blocker=_word(_d(first).get("code")),
         pushed_at=_word(_d(snap.get("head")).get("pushed_at")),
@@ -93,6 +97,7 @@ def summarize(snap: dict[str, Any]) -> Summary:
         unresolved_threads=_count(activity.get("unresolved_threads")),
         others_since_push=_count(activity.get("others_since_push")),
         awaiting_my_reply=_count(activity.get("awaiting_my_reply")),
+        complete=snap.get("complete") is not False,
     )
 
 
@@ -104,7 +109,8 @@ def parse_time(value: Any) -> datetime | None:
     if not isinstance(value, str) or len(value) > 64:
         return None
     try:
-        parsed = datetime.fromisoformat(value)
+        # 3.12's parser takes `Z` but not `z`, which RFC 3339 allows
+        parsed = datetime.fromisoformat(value[:-1] + "Z" if value.endswith("z") else value)
     except ValueError:
         return None
     return parsed if parsed.tzinfo is not None else None
@@ -123,23 +129,22 @@ def age(value: Any, now: datetime) -> str:
 
 
 def approvals_cell(s: Summary) -> str:
-    """``1/2`` when the required count is known, else the bare count.
+    """The bare ``approvals`` count on both hosts; ``?`` when the snapshot has none."""
+    # todo(#86): render approvals/required once the snapshot exposes the required count
+    return "?" if s.approvals is None else str(s.approvals)
 
-    The required count is ``approvals + approvals_left`` (GitLab). GitHub reports none, so it
-    shows the bare count.
-    """
-    if s.approvals is None:
-        return "?"
-    if s.approvals_left is None:
-        return str(s.approvals)
-    return f"{s.approvals}/{s.approvals + s.approvals_left}"
+
+def ci_cell(s: Summary) -> str:
+    """The CI glyph. A none or unknown state from an incomplete snapshot is ``?``, not "no CI"."""
+    glyph = CI_GLYPHS.get(s.ci_state or "", "?")
+    return "?" if glyph == CI_GLYPHS["none"] and not s.complete else glyph
 
 
 def comments_cell(s: Summary) -> str:
     def part(label: str, value: int | None) -> str:
         return f"{label}{'-' if value is None else value}"
 
-    return " ".join(
+    text = " ".join(
         (
             part("c", s.comments_total),
             part("u", s.unresolved_threads),
@@ -147,6 +152,7 @@ def comments_cell(s: Summary) -> str:
             part("r", s.awaiting_my_reply),
         )
     )
+    return text if s.complete else text + "?"
 
 
 def badge_cell(item: dict[str, Any], s: Summary | None) -> str:
@@ -166,7 +172,7 @@ def cells(row: Row, state: RowState, now: datetime) -> list[str]:
         pushed = age(s.pushed_at, now)
         # the snapshot's updated_at is fresher than the list's when both are there
         updated = age(s.updated_at, now) or updated
-        ci = CI_GLYPHS.get(s.ci_state or "", "?")
+        ci = ci_cell(s)
         approvals = approvals_cell(s)
         decision = DECISIONS.get(s.review_decision or "", "?")
         comments = comments_cell(s)
@@ -197,13 +203,25 @@ def _login(author: Any) -> str:
     return safe.line(login) if login else "(unknown)"
 
 
-WIDTHS = (0, 14, 1, 5, 3, 16, 9)  # columns 0..6; the first is set per list, the rest are fixed
+WIDTHS = (0, 26, 1, 5, 3, 20, 9)  # columns 0..6; the first is set per list, the rest are fixed
+TITLE_WIDTH = 40
+
+
+def fit(text: str, width: int) -> str:
+    """``text`` cut to ``width`` terminal cells (ending in ``…`` when cut) and padded to it."""
+    if cell_len(text) <= width:
+        return set_cell_size(text, width)
+    if width < 1:
+        return ""
+    return set_cell_size(text, width - 1) + "…"
 
 
 def row_line(parts: list[str], pr_width: int) -> str:
+    """One line: the seven fixed columns, the title, then the author and roles."""
     widths = (pr_width, *WIDTHS[1:])
-    fixed = "  ".join(p.ljust(w) for p, w in zip(parts[:7], widths, strict=True))
-    return "  ".join([fixed, *[p for p in parts[7:] if p]])
+    fixed = [fit(p, w) for p, w in zip(parts[:7], widths, strict=True)]
+    rest = [fit(parts[7], TITLE_WIDTH), *parts[8:]]
+    return "  ".join([*fixed, *[p for p in rest if p]]).rstrip()
 
 
 # -- ordering ----------------------------------------------------------------------------------
@@ -232,11 +250,17 @@ def repo_of(row: Row) -> str:
     return str(row.item.get("repo") or row.pr.rsplit("#", 1)[0])
 
 
+def _newest_first(row: Row) -> tuple[int, float]:
+    when = parse_time(row.item.get("updated_at"))
+    return (1, 0.0) if when is None else (0, -when.timestamp())
+
+
 def order(rows: list[Row], states: dict[str, RowState], mode: str) -> list[Row]:
     """``repo``: grouped by repo, newest update first within a repo. ``attention``: needs
-    attention first, then by repo and newest update. Ties end on ``pr``. Stable sorts."""
+    attention first, then by repo and newest update. Ties end on ``pr``. Stable sorts. Updates
+    compare as instants; a null or unparsable time sorts after every real one."""
     ordered = sorted(rows, key=lambda r: r.pr)
-    ordered.sort(key=lambda r: str(r.item.get("updated_at", "")), reverse=True)
+    ordered.sort(key=_newest_first)
     ordered.sort(key=repo_of)
     if mode == SORT_ATTENTION:
         ordered.sort(key=lambda r: attention_rank(states.get(r.pr) or RowState()))

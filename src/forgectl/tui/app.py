@@ -1,6 +1,6 @@
 """The `browse` app: a list, a detail pane, and one action (open in a browser). Read-only.
 
-There is no write action here: no merge (TODO(#60)), no post. Forge text reaches the screen
+There is no write action here: no merge (todo(#60)), no post. Forge text reaches the screen
 only through ``safe`` and ``render``, as ``Content`` that is never parsed as markup.
 """
 
@@ -13,6 +13,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
+from rich.cells import cell_len
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -28,7 +29,7 @@ from .opener import Opener, OpenRefused, is_openable
 from .source import DataSource, Listing, Row, load_list
 
 DEFAULT_CONCURRENCY = 4  # snapshots in flight at once; a small default
-# TODO(#59): the configurable name for it (and its schema entry) with the other tunables.
+# todo(#59): config key for snapshot concurrency (and its schema entry)
 
 HELP = """\
 q       quit
@@ -106,6 +107,7 @@ class BrowseApp(App[None]):
     #left { width: 3fr; }
     #detail { width: 2fr; display: none; border-left: solid $primary; padding: 0 1; }
     #filter { display: none; }
+    #list { text-wrap: nowrap; text-overflow: ellipsis; }
     #checks { height: auto; max-height: 12; }
     #footer { dock: bottom; height: 2; }
     #bar, #status { height: 1; }
@@ -144,7 +146,7 @@ class BrowseApp(App[None]):
         self.focus_pr = focus
         self.intent = "back"
         self.selected: str | None = None
-        self.merged: list[str] = []  # TODO(#60): PRs merged from here; empty until `m` exists
+        self.merged: list[str] = []  # todo(#60): PRs merged from here; empty until `m` exists
         self._rows: list[Row] = []
         self._visible: list[Row] = []
         self._states: dict[str, columns.RowState] = {}
@@ -152,6 +154,11 @@ class BrowseApp(App[None]):
         self._list_filters: set[str] = set()
         self._shown_prs: list[str] = []  # the PRs in the option list, in order
         self._snap_token = 0  # a newer list load stops the snapshot pool of an older one
+        # One limiter for every round: reads of an older round still in flight keep their slots,
+        # so a reload cannot put more than ``concurrency`` snapshot reads on the wire.
+        self._snap_slots = asyncio.Semaphore(max(1, self.concurrency))
+        self._row_by_pr: dict[str, Row] = {}
+        self._pr_width = 0
         self._snap_done = 0
         self._snap_total = 0
         self._filter = ""
@@ -228,7 +235,8 @@ class BrowseApp(App[None]):
                 notes.append("list incomplete")
             self._list_note = "; ".join(notes) if notes else None
             self._rows = listing.rows
-            # TODO(#59): keep a row's last good data while it refreshes, and mark it stale.
+            self._row_by_pr = {r.pr: r for r in self._rows}
+            # todo(#59): keep a row's last good data while it refreshes, and mark it stale.
             self._states = {r.pr: columns.RowState() for r in self._rows}
             self._apply_filter()
             self._paint(self._list_note or f"{len(self._rows)} PRs", self._detail_note)
@@ -259,13 +267,14 @@ class BrowseApp(App[None]):
             ]
             now = self.clock()
             parts = [columns.cells(r, self._state(r), now) for r in visible]
-            width = min(60, max((len(p[0]) for p in parts), default=0))
+            width = min(60, max((cell_len(p[0]) for p in parts), default=0))
             prompts = [safe.plain(columns.row_line(p, width)) for p in parts]
         except Exception as exc:  # bad data reaches the status line, not a traceback
             self._list_note = self._internal(exc)
             self._status("")
             return
         self._visible = visible
+        self._pr_width = width
         olist = self.query_one("#list", OptionList)
         prs = [r.pr for r in visible]
         if prs == self._shown_prs and olist.option_count == len(prs):
@@ -292,15 +301,21 @@ class BrowseApp(App[None]):
     # -- snapshots: one per row, loaded progressively -----------------------------------------
 
     def _snapshot_order(self) -> list[str]:
-        """Rows in the viewport first, then the other shown rows, then the filtered-out ones."""
+        """The rows in the viewport first, then the other rows in display order.
+
+        Every row is one line, so the scroll offset is an index into the shown rows. Rows the
+        filters hide come last, in the order they would be shown.
+        """
         olist = self.query_one("#list", OptionList)
         start = max(0, int(olist.scroll_y))
         height = max(1, olist.size.height)
         shown = list(self._shown_prs)
         first = shown[start : start + height]
-        rest = [p for p in shown if p not in set(first)]
+        taken = set(first)
+        rest = [p for p in shown if p not in taken]
         seen = set(shown)
-        hidden = [r.pr for r in self._rows if r.pr not in seen]
+        hidden_rows = [r for r in self._rows if r.pr not in seen]
+        hidden = [r.pr for r in columns.order(hidden_rows, self._states, self._order_mode)]
         return first + rest + hidden
 
     def _start_snapshots(self) -> None:
@@ -320,20 +335,54 @@ class BrowseApp(App[None]):
         async def lane() -> None:
             while queue and token == self._snap_token:
                 pr = queue.popleft()
-                try:
-                    snap = await in_thread(self.source.snapshot, pr)
-                    state = columns.RowState(columns.LOADED, columns.summarize(snap))
-                except ForgectlError as err:
-                    state = columns.RowState(columns.FAILED, error=safe.line(err.code, 60))
-                except Exception as exc:  # a source bug or bad data marks the row only
-                    state = columns.RowState(columns.FAILED, error=self._internal(exc))
+                async with self._snap_slots:  # held until the read ends, even after a reload
+                    if token != self._snap_token:
+                        return
+                    try:
+                        snap = await in_thread(self.source.snapshot, pr)
+                        state = columns.RowState(columns.LOADED, columns.summarize(snap))
+                    except ForgectlError as err:
+                        state = columns.RowState(columns.FAILED, error=safe.line(err.code, 60))
+                    except Exception as exc:  # a source bug or bad data marks the row only
+                        state = columns.RowState(columns.FAILED, error=self._internal(exc))
                 if token != self._snap_token:  # a newer list replaced this one
                     return
-                self._states[pr] = state
-                self._snap_done += 1
-                self._apply_filter()
+                self._snapshot_arrived(pr, state)
 
         await asyncio.gather(*(lane() for _ in range(self.concurrency)))
+
+    def _snapshot_arrived(self, pr: str, new: columns.RowState) -> None:
+        """Store a row's new state. Only that row's text is redrawn unless the snapshot moves
+        it: into or out of the filtered list, or to another place in the attention order."""
+        old = self._state(self._row_by_pr[pr]) if pr in self._row_by_pr else columns.RowState()
+        self._states[pr] = new
+        self._snap_done += 1
+        row = self._row_by_pr.get(pr)
+        if row is None:
+            self._paint_bar()
+            return
+        moves = columns.matches(row, old, self._list_filters) != columns.matches(
+            row, new, self._list_filters
+        )
+        if self._order_mode == columns.SORT_ATTENTION:
+            moves = moves or columns.attention_rank(old) != columns.attention_rank(new)
+        if moves:
+            self._apply_filter()
+            return
+        if pr not in self._shown_prs:  # hidden before and after: nothing to draw
+            self._paint_bar()
+            return
+        olist = self.query_one("#list", OptionList)
+        index = self._shown_prs.index(pr)
+        try:
+            parts = columns.cells(row, new, self.clock())
+            olist.replace_option_prompt_at_index(
+                index, safe.plain(columns.row_line(parts, self._pr_width))
+            )
+        except Exception as exc:  # bad data reaches the status line, not a traceback
+            self._list_note = self._internal(exc)
+            self._status("")
+        self._paint_bar()
 
     def _highlighted_row(self) -> Row | None:
         index = self.query_one("#list", OptionList).highlighted
@@ -464,7 +513,7 @@ class BrowseApp(App[None]):
 
     def action_refresh_selected(self) -> None:
         """The PR in the visible detail pane, else the highlighted row's PR (opening it)."""
-        # TODO(#59): refresh only what may have changed, and the automatic refresh.
+        # todo(#59): refresh only what may have changed, and the automatic refresh.
         if self._detail_pr is not None and self._detail_shown():
             self._start_detail(self._detail_pr)
             return
@@ -475,7 +524,7 @@ class BrowseApp(App[None]):
         self._start_detail(row.pr)
 
     def action_reload_list(self) -> None:
-        # TODO(#59): R refreshes all: `prs`, then every row's snapshot; selection and scroll
+        # todo(#59): R refreshes all: `prs`, then every row's snapshot; selection and scroll
         # position survive any refresh. Until the rows carry snapshots, R reloads both `prs`
         # calls and then the PR in the visible detail pane.
         if self._loading:
