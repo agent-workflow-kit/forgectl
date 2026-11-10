@@ -43,7 +43,8 @@ def drained_children() -> Iterator[None]:
     """The app reads forges on daemon threads (so `q` never waits for a slow read), and leaving
     the test context can beat a read that a newer round replaced: its fake `gh` is still ending
     when the leaked-child check runs. Give those reads time to finish and be reaped (their own
-    gateway reaps them) before that check, which runs after this teardown."""
+    gateway reaps them) before that check, which runs after this teardown. This cannot tell a child
+    the gateway killed from one that exits on its own within the 30 s: it only waits for both."""
     before = direct_children()
     yield
     deadline = time.monotonic() + 30

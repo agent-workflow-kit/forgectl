@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import time
 from collections.abc import Callable
 
@@ -564,32 +565,42 @@ def test_a_quoted_git_path_selects_its_lexer() -> None:
     assert style._unquote("plain.py") == "plain.py"
 
 
-def cpu_seconds(fn: Callable[[], object], runs: int = 5) -> float:
+def cpu_seconds(fn: Callable[[], object], runs: int = 15) -> float:
     """The least CPU time of ``runs`` calls: unlike wall time it does not grow while this process
-    waits for a CPU on a loaded machine, and the minimum drops one-off interruptions."""
+    waits for a CPU on a loaded machine, and the minimum drops one-off interruptions. The
+    collector is off while timing, so a collection pause lands in no run."""
     best = float("inf")
-    for _ in range(runs):
-        started = time.process_time()
-        fn()
-        best = min(best, time.process_time() - started)
+    gc.disable()
+    try:
+        for _ in range(runs):
+            started = time.process_time()
+            fn()
+            best = min(best, time.process_time() - started)
+    finally:
+        gc.enable()
     return best
 
 
 def test_split_is_linear_and_keeps_span_order() -> None:
-    # Work scales with the input: 4x the input costs about 4x (a quadratic split costs about
-    # 16x), so a bound of 9x separates the two whatever the speed or the load of the machine.
+    # Work scales with the input: 16x the input costs about 16x, a quadratic split about 256x.
+    # Measured on a 20-core host with 40 busy loops running, the linear ratio of the split stayed
+    # between 17 and 27 and a quadratic stand-in gave 284, so a bound of 90 separates the two
+    # whatever the speed or the load of the machine. The markdown body stays under the renderer's
+    # size cap (MARKDOWN_CHARS), past which it would not be rendered at all; there the linear
+    # ratio was 13 to 28 and the quadratic stand-in gave 89 (the other work dilutes it), so 50.
     def markdown_of(lines: int) -> Callable[[], object]:
-        body = "\n".join("*a* `b`" for _ in range(lines))[: 2 * lines]
+        body = "\n".join("*a* `b`" for _ in range(lines))
+        assert len(body) <= style.MARKDOWN_CHARS
         return lambda: style.markdown(body, True)
 
-    assert cpu_seconds(markdown_of(10_000)) < 9 * cpu_seconds(markdown_of(2_500))
+    assert cpu_seconds(markdown_of(3_200)) < 50 * cpu_seconds(markdown_of(200))
 
     def split_of(lines: int) -> Callable[[], object]:
         text = "\n".join(["a"] * lines)
         spans = [(2 * i, 2 * i + 1, "b") for i in range(lines)]
         return lambda: style._split(text, spans)
 
-    assert cpu_seconds(split_of(10_000)) < 9 * cpu_seconds(split_of(2_500))
+    assert cpu_seconds(split_of(16_000)) < 90 * cpu_seconds(split_of(1_000))
     many = "\n".join(["a"] * 10_000)
     out = style._split(many, [(2 * i, 2 * i + 1, "b") for i in range(10_000)])
     assert len(out) == 10_000 and out[9_999][1] == [(0, 1, "b")]

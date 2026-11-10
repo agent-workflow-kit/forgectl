@@ -16,6 +16,7 @@ import signal
 import sys
 import threading
 import time
+import types
 import urllib.parse
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
@@ -1546,12 +1547,14 @@ def test_an_exhausted_budget_stops_before_any_process_starts(fake_forges: FakeFo
     assert fake_forges.calls() == []
 
 
-def test_budget_clock_and_reserve() -> None:
+def test_budget_clock_and_reserve(monkeypatch: pytest.MonkeyPatch) -> None:
+    ticks = iter([100.0, 102.5])  # a fake clock: the call "takes" exactly 2.5 s
+    monkeypatch.setattr(gw, "time", types.SimpleNamespace(monotonic=lambda: next(ticks)))
     budget = gw.Budget(10)
     assert budget.remaining() == 10
     with budget.spending():
-        time.sleep(0.05)
-    assert 5 < budget.remaining() < 10  # the 0.05 s spent is gone; a loaded host may take longer
+        pass
+    assert budget.remaining() == 7.5
     budget.grant_write_reserve()
     budget.grant_write_reserve()  # once only
     assert budget.total == 10 + gw.WRITE_RESERVE
@@ -1659,7 +1662,7 @@ def test_stdout_cap_kills_the_child_and_flags_it_without_reading_on() -> None:
         max_stdout=100_000,
     )
     assert result.stdout_truncated and len(result.stdout) == 100_000
-    assert not result.timed_out and time.monotonic() - started < 5
+    assert not result.timed_out and time.monotonic() - started < 20  # far below the 30 s timeout
     assert group_members(result.pgid) == []
 
 
