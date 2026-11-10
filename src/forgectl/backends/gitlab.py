@@ -24,7 +24,7 @@ from typing import Any, TypeVar
 from .. import model as m
 from ..errors import ForgectlError
 from ..gateway import Gateway, Response, Target, path_int, shown_text, verify_identity
-from ..hosts import Hosts, redact_secrets
+from ..hosts import Hosts, User, redact_secrets
 from ..identifiers import PrRef, RepoRef, bind_login
 from ..reads import SHOW_READINESS, ReadEnv
 from ..sanitize import sanitize_line, sanitize_text
@@ -289,8 +289,11 @@ class GitLabBackend:
         retry: Retry | None = None,
         today: Callable[[], date] | None = None,
         until_known: UntilKnown | None = None,
+        call: Callable[[Callable[[], User]], User] | None = None,
     ) -> None:
         self._hosts = hosts
+        #: retries the one `GET /user` read that names me for `activity` (no retry when omitted)
+        self._viewer_call = call
         self._gateway: Gateway = hosts.gateway
         self._warn_to = warn or _noop
         self._retry: Retry = retry or _direct
@@ -308,6 +311,7 @@ class GitLabBackend:
             env.hosts,
             warn=env.warn,
             retry=env.call,
+            call=env.call,
             until_known=lambda fetch, unknown: env.until_known(fetch, unknown, SHOW_READINESS),
         )
 

@@ -724,9 +724,49 @@ def make_snapshot(**over: Any) -> m.Snapshot:
         rate_limit=m.RateLimit(host="github.com", remaining=10, reset_at=T1),
         fetched_at=T2,
         incomplete=(),
+        activity=m.Activity(
+            comments_total=0, unresolved_threads=0, others_since_push=None, awaiting_my_reply=0
+        ),
     )
     base.update(over)
     return m.Snapshot(**base)
+
+
+def test_activity_serializes_in_the_snapshot_and_rejects_a_bad_count() -> None:
+    activity = m.Activity(
+        comments_total=3, unresolved_threads=2, others_since_push=1, awaiting_my_reply=0
+    )
+    out = make_snapshot(activity=activity).to_dict()
+    assert out["activity"] == {
+        "comments_total": 3,
+        "unresolved_threads": 2,
+        "others_since_push": 1,
+        "awaiting_my_reply": 0,
+    }
+    validate(out, "forgectl/cli/snapshot.json")
+    for bad in (-1, True, 1.5):
+        with pytest.raises(ValueError, match="count"):
+            m.Activity(
+                comments_total=bad,  # type: ignore[arg-type]
+                unresolved_threads=0,
+                others_since_push=None,
+                awaiting_my_reply=0,
+            )
+
+
+def test_a_snapshot_without_activity_cannot_be_built() -> None:
+    with pytest.raises(TypeError):
+        m.Snapshot(  # type: ignore[call-arg]
+            pr=make_pr(),
+            review_requests=(),
+            teams_visible=True,
+            reviews=(),
+            latest_by_reviewer=(),
+            threads=(),
+            ci=ci_of(check("a", "passing")),
+            rate_limit=m.RateLimit(host="github.com", remaining=10, reset_at=T1),
+            fetched_at=T2,
+        )
 
 
 def test_snapshot_validates_against_schema() -> None:

@@ -92,8 +92,32 @@ def test_example_values_equal_the_schema_defaults() -> None:
         assert data[key] == props[key]["default"], key
     assert data["timeout"] == props["timeout"]["default"] == "60s"
     assert data["hooks"] == props["hooks"]["default"] == {}
+    assert data["activity"] == props["activity"]["default"] == {}
+    assert props["activity"]["properties"]["ignore_authors"]["default"] == []
     for key, prop in props["me"]["properties"].items():
         assert data["me"][key] == prop["default"], key
+
+
+def test_activity_ignore_authors_loads_and_defaults_to_empty(home: Path) -> None:
+    assert load(home, "").config.activity.ignore_authors == ()
+    text = 'activity:\n  ignore_authors: ["dependabot[bot]", "renovate*"]\n'
+    assert load(home, text).config.activity.ignore_authors == ("dependabot[bot]", "renovate*")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "activity:\n  ignore_authors: renovate\n",
+        "activity:\n  ignore_authors: [1]\n",
+        'activity:\n  ignore_authors: [""]\n',
+        'activity:\n  ignore_authors: ["a\\u0007b"]\n',
+        "activity:\n  ignore_bots: true\n",
+    ],
+)
+def test_activity_refuses_a_bad_ignore_list(home: Path, text: str) -> None:
+    with pytest.raises(ForgectlError) as caught:
+        load(home, text)
+    assert caught.value.code == "config_invalid"
 
 
 def test_default_timeout_is_sixty_seconds() -> None:
@@ -114,7 +138,7 @@ def uncommented(key: str) -> str:
 
 
 def test_the_commented_examples_in_the_example_file_are_valid(home: Path) -> None:
-    text = "".join(uncommented(key) for key in ("hosts", "repos", "hooks"))
+    text = "".join(uncommented(key) for key in ("hosts", "repos", "hooks", "activity"))
     config = load(home, text).config
     assert config.hosts["gitlab.example.com"].backend == "gitlab"
     assert config.hosts["gitlab.example.com"].api_prefix == "/gitlab"
@@ -159,6 +183,12 @@ def test_an_empty_or_relative_xdg_config_home_is_ignored(home: Path, value: str)
 def test_drop_ins_alone_are_read_without_a_main_file(home: Path) -> None:
     write(default_file(home).parent / "config.d" / "a.yaml", "retries: 2\n")
     assert load(home).config.retries == 2
+
+
+def test_a_drop_in_replaces_the_ignore_list_rather_than_appending(home: Path) -> None:
+    write(default_file(home).parent / "config.d" / "a.yaml", "activity:\n  ignore_authors: [b]\n")
+    config = load(home, "activity:\n  ignore_authors: [a, c]\n").config
+    assert config.activity.ignore_authors == ("b",)
 
 
 def test_an_empty_file_and_a_comment_only_file_are_defaults(home: Path) -> None:
@@ -1305,6 +1335,7 @@ def test_hash_is_sha256_of_sorted_key_json_of_the_merged_config_after_defaults(
         "retries": 5,
         "hosts": {},
         "repos": {},
+        "activity": {"ignore_authors": []},
         "hooks": {"pre-merge": [], "post-merge": [], "pre-post": [], "post-post": []},
     }
     assert loaded.config_hash == hashlib.sha256(canonical(expected).encode()).hexdigest()

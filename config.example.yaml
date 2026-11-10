@@ -60,6 +60,13 @@ repos: {}
 #     # The key matches the canonical path, ignoring case.
 #     merge_method: squash
 
+# Authors whose comments and reviews the `activity` block of `snapshot` ignores: logins, with * and
+# ? as wildcards (everything else, brackets included, is literal). Your own login is never ignored.
+# `author.is_bot` never decides this; only this list does. A list replaces on merge.
+activity: {}
+# activity:
+#   ignore_authors: ["dependabot[bot]", "renovate*"]
+
 # Hooks, each a list of entries (default []). cmd runs through sh -c in its own process group.
 # Exit 0 continues; on a pre- hook, exit 13 escalates and any other failure or a timeout vetoes;
 # post- failures are logged and warned, never fatal. The payload is JSON on stdin and never holds

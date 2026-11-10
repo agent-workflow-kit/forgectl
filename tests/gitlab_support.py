@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from forgectl.backends.gitlab import GitLabBackend
-from forgectl.config import Host, LoadedConfig
+from forgectl.config import Activity, Host, LoadedConfig
 from forgectl.gateway import Gateway, ProcessResult, quote_component
 from forgectl.hosts import Hosts
 from forgectl.identifiers import PrRef
@@ -139,6 +139,7 @@ def make_hosts(
     host: str = "gitlab.com",
     prefix: str = "",
     timeout: float = 30.0,
+    ignore_authors: tuple[str, ...] = (),
 ) -> Hosts:
     """The hosts (and their gateway) of a GitLab test: `glab` answered by ``fake``."""
     bindir = tmp_path / "bin"
@@ -152,7 +153,9 @@ def make_hosts(
     declared[host] = declared.get(host, Host()).model_copy(update={"token_env": "MY_TOKEN"})
     base = LoadedConfig.defaults()
     config = LoadedConfig(
-        config=base.config.model_copy(update={"hosts": declared}),
+        config=base.config.model_copy(
+            update={"hosts": declared, "activity": Activity(ignore_authors=ignore_authors)}
+        ),
         config_hash="x",
         config_path=None,
     )
@@ -177,8 +180,11 @@ def make_backend(
     today: Any = None,
     until_known: Any = None,
     timeout: float = 30.0,
+    ignore_authors: tuple[str, ...] = (),
 ) -> GitLabBackend:
-    hosts = make_hosts(fake, tmp_path, host=host, prefix=prefix, timeout=timeout)
+    hosts = make_hosts(
+        fake, tmp_path, host=host, prefix=prefix, timeout=timeout, ignore_authors=ignore_authors
+    )
     return GitLabBackend(hosts, warn=warn, retry=retry, today=today, until_known=until_known)
 
 

@@ -40,6 +40,12 @@ def script(forges: FakeForges) -> None:
         forges.answer("gh", "graphql", method="POST", stdin_re=f"query {op}\\b", body=doc)
     forges.answer(
         "gh",
+        "user",
+        body={"login": "user-1", "id": 1001, "html_url": "https://github.com/user-1"},
+        headers=SCOPES,
+    )
+    forges.answer(
+        "gh",
         endpoint_re=r"pulls/7/requested_reviewers",
         method="GET",
         body=rec("requested-reviewers"),
