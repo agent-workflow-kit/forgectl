@@ -139,8 +139,8 @@ class _Budget:
             self.lines.extend(lines)
 
 
-def reviews_text(snap: dict[str, Any]) -> str:
-    """The reviews within half of ``REST_BUDGET``."""
+def _reviews_out(snap: dict[str, Any]) -> _Budget:
+    """The reviews within half of ``REST_BUDGET``, so they cannot starve the comments."""
     out = _Budget(REST_BUDGET // 2)
     latest = [x for x in (snap.get("latest_by_reviewer") or []) if isinstance(x, dict)]
     reviews = [x for x in (snap.get("reviews") or []) if isinstance(x, dict)]
@@ -155,15 +155,24 @@ def reviews_text(snap: dict[str, Any]) -> str:
         out.add(head, *([_indent(safe.text(body, COMMENT_LIMIT))] if body else []))
     if not latest and not reviews:
         out.note("  (none)")
+    return out
+
+
+def _joined(out: _Budget) -> str:
     lines = out.lines
     if out.full:
         lines.append(f"  ... {out.skipped} more not shown")
     return "\n".join(lines)
 
 
-def comments_text(snap: dict[str, Any]) -> str:
-    """The comment threads within half of ``REST_BUDGET``."""
-    out = _Budget(REST_BUDGET // 2)
+def reviews_text(snap: dict[str, Any], out: _Budget | None = None) -> str:
+    return _joined(out if out is not None else _reviews_out(snap))
+
+
+def comments_text(snap: dict[str, Any], reviews: _Budget | None = None) -> str:
+    """The comment threads within what the reviews leave of ``REST_BUDGET``."""
+    reviews = reviews if reviews is not None else _reviews_out(snap)
+    out = _Budget(REST_BUDGET - reviews.used)
     threads = [t for t in (snap.get("threads") or []) if isinstance(t, dict)]
     for thread in threads[:MAX_THREADS]:
         comments = [c for c in (thread.get("comments") or []) if isinstance(c, dict)]
@@ -193,10 +202,7 @@ def comments_text(snap: dict[str, Any]) -> str:
             out.skip(len(threads) - MAX_THREADS)
         else:
             out.note(f"  ... {len(threads) - MAX_THREADS} more threads not shown")
-    lines = out.lines
-    if out.full:
-        lines.append(f"  ... {out.skipped} more not shown")
-    return "\n".join(lines)
+    return _joined(out)
 
 
 def changes_text(diff: dict[str, Any] | None) -> str:
@@ -205,12 +211,16 @@ def changes_text(diff: dict[str, Any] | None) -> str:
 
 
 def _count(value: Any) -> str:
-    """A number for a header: never forge text. Anything that is not an int shows as ``?``."""
-    return str(value) if isinstance(value, int) and not isinstance(value, bool) else "?"
+    """A number for a header: never forge text. Anything but an int from 0 to 10**9 is ``?``."""
+    ok = isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 10**9
+    return str(value) if ok else "?"
 
 
-def counts_of(snap: dict[str, Any], checks: list[dict[str, Any]]) -> dict[str, str]:
-    """The header count of each section that has one, numbers only."""
+def counts_of(snap: dict[str, Any]) -> dict[str, str]:
+    """The header count of each section that has one, numbers only. CI counts every check
+    the forge sent, not only the capped list that is shown."""
+    ci_checks = _d(snap.get("ci")).get("checks") or []
+    checks = [c for c in ci_checks if isinstance(c, dict)]
     failing = sum(1 for c in checks if c.get("state") == "failing")
     threads = [t for t in (snap.get("threads") or []) if isinstance(t, dict)]
     comments = sum(
@@ -260,6 +270,7 @@ def check_labels_of(checks: list[dict[str, Any]]) -> tuple[list[dict[str, Any]],
 def detail_of(snap: dict[str, Any], diff: dict[str, Any] | None) -> Detail:
     url = snap.get("url")
     checks, labels = check_labels_of(checks_of(snap))
+    reviews = _reviews_out(snap)
     return Detail(
         url=url if isinstance(url, str) else None,
         checks=checks,
@@ -269,10 +280,10 @@ def detail_of(snap: dict[str, Any], diff: dict[str, Any] | None) -> Detail:
             "description": description_text(snap),
             "changes": changes_text(diff),
             "ci": ci_text(snap),
-            "comments": comments_text(snap),
-            "reviews": reviews_text(snap),
+            "comments": comments_text(snap, reviews),
+            "reviews": reviews_text(snap, reviews),
         },
-        counts=counts_of(snap, checks_of(snap)),
+        counts=counts_of(snap),
     )
 
 

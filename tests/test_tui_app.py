@@ -884,7 +884,7 @@ def test_the_rest_of_the_pane_has_one_total_budget() -> None:
     assert time.monotonic() - started < 2.0
     footer = body.rsplit("\n", 1)[-1]
     assert footer.strip().startswith("...") and footer.endswith("more not shown")
-    assert len(body) <= render.REST_BUDGET // 2 + len(footer) + 1
+    assert len(body) <= render.REST_BUDGET + len(footer) + 1  # no reviews: all the budget
 
     source = FakeSource(authored=[make_item(1)], snapshots={PR1: snap})
 

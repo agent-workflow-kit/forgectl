@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
+import re
+
 from textual.pilot import Pilot
 from textual.widgets import Input, OptionList, Static
 
@@ -223,7 +224,7 @@ def test_headers_hold_only_numbers_whatever_the_forge_sends() -> None:
         for name in sections.NAMES:
             text = head(app, name)
             assert hostile not in text and "\x1b" not in text and "bold" not in text
-            assert text == text.encode("ascii", "ignore").decode() or text[0] in "▾▸"
+            assert re.fullmatch(r"[▾▸] [1-6] [A-Za-z]+( \([0-9a-z+ ,?-]+\))?", text), text
             assert app.query_one(f"#head-{name}", Static).content.spans == []  # type: ignore[union-attr]
         assert head(app, "changes") == "▸ 3 Changes (+? -?, ? files)"
 
@@ -234,10 +235,11 @@ def test_counts_are_computed_without_the_bodies() -> None:
     snap = make_snapshot(1, checks=[make_check("a", "failing"), make_check("b", "passing")])
     snap["threads"] = [{"comments": [{}, {}]}, {"comments": [{}]}, "junk"]
     snap["reviews"] = [{"state": "approved"}, "junk"]
-    counts = render.counts_of(snap, render.checks_of(snap))
+    counts = render.counts_of(snap)
     assert counts["ci"] == "2, 1 failing"
     assert counts["comments"] == "3" and counts["reviews"] == "1"
-    assert render.counts_of(snap, [make_check()])["ci"] == "1"  # no failing: no failing part
+    one = make_snapshot(1, checks=[make_check()])
+    assert render.counts_of(one)["ci"] == "1"  # no failing: no failing part
 
 
 def test_a_collapsed_section_is_not_painted_until_opened() -> None:
@@ -272,25 +274,85 @@ def test_the_help_lists_the_number_keys() -> None:
 
 
 def test_the_pane_keeps_its_scroll_position_when_a_section_below_collapses() -> None:
+    source = basic_source()
+    source.snapshots[PR1] = make_snapshot(1, title="Mine", body="\n".join(["line"] * 200))
+
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         await open_pr1(app, pilot)
         await pilot.press("3")
         pane = app.query_one("#detail")
+        assert pane.max_scroll_y > 0
         pane.scroll_to(y=3, animate=False)
         await pilot.pause()
         y = pane.scroll_y
+        assert y > 0
         await pilot.press("6")  # the last section: nothing above it moves
         await pilot.pause()
         assert pane.scroll_y == y
 
-    drive(basic_source(), script)
+    drive(source, script)
 
 
-@pytest.mark.parametrize("pr", [PR2])
-def test_a_pr_without_data_still_has_all_six_headers(pr: str) -> None:
+def test_a_pr_without_data_still_has_all_six_headers() -> None:
+    bare = make_snapshot(2, title="Theirs", body="", checks=[], comments=[], reviews=[])
+    bare["additions"] = bare["deletions"] = bare["changed_files"] = 0
+    source = basic_source()
+    source.snapshots[PR2] = bare
+
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         await pilot.press("enter")
         await settle(app, pilot)
         assert [head(app, n)[2] for n in sections.NAMES] == list("123456")
+        assert head(app, "ci") == "▾ 4 CI (0)"
 
-    drive(basic_source(), script)
+    drive(source, script)
+
+
+def test_the_ci_count_is_not_capped_with_the_check_list() -> None:
+    checks = [make_check(f"c{i}", "failing") for i in range(600)]
+    detail = render.detail_of(make_snapshot(1, checks=checks), None)
+    assert detail.counts["ci"] == "600, 600 failing"
+    assert len(detail.checks) < 600
+
+
+def test_a_count_that_is_not_a_small_number_shows_a_question_mark() -> None:
+    snap = make_snapshot(1)
+    snap["additions"], snap["deletions"], snap["changed_files"] = -1, 10**9 + 1, True
+    assert render.counts_of(snap)["changes"] == "+? -?, ? files"
+    snap["additions"], snap["deletions"], snap["changed_files"] = 0, 10**9, 7
+    assert render.counts_of(snap)["changes"] == f"+0 -{10**9}, 7 files"
+
+
+def test_comments_may_use_the_budget_the_reviews_leave() -> None:
+    body = "x" * 3_000
+    many = [make_comment(body) for _ in range(60)]  # 180k chars: more than half the budget
+    text = render.comments_text(make_snapshot(1, comments=many))
+    assert len(text) > render.REST_BUDGET // 2
+    assert "more not shown" not in text
+
+
+def test_reviews_still_keep_half_the_budget_and_comments_get_the_rest() -> None:
+    body = "y" * 3_000
+    snap = make_snapshot(1, comments=[make_comment("c")])
+    snap["reviews"] = [{"state": "commented", "author": {"login": "r"}, "body": body}] * 100
+    assert len(render.reviews_text(snap)) <= render.REST_BUDGET // 2
+    assert "more not shown" in render.reviews_text(snap)
+    assert "more not shown" not in render.comments_text(snap)
+
+
+def test_number_keys_work_after_a_refresh_hides_the_focused_check_list() -> None:
+    source = basic_source()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await open_pr1(app, pilot)
+        await pilot.press("tab")
+        assert app.focused is app.query_one("#checks")
+        source.snapshots[PR1] = make_snapshot(1, title="Mine", checks=[])
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert app.query_one("#checks").display is False
+        assert app.focused is not None
+        await pilot.press("1")
+        assert shown(app, "facts") is False
+
+    drive(source, script)

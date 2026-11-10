@@ -802,6 +802,8 @@ class BrowseApp(App[None]):
         focused = self.focused
         if focused is None or focused.id == "list":  # never take focus from the filter
             pane.focus()
+        elif focused.id == "checks" and not focused.display:  # a refresh dropped the checks
+            pane.focus()
         self._detail_note = f"{len(detail.checks)} checks" + (f"; {diff_note}" if diff_note else "")
         self._status(self._detail_note)
 
