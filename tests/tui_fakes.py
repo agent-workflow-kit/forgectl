@@ -141,6 +141,12 @@ def make_snapshot(
         "reviews": reviews or [],
         "latest_by_reviewer": [],
         "threads": threads,
+        "activity": {
+            "comments_total": len(threads),
+            "unresolved_threads": len(threads),
+            "others_since_push": None,
+            "awaiting_my_reply": len(threads),
+        },
         "ci": {
             "state": ci_state,
             "head_sha": SHA_A,
