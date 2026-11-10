@@ -18,7 +18,7 @@ from typing import Any
 from rich.cells import cell_len
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.events import Event, Key
 from textual.screen import ModalScreen
@@ -37,34 +37,54 @@ from .source_live import Cancelled
 DEFAULT_CONCURRENCY = 4  # snapshots in flight at once; `browse.concurrency` sets it
 DEFAULT_FULL_REFRESH_EVERY = 5  # `browse.full_refresh_every`
 
-HELP = """\
-q       quit
-?       this help
-/       filter the list (enter keeps it, escape clears it)
-enter   open the detail pane for the highlighted PR
-esc     close the detail pane or the filter
-o       open the PR in a browser; on a check in the detail pane, open the check
-        (only an http or https url is opened)
-s       switch the order: by repo (default) or needs-attention first
-a       filter: authored by me
-v       filter: review requested from me
-f       filter: CI failing
-n       filter: new comments from others
-        (filters combine as an intersection; the status bar names them)
-r       refresh selected (the PR in the detail pane, else the highlighted PR)
-R       refresh all (both lists, every row, then the detail pane)
-        rows keep their last data meanwhile ([refreshing]); a failed refresh keeps it
-        and marks the row [stale: code]; [changed] marks a row whose data changed, until
-        the next refresh or a key; the timed refresh re-reads only what may have changed
+# The help is data, one logical line per entry; the widgets wrap it to the terminal width. Adding a
+# key is one new row here (and its Binding). A test compares these keys with BrowseApp.BINDINGS.
+HELP_KEYS: list[tuple[str, str]] = [
+    ("q", "quit"),
+    ("?", "this help"),
+    ("/", "filter the list (enter keeps it, escape clears it)"),
+    ("enter", "open the detail pane for the highlighted PR"),
+    ("esc", "close the detail pane or the filter"),
+    (
+        "o",
+        "open the PR in a browser; on a check in the detail pane, open the check "
+        "(only an http or https url is opened)",
+    ),
+    ("s", "switch the order: by repo (default) or needs-attention first"),
+    ("a", "filter: authored by me"),
+    ("v", "filter: review requested from me"),
+    ("f", "filter: CI failing"),
+    (
+        "n",
+        "filter: new comments from others "
+        "(filters combine as an intersection; the status bar names them)",
+    ),
+    ("r", "refresh selected (the PR in the detail pane, else the highlighted PR)"),
+    (
+        "R",
+        "refresh all (both lists, every row, then the detail pane): rows keep their last data "
+        "meanwhile ([refreshing]); a failed refresh keeps it and marks the row [stale: code]; "
+        "[changed] marks a row whose data changed, until the next refresh or a key; the timed "
+        "refresh re-reads only what may have changed",
+    ),
+]
 
-columns: PR  badge  CI  approvals  review  comments  age  title
-  CI: ✓ passing, ✗ failing, … pending, - none, · loading, ! snapshot failed
-  comments: c total, u unresolved threads, n new from others since the push,
-            r threads awaiting my reply
-  age: since the last push / since the last update
+HELP_COLUMNS = "columns: PR, badge, CI, approvals, review, comments, age, title"
 
-browse is read-only: no merge, no post.
-Press any key to close this help."""
+HELP_LEGEND: list[tuple[str, str]] = [
+    ("CI", "✓ passing, ✗ failing, … pending, - none, · loading, ! snapshot failed"),
+    (
+        "comments",
+        "c total, u unresolved threads, n new from others since the push, "
+        "r threads awaiting my reply",
+    ),
+    ("age", "since the last push / since the last update"),
+]
+
+HELP_NOTES = [
+    "browse is read-only: no merge, no post.",
+    "Press any key to close this help.",
+]
 
 
 def in_thread[T](fn: Callable[..., T], *args: Any) -> asyncio.Future[T]:
@@ -100,9 +120,23 @@ def in_thread[T](fn: Callable[..., T], *args: Any) -> asyncio.Future[T]:
     return future
 
 
+def _help_table(rows: list[tuple[str, str]], table_id: str) -> Grid:
+    """A two-column table: a fixed key column, a description column that wraps."""
+    cells: list[Static] = []
+    for key, description in rows:
+        cells.append(Static(safe.plain(key), classes="help-key", markup=False))
+        cells.append(Static(safe.plain(description), classes="help-desc", markup=False))
+    return Grid(*cells, id=table_id, classes="help-table")
+
+
 class HelpScreen(ModalScreen[None]):
     def compose(self) -> ComposeResult:
-        yield Static(safe.plain(HELP), id="help", markup=False)
+        with VerticalScroll(id="help"):
+            yield _help_table(HELP_KEYS, "help-keys")
+            yield Static(safe.plain(HELP_COLUMNS), classes="help-para", markup=False)
+            yield _help_table(HELP_LEGEND, "help-legend")
+            for note in HELP_NOTES:
+                yield Static(safe.plain(note), classes="help-para", markup=False)
 
     def on_key(self, event: Key) -> None:
         event.stop()
@@ -121,7 +155,13 @@ class BrowseApp(App[None]):
     #footer { dock: bottom; height: 2; }
     #bar, #status { height: 1; }
     HelpScreen { align: center middle; }
-    #help { width: 76; height: auto; border: round $primary; padding: 1 2; background: $surface; }
+    #help {
+        width: 90%; max-width: 100; height: auto; max-height: 100%;
+        border: round $primary; padding: 1 2; background: $surface;
+    }
+    .help-table { grid-size: 2; grid-columns: 10 1fr; grid-rows: auto; height: auto; }
+    .help-key, .help-desc { height: auto; }
+    .help-para { height: auto; margin-top: 1; }
     """
     BINDINGS = [
         Binding("q", "quit_app", "quit"),

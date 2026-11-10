@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from textual.binding import Binding
 from textual.content import Content
 from textual.pilot import Pilot
 from textual.widgets import Input, OptionList, Static
@@ -185,19 +186,108 @@ def test_q_typed_into_the_filter_does_not_quit() -> None:
     drive(basic_source(), script)
 
 
+def help_text_of(app: BrowseApp) -> str:
+    return "\n".join(
+        as_content(w.content).plain for w in app.screen.query("#help Static").results(Static)
+    )
+
+
 def test_help_lists_the_keys_and_any_key_closes_it() -> None:
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         await pilot.press("question_mark")
         await pilot.pause()
-        help_text = as_content(app.screen.query_one("#help", Static).content).plain
-        for key in ("q ", "? ", "/ ", "enter", "o ", "r ", "R "):
-            assert key in help_text
+        keys = [
+            as_content(w.content).plain
+            for w in app.screen.query("#help-keys .help-key").results(Static)
+        ]
+        for key in ("q", "?", "/", "enter", "o", "r", "R"):
+            assert key in keys
+        help_text = help_text_of(app)
         assert "refresh selected" in help_text and "refresh all" in help_text
         await pilot.press("x")
         await pilot.pause()
         assert not app.screen.query("#help")
 
     drive(basic_source(), script)
+
+
+KEY_LABELS = {"question_mark": "?", "slash": "/", "escape": "esc"}
+
+
+def test_every_binding_is_in_the_help() -> None:
+    from forgectl.tui.app import HELP_KEYS
+
+    documented = {key for key, _ in HELP_KEYS}
+    bound = {KEY_LABELS.get(b.key, b.key) for b in BrowseApp.BINDINGS if isinstance(b, Binding)}
+    assert bound <= documented, bound - documented
+
+
+def test_help_source_has_no_hard_line_breaks() -> None:
+    from forgectl.tui import app as app_module
+
+    texts = [t for row in (*app_module.HELP_KEYS, *app_module.HELP_LEGEND) for t in row]
+    texts += [app_module.HELP_COLUMNS, *app_module.HELP_NOTES]
+    assert all("\n" not in t and "  " not in t for t in texts)
+
+
+@pytest.mark.parametrize("width", [80, 120, 200])
+def test_help_reflows_to_the_terminal_width(width: int) -> None:
+    async def go() -> None:
+        app = BrowseApp(basic_source(), FakeOpener(), concurrency=0)
+        async with app.run_test(size=(width, 60)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            box = app.screen.query_one("#help")
+            assert box.region.width <= width
+            assert box.virtual_size.width <= box.size.width  # no horizontal scroll
+            assert box.max_scroll_y == 0  # tall enough here: everything is visible
+            for table in app.screen.query(".help-table"):
+                keys = list(table.query(".help-key").results(Static))
+                descs = list(table.query(".help-desc").results(Static))
+                assert len({k.region.x for k in keys}) == 1  # the key column stays aligned
+                assert len({d.region.x for d in descs}) == 1
+                for key, desc in zip(keys, descs, strict=True):
+                    content = as_content(desc.content)
+                    assert desc.region.right <= box.region.right
+                    assert desc.region.height == len(content.wrap(desc.region.width))
+                    assert desc.region.y == key.region.y
+            if width == 200:  # wide: the long entry is not wrapped at a narrower fixed width
+                long = app.screen.query("#help-keys .help-desc").results(Static)
+                assert min(w.region.height for w in long) == 1
+
+    asyncio.run(go())
+
+
+def test_help_wraps_more_on_a_narrow_terminal() -> None:
+    async def heights(width: int) -> int:
+        app = BrowseApp(basic_source(), FakeOpener(), concurrency=0)
+        async with app.run_test(size=(width, 80)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            return sum(w.region.height for w in app.screen.query(".help-desc").results(Static))
+
+    assert asyncio.run(heights(80)) > asyncio.run(heights(200))
+
+
+def test_help_scrolls_when_the_screen_is_short() -> None:
+    async def go() -> None:
+        app = BrowseApp(basic_source(), FakeOpener(), concurrency=0)
+        async with app.run_test(size=(80, 12)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            box = app.screen.query_one("#help")
+            assert box.max_scroll_y > 0
+            assert box.region.height <= 12
+            last = list(app.screen.query(".help-para").results(Static))[-1]
+            assert not box.region.contains_region(last.region)
+            box.scroll_end(animate=False)
+            await pilot.pause()
+            assert box.region.contains_region(last.region)
+
+    asyncio.run(go())
 
 
 def test_refresh_keys_refetch() -> None:
