@@ -133,6 +133,18 @@ def test_browse_defaults_and_values(home: Path) -> None:
     assert (browse.refresh_interval, browse.full_refresh_every, browse.concurrency) == (30.0, 3, 8)
 
 
+@pytest.mark.parametrize("value", ["1", "1s", "1000ms", "0.5m", "'1.5'"])
+def test_browse_refresh_interval_accepts_one_second_and_more(home: Path, value: str) -> None:
+    assert (
+        load(home, f"browse: {{refresh_interval: {value}}}\n").config.browse.refresh_interval >= 1
+    )
+
+
+def test_browse_refresh_interval_floor_says_why(home: Path) -> None:
+    err = invalid(home, "browse: {refresh_interval: 1ms}\n")
+    assert "at least 1" in err.message and err.details == {"key": "browse.refresh_interval"}
+
+
 @pytest.mark.parametrize("value", ["0", "0.0"])
 def test_browse_refresh_interval_accepts_zero_to_disable(home: Path, value: str) -> None:
     assert (
@@ -148,6 +160,9 @@ def test_browse_refresh_interval_accepts_zero_to_disable(home: Path, value: str)
         'browse: {refresh_interval: "0"}\n',
         "browse: {refresh_interval: true}\n",
         "browse: {refresh_interval: 0s}\n",
+        "browse: {refresh_interval: 1ms}\n",
+        "browse: {refresh_interval: 0.5}\n",
+        "browse: {refresh_interval: 999ms}\n",
         "browse: {full_refresh_every: 0}\n",
         "browse: {full_refresh_every: 2.5}\n",
         "browse: {full_refresh_every: 1001}\n",
@@ -181,8 +196,10 @@ def uncommented(key: str) -> str:
 
 
 def test_the_commented_examples_in_the_example_file_are_valid(home: Path) -> None:
-    text = "".join(uncommented(key) for key in ("hosts", "repos", "hooks", "activity"))
+    text = "".join(uncommented(key) for key in ("hosts", "repos", "hooks", "activity", "browse"))
     config = load(home, text).config
+    assert (config.browse.refresh_interval, config.browse.full_refresh_every) == (120.0, 5)
+    assert config.browse.concurrency == 4
     assert config.hosts["gitlab.example.com"].backend == "gitlab"
     assert config.hosts["gitlab.example.com"].api_prefix == "/gitlab"
     assert config.hosts["gitlab.example.com"].token_command == (
@@ -963,6 +980,29 @@ INVALID: dict[str, tuple[str, str]] = {
         "hosts:\n  github.com: {token_env: GH_CONFIG_DIR}\n",
         "hosts.github.com.token_env",
     ),
+    "browse interval 1ms": ("browse: {refresh_interval: 1ms}\n", "browse.refresh_interval"),
+    "browse interval below one second": (
+        "browse: {refresh_interval: 0.5}\n",
+        "browse.refresh_interval",
+    ),
+    "browse interval 999ms": ("browse: {refresh_interval: 999ms}\n", "browse.refresh_interval"),
+    "browse interval tiny minutes": (
+        "browse: {refresh_interval: 0.001m}\n",
+        "browse.refresh_interval",
+    ),
+    "browse interval zero string": ('browse: {refresh_interval: "0"}\n', "browse.refresh_interval"),
+    "browse interval zero seconds": ("browse: {refresh_interval: 0s}\n", "browse.refresh_interval"),
+    "browse full_refresh_every zero": (
+        "browse: {full_refresh_every: 0}\n",
+        "browse.full_refresh_every",
+    ),
+    "browse full_refresh_every float": (
+        "browse: {full_refresh_every: 5.0}\n",
+        "browse.full_refresh_every",
+    ),
+    "browse concurrency too big": ("browse: {concurrency: 17}\n", "browse.concurrency"),
+    "browse concurrency float": ("browse: {concurrency: 4.0}\n", "browse.concurrency"),
+    "browse unknown key": ("browse: {interval: 5}\n", "browse.interval"),
     # GitHub hosts gh rewrites to another host
     "github host under github.com": (
         "hosts:\n  api.github.com: {backend: github}\n",
@@ -1022,6 +1062,12 @@ VALID: dict[str, str] = {
     "token_command absolute program": "hosts:\n  gitlab.com: {token_command: [/usr/bin/tool]}\n",
     "gitlab host under github.com": "hosts:\n  git.github.com: {backend: gitlab}\n",
     "github host on another domain": "hosts:\n  github.example.com: {backend: github}\n",
+    "browse empty": "browse: {}\n",
+    "browse interval off": "browse: {refresh_interval: 0}\n",
+    "browse interval one second": "browse: {refresh_interval: 1}\n",
+    "browse interval 1000ms": "browse: {refresh_interval: 1000ms}\n",
+    "browse interval half a minute": "browse: {refresh_interval: 0.5m}\n",
+    "browse all keys": "browse: {refresh_interval: 30s, full_refresh_every: 9, concurrency: 16}\n",
 }
 
 
@@ -1160,6 +1206,9 @@ STRICTER_THAN_SCHEMA = {
     "github host under github.com",  # gh rewrites these hosts
     "github host github.localhost",
     "github host under github.localhost",
+    "browse interval tiny minutes",  # sub-second after a unit conversion: only the model sees it
+    "browse full_refresh_every float",  # 5.0 counts as an integer to JSON Schema
+    "browse concurrency float",
 }
 
 # Refused by both under ECMA-262, whose `$` does not match before a final newline; the Python
@@ -1202,7 +1251,9 @@ def test_schema_accepts_what_the_models_accept(text: str) -> None:
 def test_the_example_file_validates_against_the_schema() -> None:
     SCHEMA_VALIDATOR.validate(example_data())
     SCHEMA_VALIDATOR.validate(
-        yaml.safe_load("".join(uncommented(k) for k in ("hosts", "repos", "hooks")))
+        yaml.safe_load(
+            "".join(uncommented(k) for k in ("hosts", "repos", "hooks", "activity", "browse"))
+        )
     )
 
 

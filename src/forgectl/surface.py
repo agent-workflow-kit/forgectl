@@ -86,10 +86,14 @@ def duration(value: str) -> float:
 
 
 def duration_or_off(value: str) -> float:
-    """A duration, or a bare `0` for "off" (`browse --interval`); see interface Config."""
+    """A duration of at least 1 s, or a bare `0` for "off" (`browse --interval`); see interface
+    Config."""
     if value == "0":
         return 0.0
-    return duration(value)
+    seconds = duration(value)
+    if seconds < 1:
+        _bad(f"an interval is at least 1s (or 0 for off): {value!r}")
+    return seconds
 
 
 def time_or_duration(value: str) -> str:

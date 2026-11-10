@@ -266,6 +266,8 @@ HOSTILE: list[tuple[str, list[str]]] = [
     ("browse interval word", ["browse", "--interval", "soon"]),
     ("browse interval empty", ["browse", "--interval", ""]),
     ("browse interval zero with unit", ["browse", "--interval", "0s"]),
+    ("browse interval below the floor", ["browse", "--interval", "1ms"]),
+    ("browse interval half a second", ["browse", "--interval", "0.5"]),
     ("browse interval over a hundred years", ["browse", "--interval", "36501d"]),
     ("browse interval twice", ["browse", "--interval", "5", "--interval", "6"]),
     (
@@ -1128,7 +1130,7 @@ def test_export_whoami_and_browse_flags_parse(capsys: pytest.CaptureFixture[str]
     reaches_handler(capsys, ["whoami", "--host", "github.com"], "whoami")
     reaches_handler(capsys, ["browse", "--focus", PR], "browse")
     reaches_handler(capsys, ["browse", "--result-file", "out.json"], "browse")
-    for good in ("0", "30", "90s", "2m", "1.5"):
+    for good in ("0", "30", "90s", "2m", "1.5", "1", "1000ms"):
         reaches_handler(capsys, ["browse", "--interval", good], "browse")
     reaches_handler(capsys, ["browse", "--focus", PR, "--result-file", "out.json"], "browse")
 

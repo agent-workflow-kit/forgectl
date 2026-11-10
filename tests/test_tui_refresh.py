@@ -39,6 +39,7 @@ class RefreshSource(FakeSource):
         self.failing: set[str] = set()
         self.prs_failing = False
         self.partial = False
+        self.partial_hosts = ["h.example", "i.example"]  # the hosts a partial answer names
         self.hold = False
         self.gate = threading.Event()
         self.cancel_probes: list[Callable[[], bool]] = []
@@ -55,8 +56,8 @@ class RefreshSource(FakeSource):
         if self.partial:
             answer["complete"] = False
             answer["errors"] = [
-                {"host": "h.example", "code": "upstream_error", "message": "x"},
-                {"host": "i.example", "code": "network_error", "message": "y"},
+                {"host": host, "code": "upstream_error", "message": "x"}
+                for host in self.partial_hosts
             ]
         return answer
 
@@ -247,6 +248,7 @@ def test_an_incomplete_list_keeps_the_rows_it_did_not_return_as_stale() -> None:
 
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         source.partial = True
+        source.partial_hosts = ["github.com"]
         del source.authored[2]  # the failing host's PR is missing from the answer
         await pilot.press("R")
         await settle(app, pilot)
@@ -492,6 +494,77 @@ def test_a_manual_R_resnapshots_all_and_restarts_the_count() -> None:
     run(source, script, interval=1000, full_every=3)
 
 
+def test_a_total_prs_failure_does_not_stamp_a_refresh_time() -> None:
+    source = three()
+    clock = Clock()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        assert "refreshed 12:00:00" in bar(app)
+        source.prs_failing = True
+        clock.now = T0 + timedelta(minutes=5)
+        await pilot.press("R")
+        await settle(app, pilot)
+        assert "refreshed 12:00:00" in bar(app) and "12:05" not in bar(app)
+
+    run(source, script, clock=clock)
+
+
+def two_hosts() -> RefreshSource:
+    gh_item, gl_item = make_item(1, repo=GH), make_item(1, repo=GL)
+    return RefreshSource(
+        authored=[gh_item, gl_item],
+        snapshots={prefix(GH, 1): snap(1), prefix(GL, 1): snap(1, repo=GL)},
+    )
+
+
+def test_an_incomplete_list_keeps_only_the_unlisted_prs_of_the_failed_host() -> None:
+    source = two_hosts()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        source.partial = True
+        source.partial_hosts = ["gitlab.example"]
+        source.authored.clear()  # both missing: one was closed, one is hidden by the failure
+        await pilot.press("R")
+        await settle(app, pilot)
+        assert len(list_prompts(app)) == 1
+        assert "[stale: list incomplete]" in prompt_of(app, prefix(GL, 1))
+        source.partial = False
+        await pilot.press("R")
+        await settle(app, pilot)
+        assert len(list_prompts(app)) == 0
+
+    run(source, script)
+
+
+def test_an_incomplete_list_naming_no_host_keeps_every_unlisted_pr() -> None:
+    source = two_hosts()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        source.prs_failing = True  # the call failed whole: no host is named
+        await pilot.press("R")
+        await settle(app, pilot)
+        assert len(list_prompts(app)) == 2
+
+    run(source, script)
+
+
+def test_a_never_loaded_row_keeps_its_error_when_the_list_goes_incomplete() -> None:
+    source = three()
+    source.failing.add(prefix(GH, 3))
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        assert "ERROR upstream_error" in prompt_of(app, prefix(GH, 3))
+        source.partial = True
+        source.partial_hosts = ["github.com"]
+        del source.authored[2]
+        await pilot.press("R")
+        await settle(app, pilot)
+        row = prompt_of(app, prefix(GH, 3))
+        assert "ERROR upstream_error" in row and "list incomplete" not in row
+
+    run(source, script)
+
+
 # -- changed rows ------------------------------------------------------------------------------
 
 
@@ -510,6 +583,24 @@ def test_a_changed_row_is_highlighted_until_the_next_cycle() -> None:
         )
         await cycle(app, pilot)  # nothing changed this time
         assert "[changed]" not in prompt_of(app, prefix(GH, 1))
+
+    run(source, script, interval=1000)
+
+
+def test_a_changed_row_stays_highlighted_while_its_detail_is_open_and_is_read_once() -> None:
+    source = three()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert app._detail_pr == prefix(GH, 1)
+        source.authored[0]["updated_at"] = "2026-11-03T13:00:00Z"
+        source.snapshots[prefix(GH, 1)] = snap(1, ci="failing")
+        source.calls.clear()
+        await cycle(app, pilot)
+        assert "[changed]" in prompt_of(app, prefix(GH, 1))
+        assert source.snapshotted() == [prefix(GH, 1)]  # one read serves the row and the detail
+        assert [c for c in source.calls if c[0] == "diff"]  # the detail still gets its diff
 
     run(source, script, interval=1000)
 
@@ -574,6 +665,22 @@ def test_the_bar_shows_the_refresh_time_the_rate_limit_and_the_partial_error_cou
         assert "refreshed 12:05:00" in text and "partial: 2 errors" in text
 
     run(source, script, clock=clock)
+
+
+def test_the_rate_parts_come_before_the_ones_a_narrow_bar_may_clip() -> None:
+    source = gl_source(remaining=5, reset_at="2026-11-03T12:30:00Z")
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("a")  # any filter adds its part to the bar
+        text = bar(app)
+        assert "slow:" in text and "refreshed" in text and "auto" in text
+        for later in ("refreshed", "auto 1000s"):
+            assert text.index("rate:") < text.index(later)
+            assert text.index("slow:") < text.index(later)
+        if "filters:" in text:
+            assert text.index("slow:") < text.index("filters:")
+
+    run(source, script, interval=1000, clock=Clock(), size=(80, 30))
 
 
 def test_hostile_host_names_in_the_rate_limit_are_sanitized() -> None:
@@ -653,6 +760,22 @@ def test_the_rate_limit_tracker() -> None:
     assert not limits.low("never.example", T0)
     limits.observe({"host": "a.example", "remaining": 500, "reset_at": None}, T0)
     assert not limits.low("a.example", T0)  # a newer reading replaces the older one
+
+
+def test_a_far_future_reset_holds_for_an_hour_at_most() -> None:
+    limits = RateLimits(threshold=100)
+    limits.observe({"host": "a.example", "remaining": 1, "reset_at": "9999-12-31T00:00:00Z"}, T0)
+    assert limits.low("a.example", T0 + timedelta(minutes=59))
+    assert not limits.low("a.example", T0 + timedelta(hours=1, seconds=1))
+    assert "until 13:00:00" in limits.text(T0)
+
+
+def test_the_slow_until_time_is_shown_in_utc() -> None:
+    limits = RateLimits(threshold=100)
+    limits.observe(
+        {"host": "a.example", "remaining": 1, "reset_at": "2026-11-03T17:30:00+05:00"}, T0
+    )
+    assert "until 12:30:00" in limits.text(T0)
 
 
 @pytest.mark.parametrize(

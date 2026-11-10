@@ -22,7 +22,7 @@ caller must catch it before it treats an exception as a failure.
 
 Failures are logged as the CLI logs them (``log.jsonl``), by the in-process runner.
 
-TODO(#59): two lifecycle gaps that need the refresh and cancel work of #59. (1) Quitting while a
+TODO(#93): two lifecycle gaps that need the refresh and cancel work of #59. (1) Quitting while a
 read is in flight leaves the child ``gh``/``glab`` process group and its private temp dir alive:
 the worker is a daemon thread that dies before the gateway cleans up, and a kill only happens
 from the main thread. ``LiveSource`` should track the in-flight process groups, and a
@@ -193,7 +193,7 @@ class LiveSource:
         return self._one("diff", pr, cancelled)
 
     def _one(self, command: str, pr: str, cancelled: Callable[[], bool] | None) -> dict[str, Any]:
-        # `cancelled` is checked here only, before the call: see TODO(#59) in the module docstring.
+        # `cancelled` is checked here only, before the call: see TODO(#93) in the module docstring.
         if not is_pr(pr):  # also keeps an option-looking value out of the argument list
             raise ForgectlError("invalid_pr", f"{command}: not a PR in the form host/path#N")
         if cancelled is not None:

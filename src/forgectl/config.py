@@ -181,11 +181,17 @@ def _empty_map() -> Mapping[str, Any]:
     return MappingProxyType({})
 
 
+MIN_REFRESH_INTERVAL = 1.0  # seconds: a shorter interval would hammer the forge
+
+
 def _interval_or_off(value: object) -> float:
-    """A duration, or the number 0 (not a string, not a bool) for "off"."""
+    """A duration of at least a second, or the number 0 (not a string, not a bool) for "off"."""
     if isinstance(value, int | float) and not isinstance(value, bool) and value == 0:
         return 0.0
-    return parse_duration(value)
+    seconds = parse_duration(value)
+    if seconds < MIN_REFRESH_INTERVAL:
+        raise ValueError("a refresh interval is at least 1s (or the number 0 for off)")
+    return seconds
 
 
 Duration = Annotated[float, BeforeValidator(parse_duration)]

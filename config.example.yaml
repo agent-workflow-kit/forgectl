@@ -67,8 +67,8 @@ activity: {}
 # activity:
 #   ignore_authors: ["dependabot[bot]", "renovate*"]
 
-# `browse`. refresh_interval: seconds between automatic refreshes (a duration; the number 0 turns
-# them off); the flag --interval wins. full_refresh_every: every Nth automatic refresh
+# `browse`. refresh_interval: seconds between automatic refreshes (a duration of at least 1s; the
+# number 0 turns them off); the flag --interval wins. full_refresh_every: every Nth automatic refresh
 # re-snapshots every PR, the others only those that may have changed (1 to 1000).
 # concurrency: snapshot reads at once (1 to 16).
 browse: {}

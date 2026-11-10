@@ -155,6 +155,7 @@ class BrowseApp(App[None]):
         self.refresh_interval = float(refresh_interval) if valid and refresh_interval > 0 else 0.0
         self.full_refresh_every = max(1, full_refresh_every)
         self.refresh_timer: Timer | None = None
+        self._cycle_listed = True  # the current refresh's `prs` calls gave at least one answer
         self._busy = False  # a refresh (list, then the row snapshots) is in progress
         self._loaded_once = False
         self._last_refresh: datetime | None = None
@@ -279,6 +280,7 @@ class BrowseApp(App[None]):
         wanted: set[str] | None = None
         started = False
         listed = False
+        detail_pr: str | None = None
         try:
             try:
                 listing: Listing = await in_thread(load_list, self.source)
@@ -293,20 +295,24 @@ class BrowseApp(App[None]):
             if not listing.complete:
                 notes.append("list incomplete")
             self._list_note = "; ".join(notes) if notes else None
-            listed = True
+            listed = listing.answered > 0  # a refresh whose `prs` calls all failed is not one
+            self._cycle_listed = listed
             self._list_complete = listing.complete
             self._list_errors = len(listing.errors)
             previous = {r.pr: r.item for r in self._rows}
             rows = listing.rows
             self._unlisted = set()
             if self._loaded_once and not listing.complete:
-                # A failed `prs` call hides rows rather than closing them: keep the ones it
-                # would have listed, marked stale, until a complete listing says otherwise.
+                # A failed `prs` call hides rows rather than closing them: keep the ones on a
+                # host it failed for (any host, when it names none), marked stale, until a
+                # complete listing says otherwise. A PR on a healthy host that is gone is closed.
                 seen = {r.pr for r in rows}
-                gone = [r for r in self._rows if r.pr not in seen]
+                gone = [
+                    r for r in self._rows if r.pr not in seen and listing.may_hide(host_of(r.pr))
+                ]
                 for row in gone:
                     old = self._states.get(row.pr)
-                    if old is not None:
+                    if old is not None and old.error is None:  # never hide an error code
                         old.stale, old.error = True, "list incomplete"
                 rows = rows + gone
                 self._unlisted = {r.pr for r in gone}  # not read again until listed again
@@ -322,13 +328,24 @@ class BrowseApp(App[None]):
             self._loaded_once = True
             self._apply_filter()
             self._paint(self._list_note or f"{len(self._rows)} PRs", self._detail_note)
-            started = self._start_snapshots(wanted)
+            detail_pr = self._detail_to_refresh(refresh_detail, wanted)
+            # The detail load reads the PR's snapshot, which also refreshes its row: the batch
+            # skips it, so one read serves both.
+            started = self._start_snapshots(wanted, skip=detail_pr)
         finally:
             if not started:
                 self._finish_refresh(listed=listed)
-        if refresh_detail and self._detail_pr is not None and self._detail_shown():
-            if wanted is None or self._detail_pr in wanted:  # a timed cycle skips a settled PR
-                self._start_detail(self._detail_pr)
+        if detail_pr is not None:
+            self._start_detail(detail_pr)
+
+    def _detail_to_refresh(self, refresh_detail: bool, wanted: set[str] | None) -> str | None:
+        """The PR in the open detail pane when this refresh re-reads it, else None."""
+        pr = self._detail_pr
+        if not refresh_detail or pr is None or not self._detail_shown() or pr in self._unlisted:
+            return None
+        if pr not in self._row_by_pr:
+            return None
+        return pr if wanted is None or pr in wanted else None  # a timed cycle skips a settled PR
 
     def _plan_cycle(self, previous: dict[str, dict[str, Any]], now: datetime) -> set[str]:
         """The PRs a timed cycle reads: all every Nth cycle, else those that may have changed.
@@ -358,9 +375,9 @@ class BrowseApp(App[None]):
         self._deferred = wanted - allowed
         return allowed
 
-    def _finish_refresh(self, *, listed: bool = True) -> None:
+    def _finish_refresh(self, *, listed: bool | None = None) -> None:
         self._busy = False
-        if listed:  # a refresh whose `prs` calls both failed outright is not a refresh
+        if self._cycle_listed if listed is None else listed:
             self._last_refresh = self.clock()
         flagged = any(state.refreshing for state in self._states.values())
         for state in self._states.values():
@@ -421,6 +438,9 @@ class BrowseApp(App[None]):
 
     def _paint_bar(self) -> None:
         parts = [f"{len(self._visible)}/{len(self._rows)} PRs", f"order: {self._order_mode}"]
+        rates = self._rates.text(self.clock())
+        if rates:  # early, so a narrow terminal clips the later parts first
+            parts.append(rates)
         if self._list_filters:
             parts.append(f"filters: {columns.filters_text(self._list_filters)}")
         if self._snap_total:
@@ -435,9 +455,6 @@ class BrowseApp(App[None]):
             parts.append(f"partial: {self._list_errors} {noun}")
         if self._last_refresh is not None:
             parts.append(f"refreshed {self._last_refresh.strftime('%H:%M:%S')}")
-        rates = self._rates.text(self.clock())
-        if rates:
-            parts.append(rates)
         if self.refresh_interval:
             parts.append(f"auto {self.refresh_interval:g}s")
         self.query_one("#bar", Static).update(safe.plain(safe.line(" | ".join(parts), 500)))
@@ -462,15 +479,15 @@ class BrowseApp(App[None]):
         hidden = [r.pr for r in columns.order(hidden_rows, self._states, self._order_mode)]
         return first + rest + hidden
 
-    def _start_snapshots(self, wanted: set[str] | None) -> bool:
-        """Start a round of per-row snapshots (all rows, or those in ``wanted``); False when
-        there is nothing to load."""
+    def _start_snapshots(self, wanted: set[str] | None, skip: str | None = None) -> bool:
+        """Start a round of per-row snapshots (all rows, or those in ``wanted``, but not
+        ``skip``); False when there is nothing to load."""
         self._snap_token += 1
         self._snap_done = 0
         order = [
             p
             for p in self._snapshot_order()
-            if p not in self._unlisted and (wanted is None or p in wanted)
+            if p not in self._unlisted and p != skip and (wanted is None or p in wanted)
         ]
         self._snap_total = len(order) if self.concurrency else 0
         self._busy = True
@@ -557,6 +574,8 @@ class BrowseApp(App[None]):
             and old.summary != new.summary
         ):
             new.changed = True
+        if old.changed and not new.stale:
+            new.changed = True  # a second read of identical data must not lose the highlight
         self._states[pr] = new
         if row is None:
             self._paint_bar()

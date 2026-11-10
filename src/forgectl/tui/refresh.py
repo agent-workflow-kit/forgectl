@@ -13,7 +13,7 @@ less often until its ``reset_at``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from . import columns, safe
@@ -22,6 +22,7 @@ from .source import Row
 RATE_THRESHOLD = 100  # remaining calls below which a host is backed off
 BACKOFF_FACTOR = 4  # a backed-off host is read at most once per this many intervals
 UNKNOWN_RESET_HOLD = timedelta(minutes=15)  # how long a low reading counts without a reset_at
+MAX_HOLD = timedelta(hours=1)  # the longest a reading holds a host back, whatever its reset_at
 
 
 def host_of(pr: str) -> str:
@@ -68,7 +69,10 @@ class RateLimits:
             return
         if isinstance(remaining, bool) or not isinstance(remaining, int) or remaining < 0:
             return
-        self._hosts[host] = _Reading(remaining, columns.parse_time(rate_limit.get("reset_at")), now)
+        reset_at = columns.parse_time(rate_limit.get("reset_at"))
+        if reset_at is not None:
+            reset_at = min(reset_at, now + MAX_HOLD)  # a far-future value is not believed
+        self._hosts[host] = _Reading(remaining, reset_at, now)
 
     def low(self, host: str, now: datetime) -> bool:
         reading = self._hosts.get(host)
@@ -90,7 +94,9 @@ class RateLimits:
         for host, reading in sorted(self._hosts.items()):
             if self.low(host, now):
                 until = (
-                    f" until {reading.reset_at.strftime('%H:%M:%S')}" if reading.reset_at else ""
+                    f" until {reading.reset_at.astimezone(UTC).strftime('%H:%M:%S')}"
+                    if reading.reset_at
+                    else ""
                 )
                 parts.append(f"slow: {safe.line(host, 60)}{until}")
         return " | ".join(parts)
