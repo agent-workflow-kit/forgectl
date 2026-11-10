@@ -1,0 +1,129 @@
+{
+  "complete": true,
+  "head_sha": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+  "pr": "gitlab.com/user-9/proj#7",
+  "threads": [
+    {
+      "comments": [
+        {
+          "author": {
+            "id": "13",
+            "is_bot": false,
+            "login": "user-3"
+          },
+          "body": "Looks good overall.",
+          "created_at": "2026-10-02T11:00:00.000Z",
+          "id": "gl:n:901",
+          "minimized": false,
+          "reply_to": null,
+          "review_id": null,
+          "updated_at": "2026-10-02T11:00:00.000Z"
+        }
+      ],
+      "commit_sha": null,
+      "id": "gl:d:d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+      "line": null,
+      "outdated": null,
+      "path": null,
+      "resolvable": false,
+      "resolved": false,
+      "side": null,
+      "start_line": null
+    },
+    {
+      "comments": [
+        {
+          "author": {
+            "id": "12",
+            "is_bot": false,
+            "login": "user-2"
+          },
+          "body": "Why this name?",
+          "created_at": "2026-10-02T11:05:00.000Z",
+          "id": "gl:n:902",
+          "minimized": false,
+          "reply_to": null,
+          "review_id": null,
+          "updated_at": "2026-10-02T11:05:00.000Z"
+        },
+        {
+          "author": {
+            "id": "11",
+            "is_bot": false,
+            "login": "user-1"
+          },
+          "body": "Renamed.",
+          "created_at": "2026-10-02T11:10:00.000Z",
+          "id": "gl:n:903",
+          "minimized": false,
+          "reply_to": "gl:n:902",
+          "review_id": null,
+          "updated_at": "2026-10-02T11:10:00.000Z"
+        }
+      ],
+      "commit_sha": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "id": "gl:d:d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2",
+      "line": 12,
+      "outdated": null,
+      "path": "src/widget.py",
+      "resolvable": true,
+      "resolved": false,
+      "side": "right",
+      "start_line": 10
+    },
+    {
+      "comments": [
+        {
+          "author": {
+            "id": "13",
+            "is_bot": false,
+            "login": "user-3"
+          },
+          "body": "Old line nit.",
+          "created_at": "2026-10-02T11:20:00.000Z",
+          "id": "gl:n:904",
+          "minimized": false,
+          "reply_to": null,
+          "review_id": null,
+          "updated_at": "2026-10-02T11:20:00.000Z"
+        }
+      ],
+      "commit_sha": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "id": "gl:d:d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3",
+      "line": 4,
+      "outdated": null,
+      "path": "src/widget.py",
+      "resolvable": true,
+      "resolved": true,
+      "side": "left",
+      "start_line": null
+    },
+    {
+      "comments": [
+        {
+          "author": {
+            "id": "12",
+            "is_bot": false,
+            "login": "user-2"
+          },
+          "body": "File level remark.",
+          "created_at": "2026-10-02T11:30:00.000Z",
+          "id": "gl:n:905",
+          "minimized": false,
+          "reply_to": null,
+          "review_id": null,
+          "updated_at": "2026-10-02T11:30:00.000Z"
+        }
+      ],
+      "commit_sha": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "id": "gl:d:d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+      "line": null,
+      "outdated": null,
+      "path": "src/widget.py",
+      "resolvable": true,
+      "resolved": false,
+      "side": null,
+      "start_line": null
+    }
+  ]
+}

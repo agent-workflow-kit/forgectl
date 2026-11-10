@@ -202,3 +202,39 @@ def refused(
 def usage(message: str, **kwargs: Any) -> ForgectlError:
     """An exit 2 usage error."""
     return ForgectlError("usage", message, **kwargs)
+
+
+_write_attempted = False
+
+
+def mark_write_attempted() -> None:
+    """Process-level: ``audit.Attempt.begin()`` ran, so a write may have reached the host."""
+    global _write_attempted
+    _write_attempted = True
+
+
+def write_was_attempted() -> bool:
+    return _write_attempted
+
+
+def reset_write_attempted() -> None:
+    """Start of a run (and of each test): nothing has been attempted yet."""
+    global _write_attempted
+    _write_attempted = False
+
+
+class SignalExit(BaseException):
+    """A SIGINT, SIGTERM or SIGHUP arrived: exit 128+N with no envelope, unless a write was
+    attempted (``write_attempted``): then exit 12 ``outcome_unknown``.
+
+    The gateway ends the child's group, removes its private directories and lets this propagate.
+    ``audit.Attempt`` sets ``write_attempted`` when the signal passes through its block after
+    ``begin()``, once it has recorded ``outcome_unknown``. A signal that never passes through
+    that block (while the result is printed, say) is told by the process-level flag
+    ``write_was_attempted()``, set by ``begin()``.
+    """
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+        self.write_attempted = False
