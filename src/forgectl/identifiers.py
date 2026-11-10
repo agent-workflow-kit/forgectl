@@ -385,6 +385,10 @@ def bind_args(args: Namespace, config: Config) -> None:
     pr = getattr(args, "pr", None)
     if isinstance(pr, PrInput):
         updates["pr"] = bind_pr(pr, config)
+    refs = getattr(args, "refs", None)
+    if isinstance(refs, list) and any(isinstance(r, PrInput) for r in refs):
+        # `snapshots`: every PR is bound, or none is (an undeclared host exits 20 here)
+        updates["refs"] = [bind_pr(r, config) if isinstance(r, PrInput) else r for r in refs]
     repo = getattr(args, "repo", None)
     if isinstance(repo, RepoInput):
         bound = bind_repo(repo, config)

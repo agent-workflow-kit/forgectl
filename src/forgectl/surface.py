@@ -21,6 +21,7 @@ from . import __version__
 from .errors import usage
 from .humanactions import ACTOR_RE, DECISION_ID_RE
 from .identifiers import (
+    PrInput,
     parse_branch,
     parse_host,
     parse_login,
@@ -37,6 +38,7 @@ READ_COMMANDS = (
     "prs",
     "show",
     "snapshot",
+    "snapshots",
     "diff",
     "compare",
     "files",
@@ -106,6 +108,11 @@ def time_or_duration(value: str) -> str:
         return value
     duration(value)
     return value
+
+
+def pr_or_stdin(value: str) -> PrInput | str:
+    """A PR as ``parse_pr`` reads it, or the single word ``-`` (the PRs come from stdin)."""
+    return value if value == "-" else parse_pr(value)
 
 
 def sha(value: str) -> str:
@@ -373,6 +380,21 @@ def build_parser() -> argparse.ArgumentParser:
         ("ci", "checks on the head"),
     ):
         _pr(add(name, summary))
+
+    p = add("snapshots", "snapshots of many PRs from a few bulk requests")
+    p.add_argument(
+        "refs",
+        nargs="+",
+        type=pr_or_stdin,
+        metavar="PR|-",
+        help="URL or host/<project path>#N, repeatable; a single - reads them from stdin",
+    )
+    p.add_argument(
+        "--bulk-only",
+        dest="bulk_only",
+        action=_OnceFlag,
+        help="read only through the bulk path; list a PR it cannot read whole in failed",
+    )
 
     p = add("compare", "compare two commits of a PR")
     _pr(p)
