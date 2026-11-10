@@ -295,10 +295,13 @@ def test_help_descriptions_keep_a_usable_width_on_a_narrow_terminal() -> None:
     asyncio.run(go())
 
 
-def test_help_key_column_fits_the_longest_key() -> None:
+def test_help_key_column_fits_the_longest_key(monkeypatch: pytest.MonkeyPatch) -> None:
     from forgectl.tui import app as app_module
 
-    longest = max(len(k) for k, _ in (*app_module.HELP_KEYS, *app_module.HELP_LEGEND))
+    long_key = "ctrl+shift+pgdn"  # 15 cells, wider than any real key label
+    monkeypatch.setattr(
+        app_module, "HELP_KEYS", [*app_module.HELP_KEYS, (long_key, "a very long key")]
+    )
 
     async def go() -> None:
         app = BrowseApp(basic_source(), FakeOpener(), concurrency=0)
@@ -306,9 +309,9 @@ def test_help_key_column_fits_the_longest_key() -> None:
             await settle(app, pilot)
             await pilot.press("question_mark")
             await pilot.pause()
-            widths = {k.region.width for k in app.screen.query(".help-key").results(Static)}
-            assert len(widths) == 1
-            assert widths.pop() >= longest
+            keys = list(app.screen.query(".help-key").results(Static))
+            assert {k.region.width for k in keys} == {len(long_key) + 1}
+            assert all(k.region.height == 1 for k in keys)  # no key label wrapped
 
     asyncio.run(go())
 
@@ -332,20 +335,65 @@ def test_help_scrolls_when_the_screen_is_short() -> None:
     asyncio.run(go())
 
 
-def test_help_keys_scroll_it_and_do_not_close_it() -> None:
+@pytest.mark.parametrize("key", ["down", "j", "end", "pagedown"])
+def test_help_forward_keys_scroll_it_and_do_not_close_it(key: str) -> None:
     async def go() -> None:
         app = BrowseApp(basic_source(), FakeOpener(), concurrency=0)
         async with app.run_test(size=(80, 12)) as pilot:
             await settle(app, pilot)
             await pilot.press("question_mark")
             await pilot.pause()
-            await pilot.press("pagedown")
+            await pilot.press(key)
             await pilot.pause()
             assert isinstance(app.screen, HelpScreen)
             assert app.screen.query_one("#help").scroll_y > 0
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("key", ["up", "k", "home", "pageup"])
+def test_help_backward_keys_scroll_it_and_do_not_close_it(key: str) -> None:
+    async def go() -> None:
+        app = BrowseApp(basic_source(), FakeOpener(), concurrency=0)
+        async with app.run_test(size=(80, 12)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            box = app.screen.query_one("#help")
+            box.scroll_end(animate=False)
+            await pilot.pause()
+            before = box.scroll_y
+            assert before > 0
+            await pilot.press(key)
+            await pilot.pause()
+            assert isinstance(app.screen, HelpScreen)
+            assert box.scroll_y < before
+
+    asyncio.run(go())
+
+
+def test_help_other_keys_close_it() -> None:
+    async def go() -> None:
+        app = BrowseApp(basic_source(), FakeOpener(), concurrency=0)
+        async with app.run_test(size=(80, 12)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
             await pilot.press("x")
             await pilot.pause()
             assert not app.screen.query("#help")
+
+    asyncio.run(go())
+
+
+def test_help_box_never_exceeds_a_very_narrow_screen() -> None:
+    async def go() -> None:
+        app = BrowseApp(basic_source(), FakeOpener(), concurrency=0)
+        async with app.run_test(size=(20, 40)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            assert app.screen.query_one("#help").region.width <= 20
 
     asyncio.run(go())
 

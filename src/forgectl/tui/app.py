@@ -121,6 +121,8 @@ def in_thread[T](fn: Callable[..., T], *args: Any) -> asyncio.Future[T]:
     return future
 
 
+HELP_MIN_WIDTH = 30  # the help box never shrinks below this, unless the screen itself is narrower
+
 HELP_SCROLL_KEYS = {
     "up": "scroll_up", "k": "scroll_up", "down": "scroll_down", "j": "scroll_down",
     "pageup": "scroll_page_up", "pagedown": "scroll_page_down",
@@ -153,6 +155,10 @@ class HelpScreen(ModalScreen[None]):
             for note in HELP_NOTES:
                 yield Static(safe.plain(note), classes="help-para", markup=False)
 
+    def on_resize(self) -> None:
+        # CSS min-width would push the box past a screen narrower than it, so cap it here
+        self.query_one("#help").styles.min_width = min(HELP_MIN_WIDTH, self.size.width)
+
     def on_key(self, event: Key) -> None:
         event.stop()
         action = HELP_SCROLL_KEYS.get(event.key)
@@ -175,7 +181,7 @@ class BrowseApp(App[None]):
     #bar, #status { height: 1; }
     HelpScreen { align: center middle; }
     #help {
-        width: 90%; min-width: 30; max-width: 100; height: auto; max-height: 100%;
+        width: 90%; max-width: 100; height: auto; max-height: 100%;
         border: round $primary; padding: 1 2; background: $surface;
     }
     .help-table { grid-size: 2; grid-columns: 10 1fr; grid-rows: auto; height: auto; }
