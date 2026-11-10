@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-tui = ["textual>=8.2,<9"]
+tui = ["textual>=8.2,<9", "rich>=14", "pygments>=2.19", "markdown-it-py>=3"]
 
 [project.scripts]
 forgectl = "forgectl.cli:main"
