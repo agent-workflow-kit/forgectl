@@ -332,6 +332,23 @@
           "maximum": 16,
           "default": 4,
           "description": "Snapshot reads `browse` runs at once."
+        },
+        "detail_collapsed": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "facts",
+              "description",
+              "changes",
+              "ci",
+              "comments",
+              "reviews"
+            ]
+          },
+          "default": [
+            "changes"
+          ],
+          "description": "The detail pane sections of `browse` that start collapsed; the others start open. A list replaces on merge like any list. A section toggles with its number key (1 facts, 2 description, 3 changes, 4 ci, 5 comments, 6 reviews)."
         }
       },
       "additionalProperties": false,

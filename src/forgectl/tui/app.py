@@ -11,7 +11,7 @@ import inspect
 import math
 import threading
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from typing import Any
 
@@ -28,7 +28,7 @@ from textual.widgets.option_list import Option
 
 from forgectl.errors import ForgectlError
 
-from . import columns, render, safe
+from . import columns, render, safe, sections
 from .opener import Opener, OpenRefused, is_openable
 from .refresh import BACKOFF_FACTOR, RateLimits, host_of, needs_snapshot
 from .source import DataSource, Listing, Row, load_list
@@ -46,6 +46,12 @@ HELP_KEYS: list[tuple[str, str]] = [
     ("/", "filter the list (enter keeps it, escape clears it)"),
     ("enter", "open the detail pane for the highlighted PR"),
     ("esc", "close the detail pane or the filter"),
+    (
+        "1-6",
+        "toggle a detail section while the detail pane has focus: 1 facts, 2 description, "
+        "3 changes (the diff), 4 CI, 5 comments, 6 reviews; the headers show counts "
+        "(the changes start collapsed; `browse.detail_collapsed` sets which start collapsed)",
+    ),
     (
         "o",
         "open the PR in a browser; on a check in the detail pane, open the check "
@@ -205,6 +211,8 @@ class BrowseApp(App[None]):
     #header { height: 1; text-style: bold; padding: 0 2; }  /* the list's border and padding */
     #list { text-wrap: nowrap; text-overflow: ellipsis; }
     #checks { height: auto; max-height: 12; }
+    .section-head { text-style: bold; margin-top: 1; }
+    #head-facts { margin-top: 0; }
     #footer { dock: bottom; height: 2; }
     #bar, #status { height: 1; }
     HelpScreen { align: center middle; }
@@ -229,6 +237,12 @@ class BrowseApp(App[None]):
         Binding("n", "toggle_filter('new-comments')", "new comments"),
         Binding("r", "refresh_selected", "refresh"),
         Binding("R", "reload_list", "reload"),
+        # Hidden from the footer; each acts only while the detail pane has focus. The help
+        # documents the six as one "1-6" row.
+        *[
+            Binding(str(i), f"toggle_section('{name}')", f"toggle {name}", show=False)
+            for i, name in enumerate(sections.NAMES, 1)
+        ],
     ]
 
     def __init__(
@@ -241,6 +255,7 @@ class BrowseApp(App[None]):
         clock: Callable[[], datetime] = columns.utc_now,
         refresh_interval: float = 0,
         full_refresh_every: int = DEFAULT_FULL_REFRESH_EVERY,
+        detail_collapsed: Iterable[str] = sections.DEFAULT_COLLAPSED,
     ) -> None:
         super().__init__()
         # Seconds between automatic refreshes; 0, less, or not a number means off.
@@ -294,6 +309,10 @@ class BrowseApp(App[None]):
         self._detail_url: str | None = None
         self._detail_checks: list[dict[str, Any]] = []
         self._detail_token = 0
+        # Which detail sections are open: kept for the session, across PRs and refreshes.
+        self._open_sections = sections.initial_open(detail_collapsed)
+        self._detail: render.Detail | None = None
+        self._painted: set[str] = set()  # sections whose body shows the current detail
         self._detail_loading: str | None = None  # the PR whose detail load is in flight
 
     def result(self) -> dict[str, Any]:
@@ -313,9 +332,13 @@ class BrowseApp(App[None]):
                 yield Static(safe.plain(""), id="header", markup=False)
                 yield RowList(id="list")
             with VerticalScroll(id="detail"):
-                yield Static(safe.plain(""), id="facts", markup=False)
-                yield OptionList(id="checks")
-                yield Static(safe.plain(""), id="rest", markup=False)
+                for name in sections.NAMES:
+                    yield Static(
+                        safe.plain(""), id=f"head-{name}", classes="section-head", markup=False
+                    )
+                    yield Static(safe.plain(""), id=name, markup=False)
+                    if name == "ci":
+                        yield OptionList(id="checks")
         with Vertical(id="footer"):
             yield Static(safe.plain(""), id="bar", markup=False)
             yield Static(safe.plain(""), id="status", markup=False)
@@ -852,21 +875,67 @@ class BrowseApp(App[None]):
         self._detail_checks = detail.checks
         if not self._opened:
             self.selected = pr  # enter opened it; the intent stays back
-        self.query_one("#facts", Static).update(safe.plain(detail.facts))
-        checks = self.query_one("#checks", OptionList)
-        checks.clear_options()
-        checks.add_options([Option(safe.plain(label)) for label in detail.check_labels])
-        if detail.checks:
-            checks.highlighted = 0
-        checks.display = bool(detail.checks)
-        self.query_one("#rest", Static).update(safe.plain(detail.rest))
+        self._detail = detail
+        self._painted.clear()
+        for name in sections.NAMES:
+            self._paint_section(name)
         pane = self.query_one("#detail", VerticalScroll)
         pane.display = True
         focused = self.focused
         if focused is None or focused.id == "list":  # never take focus from the filter
             pane.focus()
+        elif focused.id == "checks" and not focused.display:  # a refresh dropped the checks
+            pane.focus()
         self._detail_note = f"{len(detail.checks)} checks" + (f"; {diff_note}" if diff_note else "")
         self._status(self._detail_note)
+
+    def _paint_section(self, name: str) -> None:
+        """The header always; the body only while the section is open (and only once per
+        detail), so a collapsed diff costs the screen nothing."""
+        detail = self._detail
+        is_open = name in self._open_sections
+        count = detail.counts.get(name) if detail is not None else None
+        self.query_one(f"#head-{name}", Static).update(
+            safe.plain(sections.header(name, is_open, count))
+        )
+        body = self.query_one(f"#{name}", Static)
+        body.display = is_open
+        if name == "ci":
+            checks = self.query_one("#checks", OptionList)
+            checks.display = is_open and bool(detail and detail.checks)
+        if not is_open or detail is None or name in self._painted:
+            return
+        self._painted.add(name)
+        body.update(safe.plain(detail.texts[name]))
+        if name == "ci":
+            checks = self.query_one("#checks", OptionList)
+            checks.clear_options()
+            checks.add_options([Option(safe.plain(label)) for label in detail.check_labels])
+            if detail.checks:
+                checks.highlighted = 0
+
+    def _pane_has_focus(self) -> bool:
+        focused = self.focused
+        return focused is not None and any(
+            node.id == "detail" for node in focused.ancestors_with_self
+        )
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "toggle_section":
+            return self._pane_has_focus() and self._detail_shown()
+        return True
+
+    def action_toggle_section(self, name: str) -> None:
+        if name not in sections.NAMES:
+            return
+        if name in self._open_sections:
+            self._open_sections.discard(name)
+            focused = self.focused
+            if focused is not None and focused.id == "checks" and name == "ci":
+                self.query_one("#detail", VerticalScroll).focus()  # a hidden list keeps no focus
+        else:
+            self._open_sections.add(name)
+        self._paint_section(name)
 
     # -- actions --------------------------------------------------------------------------
 
@@ -944,7 +1013,7 @@ class BrowseApp(App[None]):
         url: object
         pr: str | None
         focused = self.focused
-        is_check = focused is not None and focused.id == "checks"
+        is_check = focused is not None and focused.id == "checks" and "ci" in self._open_sections
         if is_check:
             index = self.query_one("#checks", OptionList).highlighted
             if index is None or not 0 <= index < len(self._detail_checks):
