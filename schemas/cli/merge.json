@@ -45,7 +45,7 @@
         "rebase",
         null
       ],
-      "description": "What merged; null when nothing has merged yet and the project's own setting decides."
+      "description": "What merged; null when nothing has merged yet and the project's own setting decides, and null for already_merged, where someone else merged and what merged is unknown."
     },
     "dry_run": {
       "type": "boolean"

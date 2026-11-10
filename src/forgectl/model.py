@@ -206,6 +206,10 @@ _CHECK_TABLE: dict[str, dict[str, CheckState]] = {
 }
 
 
+#: The name of a check whose host gave no usable name (both backends).
+UNNAMED_CHECK = "(unnamed check)"
+
+
 def normalize_check_state(
     source: CheckSource,
     raw: str,
@@ -1231,3 +1235,41 @@ class PrRead:
     pr: PR
     ci: CI
     latest_by_reviewer: tuple[LatestByReviewer, ...]
+
+
+# --- merge -------------------------------------------------------------------------------------
+
+MergeAnswerKind = Literal[
+    "accepted", "stale_head", "method_not_allowed", "base_modified", "refused"
+]
+MergeMethod = Literal["squash", "merge", "rebase"]
+MERGE_METHODS: tuple[str, ...] = ("squash", "merge", "rebase")
+
+
+@dataclass(frozen=True, slots=True)
+class MergeAnswer:
+    """The host's answer to one merge call, before verification decides anything.
+
+    ``accepted`` is any 2xx: by itself it proves nothing (a wrong ``sha`` on an already merged PR
+    also answers 200). The others are the answers a caller maps itself: ``stale_head`` (409, the
+    ``sha`` did not match), ``method_not_allowed`` (a 405 whose wording names the method),
+    ``base_modified`` (a 405 saying the base moved; a caller may retry) and ``refused`` (any
+    other 405). Every other failure is raised by the gateway as a ``ForgectlError``.
+    """
+
+    kind: MergeAnswerKind
+    status: int
+    message: str = ""  # the host's own words, sanitized; for the log and the error text only
+
+
+@dataclass(frozen=True)
+class Readiness:
+    """How long a read may be repeated while a value is still being computed (reads.py has the
+    three in use). Defined here so a backend protocol can name it without importing reads."""
+
+    tries: int
+    window: float  # seconds, from the first try
+
+    @property
+    def pause(self) -> float:
+        return self.window / self.tries
