@@ -31,7 +31,7 @@ from typing import Any
 from . import model as m
 from .backends import create_backend
 from .config import BUILT_IN_HOSTS, Config
-from .errors import ForgectlError
+from .errors import EXIT_BY_CODE, REQUIRED_DETAILS_BY_CODE, ForgectlError
 from .hosts import Identity, redact_secrets
 from .identifiers import bind_login
 from .reads import ReadEnv
@@ -89,6 +89,26 @@ def check_me_spelling(value: str | None, what: str) -> None:
 def candidate_hosts(config: Config) -> list[str]:
     """Every built-in and declared host, sorted."""
     return sorted({*BUILT_IN_HOSTS, *config.hosts})
+
+
+_PLACEHOLDER_DETAILS: dict[str, Any] = {"observed": "", "install": "", "key": "", "status": 0}
+
+
+def entry_error(entry: dict[str, str]) -> ForgectlError:
+    """The ``ForgectlError`` of an ``Identity.error`` entry ``{host, code, message}``. That entry
+    keeps no ``details``, so a code whose envelope requires some (``wrong_host_response``,
+    ``tool_missing``...) would be refused by the constructor; empty placeholders stand in, and the
+    ``errors`` item of a listing never shows them."""
+    code, message = entry["code"], entry["message"]
+    try:
+        return ForgectlError(code, message)
+    except ValueError:
+        if code not in EXIT_BY_CODE:
+            raise
+    required = REQUIRED_DETAILS_BY_CODE.get(code, ())
+    return ForgectlError(
+        code, message, details={key: _PLACEHOLDER_DETAILS.get(key) for key in required}
+    )
 
 
 def host_error(host: str, error: ForgectlError) -> dict[str, str]:
@@ -193,7 +213,7 @@ def run_prs(env: ReadEnv, args: PrsArgs, *, now: datetime | None = None) -> dict
     for host, known in scope:
         try:
             if known is not None and known.error is not None:
-                raise ForgectlError(known.error["code"], known.error["message"])
+                raise entry_error(known.error)
             query = m.PrQuery(
                 repo=args.repo,
                 host=host,

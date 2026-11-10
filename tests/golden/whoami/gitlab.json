@@ -1,0 +1,15 @@
+{
+  "errors": [],
+  "hosts": [
+    {
+      "backend": "gitlab",
+      "host": "gitlab.com",
+      "id": "11",
+      "login": "user-1",
+      "me": "user-1",
+      "me_matches_login": true,
+      "scopes": null,
+      "token_source": "token_env"
+    }
+  ]
+}
