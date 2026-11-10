@@ -167,20 +167,42 @@ MAX_LIMIT = 1000  # `--limit` and both backends' search cap
 
 def list_visible(backend: Any, query: m.PrQuery, hidden: tuple[str, ...]) -> m.PrPage:
     """``backend.list_prs`` without the PRs of ``config.hidden_repos``, which are dropped before
-    the limit counts: while hidden items left fewer than ``limit + 1`` kept ones and the host may
-    hold more, the backend is asked again for twice as many (at most ``MAX_LIMIT``). ``complete``
-    is the backend's own, so hiding alone never makes it false; the backend's list stays the
-    source of truth, the search syntax is not used to exclude."""
+    the limit counts. The backend is given a skip predicate, so a hidden PR costs no further
+    request; the filter here is a safety net. The first ask is ``limit + 1`` (at most
+    ``MAX_LIMIT``), so a hidden item past the limit cannot make the list incomplete. If hidden
+    items were still dropped and left no more than ``limit`` kept ones on an incomplete page,
+    the backend is asked once more for twice as many (at most ``MAX_LIMIT``); the backend's own
+    ``complete`` then stands, and hiding alone never makes it false. A query for one hidden repo
+    is an empty complete page without a call."""
     if not hidden:
         return backend.list_prs(query)
-    ask = query.limit
-    while True:
-        page = backend.list_prs(replace(query, limit=ask))
-        kept = tuple(i for i in page.items if not matches_any(i.repo, hidden))
-        dropped = len(kept) != len(page.items)
-        if not dropped or len(kept) > query.limit or page.complete or ask >= MAX_LIMIT:
-            return m.PrPage(items=kept, complete=page.complete, rate_limit=page.rate_limit)
-        ask = min(MAX_LIMIT, ask * 2)
+    if query.repo is not None and matches_any(query.repo.id, hidden):
+        return m.PrPage(
+            items=(),
+            complete=True,
+            rate_limit=m.RateLimit(host=query.host, remaining=None, reset_at=None),
+        )
+
+    def skip(repo: str) -> bool:
+        return matches_any(repo, hidden)
+
+    ask = min(query.limit + 1, MAX_LIMIT)
+    page = backend.list_prs(replace(query, limit=ask), skip=skip)
+    kept = tuple(i for i in page.items if not skip(i.repo))
+    if (
+        len(kept) != len(page.items)
+        and not page.complete
+        and len(kept) <= query.limit
+        and ask < MAX_LIMIT
+    ):
+        page = backend.list_prs(replace(query, limit=min(ask * 2, MAX_LIMIT)), skip=skip)
+        kept = tuple(i for i in page.items if not skip(i.repo))
+    # more kept items than the limit: the caller's merge cuts them, so the list is not whole
+    return m.PrPage(
+        items=kept,
+        complete=page.complete and len(kept) <= query.limit,
+        rate_limit=page.rate_limit,
+    )
 
 
 @dataclass(frozen=True)

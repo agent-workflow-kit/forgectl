@@ -997,10 +997,10 @@ class GitHubBackend:
             method=method,
         )
 
-    def list_prs(self, query: m.PrQuery) -> m.PrPage:
+    def list_prs(self, query: m.PrQuery, skip: Callable[[str], bool] | None = None) -> m.PrPage:
         from . import github_lists  # lazy: github_lists imports this module
 
-        return github_lists.list_prs(self._env, query)
+        return github_lists.list_prs(self._env, query, skip)
 
     def snapshot(self, ref: PrRef) -> m.Snapshot:
         from . import github_snapshot  # (#12) lazy: that module imports this one

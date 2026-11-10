@@ -14,6 +14,7 @@ caller decides from a later read what happened.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol, runtime_checkable
 
 from .. import model as m
@@ -51,8 +52,10 @@ class Backend(Protocol):
     #: `github` or `gitlab`.
     name: m.BackendName
 
-    def list_prs(self, query: m.PrQuery) -> m.PrPage:
-        """`prs` on this backend's hosts."""
+    def list_prs(self, query: m.PrQuery, skip: Callable[[str], bool] | None = None) -> m.PrPage:
+        """`prs` on this backend's hosts. ``skip`` takes a repo id (`host/path`); an item it
+        accepts is left out right after it is parsed, before any further read for the item, and
+        does not make the list incomplete."""
         ...
 
     def get_pr(self, ref: PrRef, readiness: m.Readiness | None = None) -> m.PrRead:

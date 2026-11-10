@@ -62,8 +62,8 @@ repos: {}
 
 # Repos that no listing shows, `prs` and `browse` alike (a PR in a hidden repo is dropped before the
 # limit applies). Each entry is a repo id, host/path, with * and ? as wildcards that also match
-# `/` (so `gitlab.example.com/group/*` covers subgroups); everything else is literal, and the whole
-# id matches ASCII case-insensitively. Commands that name one PR (show, snapshot, merge ...) are not
+# `/` (so `gitlab.example.com/group/*` covers subgroups); everything else is literal (at most 255
+# characters per entry), and the whole id matches ASCII case-insensitively. Commands that name one PR (show, snapshot, merge ...) are not
 # affected. A list replaces on merge.
 hidden_repos: []
 # hidden_repos:
