@@ -35,16 +35,6 @@ def _login(author: Any) -> str:
     return safe.line(login) if login else "(unknown)"
 
 
-def row_text(row: Row) -> str:
-    item = row.item
-    parts = [safe.line(item.get("pr")), safe.line(item.get("title"))]
-    if item.get("draft"):
-        parts.append("[draft]")
-    parts.append(f"@{_login(item.get('author'))}")
-    parts.append("+".join(sorted(row.roles)))
-    return "  ".join(p for p in parts if p)
-
-
 def row_haystack(row: Row) -> str:
     """The text ``/`` filters over, sanitized and lowercased."""
     item = row.item

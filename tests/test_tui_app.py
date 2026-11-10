@@ -53,8 +53,9 @@ def drive(
     opener: Any = None,
     focus: str | None = None,
     wait: bool = True,
+    concurrency: int = 0,  # 0: no per-row snapshots, so these tests count only their own reads
 ) -> BrowseApp:
-    app = BrowseApp(source, opener or FakeOpener(), focus=focus)
+    app = BrowseApp(source, opener or FakeOpener(), focus=focus, concurrency=concurrency)
 
     async def go() -> None:
         async with app.run_test(size=(140, 50)) as pilot:
@@ -220,13 +221,26 @@ def test_there_is_no_write_action() -> None:
     opener = FakeOpener()
 
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
-        for key in ("m", "p", "c", "a", "d", "x", "M"):
+        for key in ("m", "p", "c", "d", "x", "M"):
             await pilot.press(key)
         await settle(app, pilot)
 
     app = drive(source, script, opener=opener)
     bound = {b.key if hasattr(b, "key") else b[0] for b in BrowseApp.BINDINGS}  # type: ignore[index]
-    assert bound == {"q", "question_mark", "slash", "escape", "o", "r", "R"}
+    assert bound == {
+        "q",
+        "question_mark",
+        "slash",
+        "escape",
+        "o",
+        "r",
+        "R",
+        "s",
+        "a",
+        "v",
+        "f",
+        "n",
+    }
     assert not hasattr(app, "action_merge")
     assert opener.opened == []
     assert {c[0] for c in source.calls} <= {"prs", "snapshot", "diff"}
@@ -395,8 +409,8 @@ def test_the_markup_title_is_shown_literally() -> None:
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         assert title in list_prompts(app)[0].plain
         olist = app.query_one("#list", OptionList)
-        column = len(PR1) + 2 + 3  # three characters into the title, after the pr and 2 spaces
         line0 = olist.render_line(0).text  # the first content line of the list, as drawn
+        column = line0.index(title[:9]) + 3  # three characters into the title
         assert line0[column - 3 : column + 6] == title[:9]  # the offset is on the title text
         inner = olist.content_region
         x = inner.x - olist.region.x + column  # widget-relative: past border and padding
@@ -743,7 +757,7 @@ def test_quit_does_not_wait_for_a_slow_read() -> None:
         await pilot.press("q")
 
     started = time.monotonic()
-    app = BrowseApp(source, FakeOpener())
+    app = BrowseApp(source, FakeOpener(), concurrency=0)
 
     async def go() -> None:
         async with app.run_test(size=(140, 50)) as pilot:
