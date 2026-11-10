@@ -35,6 +35,7 @@ from ..gateway import Target, verify_identity
 from ..identifiers import PrRef, RepoRef, bind_login
 from ..reads import SHOW_READINESS, ReadEnv
 from ..sanitize import sanitize_line, sanitize_text
+from . import github_merge
 
 T = TypeVar("T")
 
@@ -596,13 +597,15 @@ class GitHubBackend:
 
     # -- show ----------------------------------------------------------------------------------
 
-    def get_pr(self, ref: PrRef) -> m.PrRead:
+    def get_pr(self, ref: PrRef, readiness: m.Readiness | None = None) -> m.PrRead:
         owner, name = _split(ref)
         if ref.number > MAX_PR_NUMBER:
             raise ForgectlError("not_found", "no such pull request")
         target = self._env.hosts.target(ref.host)
         shown, still_unknown = self._env.until_known(
-            lambda: self._read_show(target, ref, owner, name), _is_unknown, SHOW_READINESS
+            lambda: self._read_show(target, ref, owner, name),
+            _is_unknown,
+            SHOW_READINESS if readiness is None else readiness,
         )
         try:
             return self._normalize(target, ref, owner, name, shown, still_unknown)
@@ -982,6 +985,17 @@ class GitHubBackend:
         )
 
     # -- the reads other issues add ------------------------------------------------------------
+
+    # -- merge (the write; `github_merge.py` owns the call) ------------------------------------
+
+    def merge(self, pr: m.PR, *, sha: str, method: str | None) -> m.MergeAnswer:
+        return github_merge.put_merge(
+            self._env.gateway,
+            self._env.hosts.target(pr.repo.partition("/")[0]),
+            pr,
+            sha=sha,
+            method=method,
+        )
 
     def list_prs(self, query: m.PrQuery) -> m.PrPage:
         from . import github_lists  # lazy: github_lists imports this module

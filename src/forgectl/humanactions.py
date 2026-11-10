@@ -40,6 +40,7 @@ class HumanContext:
     yes: bool
     dry_run: bool
     decision_ids: tuple[str, ...]
+    stdin_tty: bool = False  # audit `stdin_tty`
 
 
 def default_me_name() -> str:
@@ -118,6 +119,7 @@ def build_context(args: Namespace, tty: Tty, *, me_name: str) -> HumanContext:
         yes=yes,
         dry_run=args.dry_run,
         decision_ids=tuple(ids),
+        stdin_tty=tty.stdin,
     )
 
 
