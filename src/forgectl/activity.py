@@ -16,7 +16,6 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fractions import Fraction
-from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from . import model as m
@@ -56,20 +55,41 @@ def _instant(text: str, what: str) -> _Instant:
     return moment, fraction
 
 
-@lru_cache(maxsize=256)
-def _pattern(glob: str) -> re.Pattern[str]:
-    """``*`` is any run and ``?`` one character; everything else is literal, so the brackets of
-    ``dependabot[bot]`` are not a character class. Case-insensitive like logins."""
-    parts = [".*" if ch == "*" else "." if ch == "?" else re.escape(ch) for ch in glob]
-    return re.compile("".join(parts), re.DOTALL)
+def glob_match(pattern: str, text: str) -> bool:
+    """Whether ``pattern`` matches all of ``text``: ``*`` is any run (empty included, ``/`` too)
+    and ``?`` any one character; everything else is literal, so the brackets of
+    ``dependabot[bot]`` are not a character class. Both are compared ASCII case-insensitively,
+    like logins. Iterative with one backtrack point (the last ``*``): the work is at most
+    ``len(pattern) * len(text)`` steps, whatever the pattern."""
+    pat = m.ascii_lower(pattern)
+    name = m.ascii_lower(text)
+    p = n = 0
+    star = -1  # index in ``pat`` of the last `*` seen
+    resume = 0  # index in ``name`` that star currently covers up to
+    while n < len(name):
+        if p < len(pat) and pat[p] != "*" and (pat[p] == "?" or pat[p] == name[n]):
+            p += 1
+            n += 1
+        elif p < len(pat) and pat[p] == "*":
+            star = p
+            p += 1
+            resume = n
+        elif star >= 0:
+            p = star + 1
+            resume += 1
+            n = resume
+        else:
+            return False
+    while p < len(pat) and pat[p] == "*":
+        p += 1
+    return p == len(pat)
 
 
 def ignored(login: str | None, patterns: Iterable[str]) -> bool:
     """Whether ``login`` matches one of ``activity.ignore_authors``. No login is never ignored."""
     if login is None:
         return False
-    name = m.ascii_lower(login)
-    return any(_pattern(m.ascii_lower(p)).fullmatch(name) for p in patterns)
+    return any(glob_match(p, login) for p in patterns)
 
 
 def _is_me(me: Viewer, login: str | None, id_: str | None) -> bool:

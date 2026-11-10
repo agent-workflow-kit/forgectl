@@ -347,8 +347,12 @@ def _draft_name(backend: GitLabBackend, host: str) -> str:
     return "draft" if version is not None and version >= _DRAFT_FILTER_FROM else "wip"
 
 
-def list_prs(backend: GitLabBackend, query: m.PrQuery) -> m.PrPage:
-    """``prs`` on one GitLab host: at most ``limit`` items, newest ``updated_at`` first."""
+def list_prs(
+    backend: GitLabBackend, query: m.PrQuery, skip: Callable[[str], bool] | None = None
+) -> m.PrPage:
+    """``prs`` on one GitLab host: at most ``limit`` items, newest ``updated_at`` first. An item
+    whose repo id ``skip`` accepts is left out as soon as it is parsed, so its author and head
+    project are never read, and does not make the list incomplete."""
     host = _host_of(query)
     build_request(query, None)  # refuses before any credential is read or call made
     target = backend._hosts.target(host)
@@ -395,6 +399,8 @@ def list_prs(backend: GitLabBackend, query: m.PrQuery) -> m.PrPage:
                         "upstream_error", "gitlab: an item of another project in a project list"
                     )
                 scope.add((parsed.project_id, parsed.canonical))
+            if skip is not None and skip(parsed.item.repo):
+                continue
             if parsed.item.pr_id in seen:
                 dropped = True  # the list moved between pages: something may be missing
                 continue

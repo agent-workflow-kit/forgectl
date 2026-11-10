@@ -284,3 +284,82 @@ async def _settle(app: BrowseApp, pilot: Pilot[None]) -> None:
     await pilot.pause()
     await app.workers.wait_for_complete()
     await pilot.pause()
+
+
+def test_a_hidden_repo_gets_no_row_and_no_snapshot_in_browse(
+    forged: FakeForges, tmp_path: Path
+) -> None:
+    hidden = tmp_path / "hidden.yaml"
+    hidden.write_text(
+        "retries: 0\nme:\n  github: user-1\nhidden_repos: ['GitHub.com/user-7/*']\nhosts:\n"
+        "  github.com:\n    token_env: TOK_A\n"
+        f"  {GHE}:\n    backend: github\n    token_env: TOK_B\n",
+        encoding="utf-8",
+    )
+    two_hosts_one_failing(forged)
+    snapshot_and_diff_fakes(forged)
+    got = load_list(LiveSource(config_path=str(hidden)))
+    assert got.rows == []
+    assert got.complete is False  # the GHE failure only, not the hiding
+    assert [e for e in got.errors if GHE not in e] == []
+    assert all(c.argv[-1] != "snapshot" for c in forged.calls("gh"))
+    queries = [c for c in forged.calls("gh") if "ForgectlPrs" in (c.stdin or "")]
+    assert queries and len(queries) == len(forged.calls("gh")), "only list queries were made"
+
+
+def test_an_exact_entry_hides_only_that_repos_rows_in_browse(
+    forged: FakeForges, tmp_path: Path
+) -> None:
+    exact = tmp_path / "exact.yaml"
+    exact.write_text(
+        "retries: 0\nme:\n  github: user-1\nhidden_repos: ['github.com/user-7/example-repo']\n"
+        "hosts:\n  github.com:\n    token_env: TOK_A\n",
+        encoding="utf-8",
+    )
+    forged.answer(
+        "gh", "graphql", method="POST", host="github.com", stdin_re=r"query ForgectlPrs\b",
+        body=list_recording(),
+    )  # fmt: skip
+    forged.answer("glab", "user", status=401, body={"message": "401 Unauthorized"})
+    got = load_list(LiveSource(config_path=str(exact)))
+    assert [r.item["repo"] for r in got.rows] == ["github.com/user-7/other-repo"]
+    assert got.complete is True
+
+
+def test_a_hidden_gitlab_repo_gets_no_row_in_browse(
+    forged: FakeForges, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from .test_gitlab_lists import mrs as gitlab_mrs
+    from .test_gitlab_lists_cli import config as gitlab_config
+    from .test_gitlab_lists_cli import route as gitlab_route
+    from .test_gitlab_lists_cli import script as gitlab_script
+
+    gitlab_script(forged)
+    recorded = gitlab_mrs()
+    for mr in recorded:
+        mr["author"] = recorded[0]["author"]
+    shown = recorded[0]  # moved to another project: the one row browse keeps
+    shown.update(
+        project_id=303,
+        source_project_id=303,
+        target_project_id=303,
+        web_url="https://gitlab.com/user-5/visible/-/merge_requests/31",
+    )
+    gitlab_route(forged, "merge_requests", recorded)
+    forged.answer("gh", "graphql", method="POST", host="github.com", body=_empty_search(), times=2)
+    cfg = gitlab_config(
+        tmp_path, "me:\n  github: user-1\n  gitlab: user-1\nhidden_repos: ['gitlab.com/user-9/*']\n"
+    )
+    monkeypatch.setenv("GL_TOKEN", TOKEN_A)
+    monkeypatch.setenv("GH_TOKEN", TOKEN_A)
+    got = load_list(LiveSource(config_path=str(cfg)))
+    assert [r.item["repo"] for r in got.rows] == ["gitlab.com/user-5/visible"]
+    assert all("user-9/proj" not in e for e in got.errors)
+    assert not any("projects/202" in " ".join(c.argv) for c in forged.calls("glab"))
+
+
+def _empty_search() -> dict[str, Any]:
+    doc = list_recording()
+    doc["data"]["search"]["nodes"] = []
+    doc["data"]["search"]["issueCount"] = 0
+    return doc

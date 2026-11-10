@@ -212,6 +212,12 @@ def _matches(item: m.PrListItem, query: m.PrQuery) -> bool:
     return query.draft is None or item.draft == query.draft
 
 
+def _node_repo(target: Target, node: dict[str, Any]) -> str:
+    """The repo id of a search result, read the way ``_item`` reads it."""
+    repository = _obj(node.get("repository"), "the repository")
+    return f"{target.host}/{_project(repository.get('nameWithOwner'), 'the repository path')}"
+
+
 def _item(env: ReadEnv, target: Target, node: dict[str, Any], *, more: bool) -> m.PrListItem:
     """One search result; ``more: False`` checks it without reading further label pages."""
     from .github import GitHubBackend  # the label paging of `show`, not written twice
@@ -260,22 +266,26 @@ def _item(env: ReadEnv, target: Target, node: dict[str, Any], *, more: bool) -> 
     )
 
 
-def list_prs(env: ReadEnv, query: m.PrQuery) -> m.PrPage:
-    """``prs`` on one GitHub host: at most ``limit`` items, newest ``updated_at`` first."""
+def list_prs(env: ReadEnv, query: m.PrQuery, skip: Callable[[str], bool] | None = None) -> m.PrPage:
+    """``prs`` on one GitHub host: at most ``limit`` items, newest ``updated_at`` first. An item
+    whose repo id ``skip`` accepts is left out before its label pages are read, and does not make
+    the list incomplete."""
     search = build_search(query)  # refuses before any credential is read or call made
     host = _host_of(query)
     target = env.hosts.target(host)
     floor = None if query.updated_since is None else instant(query.updated_since)
     need = min(query.limit + 1, SEARCH_CAP)  # one more than asked tells `complete`
     try:
-        items, dropped, more, total = _read_pages(env, target, query, search, need, floor)
+        items, dropped, more, total, skipped = _read_pages(
+            env, target, query, search, need, floor, skip
+        )
     except Malformed as bad:
         raise malformed(f"{bad}") from None
     except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
         raise malformed("data") from None
     items = sort_items(items)
     cut = len(items) > query.limit
-    complete = not (cut or dropped or more or total > len(items))
+    complete = not (cut or dropped or more or total > len(items) + skipped)
     rate = env.gateway.lowest_rate(target.host)  # from the response headers (interface: prs)
     return m.PrPage(
         items=tuple(items[: query.limit]),
@@ -344,9 +354,11 @@ def _read_pages(
     search: str,
     need: int,
     floor: datetime | None,
-) -> tuple[list[m.PrListItem], bool, bool, int]:
+    skip: Callable[[str], bool] | None = None,
+) -> tuple[list[m.PrListItem], bool, bool, int, int]:
     items: list[m.PrListItem] = []
     seen: set[str] = set()
+    skipped_ids: set[str] = set()  # left out on purpose: counted against the host's match count
     dropped = False  # something the host listed could not be kept: the list is not whole
     after: str | None = None
     more = False
@@ -360,6 +372,9 @@ def _read_pages(
             if node is None:
                 dropped = True  # not a pull request, or hidden from this account
                 continue
+            if skip is not None and skip(_node_repo(target, node)):
+                skipped_ids.add(_str(node.get("id"), "the id"))
+                continue  # before `_item` reads label pages: a skipped PR costs no request
             item = _item(env, target, node, more=True)
             if item.pr_id in seen:
                 dropped = True  # the list moved between pages: something may be missing
@@ -373,7 +388,7 @@ def _read_pages(
         more, after = _page_info(block)
         if not more or len(items) >= need:
             break
-    return items, dropped, more, total
+    return items, dropped, more, total, len(skipped_ids)
 
 
 # -- access ------------------------------------------------------------------------------------
