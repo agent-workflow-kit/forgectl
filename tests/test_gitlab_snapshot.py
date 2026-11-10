@@ -67,6 +67,7 @@ class Rig:
         fake.pages(DISCUSSIONS, [snap_rec("discussions")])
         fake.on(VERSIONS, snap_rec("versions"))
         fake.on(COMMIT, snap_rec("commit"))
+        fake.on("user", self.data["user"])  # me, for the `activity` block (user-1, id 11)
         for account in (12, 13):  # the commenters' bot lookups
             fake.on(
                 f"users/{account}",
@@ -1293,3 +1294,188 @@ def test_reviews_reads_again_after_one_move_at_the_closing_check(
     mr_sequence(fake, [first, first, moved, first, first, first])
     out = rig.reviews()
     assert out["head_sha"] == HEAD and fake.count(mr_path()) == 6
+
+
+# -- activity (#57) -------------------------------------------------------------------------------
+# me is user-1 (id 11). The recorded threads: user-3 (11:00), user-2 then me (11:05, 11:10),
+# a resolved one by user-3, and user-2 (11:30); the head was pushed at 11:35Z.
+
+
+def discussion(
+    login_id: tuple[str, int], at: str, *, note_id: int, discussion_id: str
+) -> dict[str, Any]:
+    login, account = login_id
+    return {
+        "id": discussion_id,
+        "individual_note": True,
+        "notes": [
+            {
+                "id": note_id,
+                "type": None,
+                "body": "text",
+                "author": {"id": account, "username": login, "name": login, "state": "active"},
+                "created_at": at,
+                "updated_at": at,
+                "system": False,
+                "resolvable": False,
+                **OWNED,
+            }
+        ],
+    }
+
+
+def test_activity_counts_the_recorded_threads(rig: Rig) -> None:
+    assert rig.snapshot()["activity"] == {
+        "comments_total": 5,
+        "unresolved_threads": 3,
+        "others_since_push": 0,  # every recorded comment is older than the push
+        "awaiting_my_reply": 2,  # user-3's open thread and user-2's last; I wrote last in another
+    }
+
+
+def test_activity_agrees_with_the_threads_of_the_same_snapshot(rig: Rig) -> None:
+    out = rig.snapshot()
+    assert out["activity"]["comments_total"] == sum(len(t["comments"]) for t in out["threads"])
+    assert out["activity"]["unresolved_threads"] == sum(not t["resolved"] for t in out["threads"])
+
+
+def with_comments(fake: FakeGitLab, tmp_path: Path, extra: list[dict[str, Any]]) -> Rig:
+    rig = Rig(fake, tmp_path)
+    fake.pages(DISCUSSIONS, [[*snap_rec("discussions"), *extra]])
+    return rig
+
+
+def test_comments_of_others_after_the_push_count_and_my_own_do_not(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    rig = with_comments(
+        fake,
+        tmp_path,
+        [
+            discussion(
+                ("user-3", 13), "2026-10-02T11:36:00.000Z", note_id=9001, discussion_id="a" * 40
+            ),
+            discussion(
+                ("user-1", 11), "2026-10-02T11:40:00.000Z", note_id=9002, discussion_id="b" * 40
+            ),
+            discussion(
+                ("user-2", 12), "2026-10-02T11:35:00.000Z", note_id=9003, discussion_id="c" * 40
+            ),
+        ],
+    )
+    # only user-3's: mine never counts, and one made at the very instant of the push is not after
+    assert rig.snapshot()["activity"]["others_since_push"] == 1
+
+
+def test_an_ignored_author_is_not_counted_whatever_the_account(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    rig = with_comments(
+        fake,
+        tmp_path,
+        [
+            discussion(
+                ("user-3", 13), "2026-10-02T11:36:00.000Z", note_id=9001, discussion_id="a" * 40
+            )
+        ],
+    )
+    rig.backend = make_backend(fake, tmp_path, ignore_authors=("USER-3",))
+    out = rig.snapshot()["activity"]
+    assert out["others_since_push"] == 0
+    assert out["awaiting_my_reply"] == 1  # user-3's last word is ignored; user-2's still waits
+
+
+def test_others_since_push_is_null_when_the_push_time_is_unknown(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    rig = with_comments(
+        fake,
+        tmp_path,
+        [
+            discussion(
+                ("user-3", 13), "2026-10-02T11:36:00.000Z", note_id=9001, discussion_id="a" * 40
+            )
+        ],
+    )
+    fake.on(VERSIONS, [])
+    fake.on(COMMIT, {"message": "404 Not found"}, status=404)
+    out = rig.snapshot()
+    assert out["head"]["pushed_at"] is None
+    assert out["activity"]["others_since_push"] is None
+    assert out["activity"]["comments_total"] == 6  # the other counts do not need a push time
+
+
+def test_the_commit_date_fallback_is_used_like_a_push_event(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    rig = with_comments(
+        fake,
+        tmp_path,
+        [
+            discussion(
+                ("user-3", 13), "2026-10-02T11:36:00.000Z", note_id=9001, discussion_id="a" * 40
+            )
+        ],
+    )
+    fake.on(VERSIONS, [])
+    out = rig.snapshot()
+    assert out["head"]["pushed_at_source"] == "commit_date"
+    assert out["head"]["pushed_at"] == "2026-10-01T08:59:00Z"  # the commit's own date
+    # so the four recorded comments of others and the new one are all after it
+    assert out["activity"]["others_since_push"] == 5
+
+
+def approved_at(fake: FakeGitLab, tmp_path: Path, *, account: int, at: str | None) -> Rig:
+    rig = Rig(fake, tmp_path)
+    approvals = recording("approvals")
+    user = approvals["approved_by"][0]["user"]
+    approvals["approved_by"][0] = {
+        "user": {**user, "id": account, "username": f"user-{account - 10}"},
+        **({} if at is None else {"approved_at": at}),
+    }
+    fake.on(APPROVALS, approvals)
+    fake.on(f"projects/101/members/all/{account}", recording("member"))
+    return rig
+
+
+@pytest.mark.parametrize(
+    ("at", "counted"),
+    [
+        ("2026-10-02T11:36:00.000Z", 1),  # after the push at 11:35Z
+        ("2026-10-02T13:36:00.000+02:00", 1),  # the same instant written with an offset
+        ("2026-10-02T11:35:00.000Z", 0),  # at the instant of the push is not after it
+        ("2026-10-02T11:00:00.000Z", 0),  # before it
+        (None, 0),  # GitLab gave no approval time
+    ],
+)
+def test_an_approval_of_another_counts_only_after_the_push(
+    fake: FakeGitLab, tmp_path: Path, at: str | None, counted: int
+) -> None:
+    rig = approved_at(fake, tmp_path, account=12, at=at)
+    out = rig.snapshot()
+    assert (out["latest_by_reviewer"][0]["at"] is None) == (at is None)
+    assert out["activity"]["others_since_push"] == counted
+
+
+def test_my_own_approval_after_the_push_is_not_activity(fake: FakeGitLab, tmp_path: Path) -> None:
+    rig = approved_at(fake, tmp_path, account=11, at="2026-10-02T12:00:00.000Z")
+    assert rig.snapshot()["activity"]["others_since_push"] == 0
+
+
+def test_an_ignored_approver_is_not_counted(fake: FakeGitLab, tmp_path: Path) -> None:
+    rig = approved_at(fake, tmp_path, account=12, at="2026-10-02T12:00:00.000Z")
+    rig.backend = make_backend(fake, tmp_path, ignore_authors=("user-*",))
+    assert rig.snapshot()["activity"]["others_since_push"] == 0
+
+
+def test_a_failed_read_of_me_fails_the_snapshot(fake: FakeGitLab, tmp_path: Path) -> None:
+    rig = Rig(fake, tmp_path)
+    fake.on("user", {"message": "401 Unauthorized"}, status=401)
+    with pytest.raises(ForgectlError):
+        rig.snapshot()
+
+
+def test_me_is_read_once_for_the_run(rig: Rig) -> None:
+    rig.snapshot()
+    rig.snapshot()
+    assert rig.fake.count("user") == 1

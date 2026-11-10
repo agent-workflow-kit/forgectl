@@ -133,6 +133,41 @@
     },
     "fetched_at": {
       "$ref": "../defs.json#/$defs/ts"
+    },
+    "activity": {
+      "type": "object",
+      "properties": {
+        "comments_total": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "All comments across all threads, mine and ignored authors' included."
+        },
+        "unresolved_threads": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Threads that are not resolved."
+        },
+        "others_since_push": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Comments plus reviews (GitLab: approvals) by an account that is not me and not ignored, after head.pushed_at; null when pushed_at is null."
+        },
+        "awaiting_my_reply": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Unresolved threads whose last comment by a non-ignored author is not mine."
+        }
+      },
+      "required": [
+        "comments_total",
+        "unresolved_threads",
+        "others_since_push",
+        "awaiting_my_reply"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -176,6 +211,7 @@
     "latest_by_reviewer",
     "threads",
     "ci",
+    "activity",
     "rate_limit",
     "complete",
     "incomplete",

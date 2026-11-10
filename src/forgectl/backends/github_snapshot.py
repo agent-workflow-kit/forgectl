@@ -31,6 +31,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from .. import model as m
+from ..activity import for_snapshot as derive_activity
 from ..errors import ForgectlError
 from ..gateway import GraphQLResult, Response, Target, verify_identity
 from ..identifiers import PrRef
@@ -1436,7 +1437,16 @@ def _snapshot_once(reader: _Reader, read: m.PrRead, now: Now) -> m.Snapshot:
         incomplete.append("reviews")
     if not parts.threads.complete:
         incomplete.append("threads")
-    # TODO(#57): the derived `activity` block (others' comments since the last push).
+    # GitHub: comments from `threads`, reviews from `reviews` (counted at `submitted_at`); no
+    # `approvals`, which `latest_by_reviewer` would count a second time.
+    activity = derive_activity(
+        reader.env,
+        reader.ref.host,
+        threads=parts.threads.threads,
+        reviews=parts.reviews.reviews,
+        approvals=(),
+        head_push=head_push,
+    )
     return m.Snapshot(
         pr=pr,
         review_requests=requests.requests,
@@ -1449,6 +1459,7 @@ def _snapshot_once(reader: _Reader, read: m.PrRead, now: Now) -> m.Snapshot:
         fetched_at=_stamp(now()),
         incomplete=tuple(incomplete),
         head_push=head_push,
+        activity=activity,
     )
 
 

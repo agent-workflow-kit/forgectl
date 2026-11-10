@@ -190,6 +190,7 @@ EnvName = Annotated[str, _matches(_ENV_NAME_RE, "variable name")]
 ApiPrefix = Annotated[str, _matches(_API_PREFIX_RE, "path prefix such as /gitlab")]
 Command = Annotated[str, AfterValidator(_command)]
 Arg = Annotated[str, Field(min_length=1), AfterValidator(_no_control_characters)]
+ArgList0 = Annotated[tuple[Arg, ...], BeforeValidator(_as_tuple)]  # may be empty
 ArgList = Annotated[tuple[Arg, ...], BeforeValidator(_as_tuple), Field(min_length=1)]
 PreHooks = Annotated[tuple["PreHook", ...], BeforeValidator(_as_tuple)]
 PostHooks = Annotated[tuple["PostHook", ...], BeforeValidator(_as_tuple)]
@@ -230,6 +231,10 @@ class PostHook(_Model):
     async_: bool = Field(default=False, alias="async")
 
 
+class Activity(_Model):
+    ignore_authors: ArgList0 = ()
+
+
 class Hooks(_Model):
     pre_merge: PreHooks = Field(default=(), alias="pre-merge")
     post_merge: PostHooks = Field(default=(), alias="post-merge")
@@ -245,6 +250,7 @@ class Config(_Model):
     retries: Retries = 3
     hosts: HostMap = Field(default_factory=_empty_map)
     repos: RepoMap = Field(default_factory=_empty_map)
+    activity: Activity = Field(default_factory=Activity)
     hooks: Hooks = Field(default_factory=Hooks)
 
 
