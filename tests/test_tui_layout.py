@@ -391,7 +391,7 @@ def assert_header_over_cells(app: BrowseApp) -> int:
     return checked
 
 
-@pytest.mark.parametrize("width", [80, 120, 200])
+@pytest.mark.parametrize("width", [80, 120, 220])
 def test_header_names_start_at_the_same_screen_x_as_their_cells(width: int) -> None:
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         assert assert_header_over_cells(app) >= 1

@@ -5,13 +5,29 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from forgectl.config import load_config
+from forgectl.config import config_directory, load_config
 from forgectl.errors import ForgectlError
 
 from .app import BrowseApp
 from .opener import BrowserOpener, Opener
+from .query_store import HISTORY_FILE, QueryStore, state_dir
 from .source import DataSource
 from .source_live import LiveSource
+
+
+def _store(config_path: str | None) -> QueryStore:
+    """The query history under the state directory and the default's drop-in beside the config in
+    use. The paths come from the environment only here: a test's app has neither."""
+    state = state_dir(os.environ)
+    try:
+        config_dir = config_directory(config_path, os.environ)
+    except ForgectlError:
+        config_dir = None
+    return QueryStore(
+        history_path=None if state is None else state / HISTORY_FILE,
+        config_dir=config_dir,
+        no_path_note="" if state is not None else "history not saved: no state directory",
+    )
 
 
 def run_browse(
@@ -39,6 +55,8 @@ def run_browse(
             "full_refresh_every": browse.full_refresh_every,
             "concurrency": browse.concurrency,
             "detail_collapsed": browse.detail_collapsed,
+            "query": browse.query,
+            "store": _store(config_path),
         }
     source = source or LiveSource(config_path=config_path, timeout=timeout)
     app = BrowseApp(
