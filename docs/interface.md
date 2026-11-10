@@ -196,10 +196,10 @@ A comment is `{id, author, body, created_at, updated_at, minimized, reply_to, re
 
 | Host | `push_event` | `commit_date` |
 |---|---|---|
-| GitHub | the time of the newest `HeadRefForcePushedEvent` on the PR timeline to the current head sha, a host time | the committer date of the newest `PullRequestCommit` of the current head sha, or else the head commit's committed date; a committer date is set by whoever made the commit, so a backdated commit can make it earlier than the push |
+| GitHub | the time of the newest `HeadRefForcePushedEvent` on the PR timeline to the current head sha, a host time | when the timeline holds no `HeadRefForcePushedEvent` to the current head sha: the committer date of the newest `PullRequestCommit` of the head sha, or else the head commit's committed date; a committer date is set by whoever made the commit, so a backdated commit can make it earlier than the push |
 | GitLab | `created_at` of the newest entry of `/merge_requests/:id/versions` | the head commit's date, when versions are unavailable |
 
-A new push gives a later `pushed_at` on the next snapshot. Nothing is stored between runs.
+A new push gives a later `pushed_at` on the next snapshot when the source is `push_event`; with `commit_date` it can be earlier. Nothing is stored between runs.
 
 ### Activity
 

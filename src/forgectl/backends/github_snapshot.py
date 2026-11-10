@@ -327,7 +327,7 @@ nodes {
 }
 """
 
-#: The newest push events of the PR and the head commit's own date (#56).
+#: The newest force-push events and PR commits of the PR, and the head commit's own date (#56).
 PUSH_QUERY = f"""
 query ForgectlPush($owner: String!, $name: String!, $number: Int!, $head: GitObjectID!) {{
   {_RATE}
@@ -1246,6 +1246,11 @@ def read_head_push(reader: _Reader, head: str, now: Now = utc_now) -> m.PushTime
     and never wins over a host event, and any time later than the reading plus ``FUTURE_SKEW`` is
     not trusted (interface: Push time).
 
+    The timeline is read back from the newest page, at most ``MAX_PUSH_PAGES`` pages. The search
+    stops at the first page that holds a force push to this head; a ``PullRequestCommit`` of this
+    head does not stop it, since an older page can still hold a force push that wins. When the
+    pages run out or the cap is reached with no force push, the newest commit seen is used.
+
     Every page is checked inside its retried call; once the retries are spent on an answer that
     is not the documented shape, the push time is unknown and the snapshot is not failed. A wrong
     host stays ``wrong_host_response``; another head is ``_Moved``.
@@ -1301,7 +1306,7 @@ def _read_head_push(reader: _Reader, head: str, now: Now) -> m.PushTime | None:
                 forced = (parsed, when)
             elif kind == "commit" and (committed is None or parsed > committed[0]):
                 committed = (parsed, when)
-        if forced is not None or committed is not None:
+        if forced is not None:
             break
         if not more or cursor is None or index == MAX_PUSH_PAGES - 1:
             break
