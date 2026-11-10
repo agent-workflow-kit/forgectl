@@ -36,7 +36,6 @@ from ..identifiers import PrRef, RepoRef, bind_login
 from ..reads import SHOW_READINESS, ReadEnv
 from ..sanitize import sanitize_line, sanitize_text
 from . import github_merge
-from .base import not_implemented
 
 T = TypeVar("T")
 
@@ -995,7 +994,9 @@ class GitHubBackend:
         )
 
     def list_prs(self, query: m.PrQuery) -> m.PrPage:
-        raise not_implemented("prs")  # TODO(#14): GraphQL search, partial results across hosts
+        from . import github_lists  # lazy: github_lists imports this module
+
+        return github_lists.list_prs(self._env, query)
 
     def snapshot(self, ref: PrRef) -> m.Snapshot:
         from . import github_snapshot  # (#12) lazy: that module imports this one
@@ -1003,13 +1004,19 @@ class GitHubBackend:
         return github_snapshot.snapshot(self._env, ref, self.get_pr)
 
     def diff(self, ref: PrRef) -> m.DiffResult:
-        raise not_implemented("diff")  # TODO(#13)
+        from . import github_diff  # a late import: github_diff reads this module's helpers
+
+        return github_diff.diff_result(self._env, ref)
 
     def compare(self, ref: PrRef, from_sha: str, to_sha: str) -> m.CompareResult:
-        raise not_implemented("compare")  # TODO(#13)
+        from . import github_diff
+
+        return github_diff.compare_result(self._env, ref, from_sha, to_sha)
 
     def files(self, ref: PrRef) -> m.FilesResult:
-        raise not_implemented("files")  # TODO(#13)
+        from . import github_diff
+
+        return github_diff.files_result(self._env, ref)
 
     def comments(self, ref: PrRef) -> m.CommentsResult:
         from . import github_snapshot  # (#12)
@@ -1027,10 +1034,14 @@ class GitHubBackend:
         return github_snapshot.ci(ref, self.get_pr)
 
     def access(self, repo: RepoRef, user: str) -> m.AccessResult:
-        raise not_implemented("access")  # TODO(#14)
+        from . import github_lists
+
+        return github_lists.access(self._env, repo, user)
 
     def whoami(self, host: str) -> m.Identity:
-        raise not_implemented("whoami")  # TODO(#14): hosts.identity is the source
+        from . import github_lists
+
+        return github_lists.whoami(self._env, host)
 
 
 # -- small mappings ----------------------------------------------------------------------------

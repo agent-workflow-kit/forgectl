@@ -49,6 +49,7 @@ import time
 import urllib.parse
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from .errors import ForgectlError
@@ -150,6 +151,12 @@ _METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
 
 def _error(code: str, message: str, **kwargs: Any) -> ForgectlError:
     return ForgectlError(code, message, **kwargs)
+
+
+class AnswerCut(ForgectlError):
+    """A read whose answer went past forgectl's own size cap: ``upstream_error`` like any other
+    unusable answer, told apart by its type for a caller to which a cut means too large (a
+    diff)."""
 
 
 # -- Percent-encoding and endpoints ---------------------------------------------------------
@@ -1115,6 +1122,36 @@ class Response:
 
 
 @dataclass(frozen=True)
+class RateReading:
+    """The rate-limit headers of one answer: ``x-ratelimit-remaining`` and
+    ``x-ratelimit-reset`` (GitHub), or ``ratelimit-remaining`` and ``ratelimit-reset`` (GitLab),
+    the reset as an RFC 3339 UTC time (null when absent or unusable)."""
+
+    host: str
+    remaining: int
+    reset_at: str | None
+
+
+_RATE_NUMBER = re.compile(r"[0-9]{1,12}", re.ASCII)
+
+
+def rate_reading(host: str, headers: Mapping[str, str]) -> RateReading | None:
+    """The reading of one answer's headers; None when it has no usable ``remaining``."""
+    remaining = headers.get("x-ratelimit-remaining", headers.get("ratelimit-remaining"))
+    if remaining is None or not _RATE_NUMBER.fullmatch(remaining.strip()):
+        return None
+    reset = headers.get("x-ratelimit-reset", headers.get("ratelimit-reset"))
+    reset_at = None
+    if reset is not None and _RATE_NUMBER.fullmatch(reset.strip()):
+        try:
+            moment = datetime.fromtimestamp(int(reset.strip()), UTC)
+            reset_at = f"{moment.year:04d}-{moment:%m-%dT%H:%M:%S}Z"
+        except (OverflowError, OSError, ValueError):
+            reset_at = None
+    return RateReading(host=host, remaining=int(remaining.strip()), reset_at=reset_at)
+
+
+@dataclass(frozen=True)
 class GraphQLResult:
     data: Mapping[str, Any]
     errors: tuple[Any, ...]  # empty unless ``allow_errors`` accepted a partial answer
@@ -1319,6 +1356,14 @@ class Gateway:
         self._on_spawn = on_spawn
         self._max_stdout = max_stdout
         self._max_stderr = max_stderr
+        #: The rate-limit headers of every answer this command received, success or failure.
+        self.rate_readings: list[RateReading] = []
+
+    def lowest_rate(self, host: str | None = None) -> RateReading | None:
+        """The reading with the lowest ``remaining`` (of ``host``, or of every host); the
+        first seen wins a tie. None when no answer carried one."""
+        readings = [r for r in self.rate_readings if host is None or r.host == host]
+        return min(readings, key=lambda r: r.remaining) if readings else None
 
     @property
     def environ(self) -> Mapping[str, str]:
@@ -1337,7 +1382,7 @@ class Gateway:
         headers: Mapping[str, str] | None = None,
         write: bool = False,
         shape: Shape = "any",
-        parse: Literal["json", "text"] = "json",
+        parse: Literal["json", "text", "bytes"] = "json",
         expect_status: frozenset[int] | None = None,
         passthrough: frozenset[int] = frozenset(),
         _graphql: bool = False,
@@ -1352,7 +1397,8 @@ class Gateway:
         arrives here as that GET's answer. ``shape`` is the
         documented body: a list where one object is documented on a write is ``host_rejected``.
         ``passthrough`` lists non-2xx statuses the caller maps itself (409, 405...): they return
-        as a ``Response`` instead of raising.
+        as a ``Response`` instead of raising. ``parse="bytes"`` returns the body undecoded (a
+        diff may hold any bytes; the caller decodes with ``sanitize_bytes``).
         """
         method = method.upper()
         if method not in _METHODS:
@@ -1533,7 +1579,7 @@ class Gateway:
         *,
         write: bool,
         shape: Shape,
-        parse: Literal["json", "text"],
+        parse: Literal["json", "text", "bytes"],
         expect_status: frozenset[int] | None,
         passthrough: frozenset[int],
         graphql: bool,
@@ -1549,6 +1595,8 @@ class Gateway:
 
         if result.timed_out:
             raise failure("network_error", f"{where}: no answer within the time budget")
+        if result.stdout_truncated and not write:
+            raise AnswerCut("upstream_error", f"{where}: the answer was larger than the read cap")
         if result.stdout_truncated or result.streams_incomplete:
             raise failure("upstream_error", f"{where}: the answer was too large or never ended")
         parsed = parse_http(result.stdout)
@@ -1574,6 +1622,9 @@ class Gateway:
                 + (f": {note}" if note else ""),
             )
         status, headers, raw = parsed
+        reading = rate_reading(target.host, headers)
+        if reading is not None:
+            self.rate_readings.append(reading)
         if status < 200:  # an informational status is never the answer
             raise failure("upstream_error", f"{where}: only an informational status {status}")
         if status in passthrough:
@@ -1787,7 +1838,9 @@ def _encode_body(body: Any) -> bytes:
         raise ValueError("body holds a lone surrogate") from exc
 
 
-def _decode(raw: bytes, parse: Literal["json", "text"], *, tolerant: bool) -> Any:
+def _decode(raw: bytes, parse: Literal["json", "text", "bytes"], *, tolerant: bool) -> Any:
+    if parse == "bytes":  # the caller decodes and sanitizes (a diff may hold any bytes)
+        return raw
     try:
         return raw.decode("utf-8") if parse == "text" else parse_json(raw)
     except ValueError:  # UnicodeDecodeError included

@@ -34,8 +34,8 @@ from .harness.procs import ProcessRegistry
 from .harness.safety import assert_call_safe
 from .test_github_show import HEAD, OTHER, TOKEN, recording
 
-PR = "github.com/example-org/example-repo#7"
-REPO = "example-org/example-repo"
+PR = "github.com/user-7/example-repo#7"
+REPO = "user-7/example-repo"
 MERGE_ENDPOINT = f"repos/{REPO}/pulls/7/merge"
 MERGE_SHA = "7777777777777777777777777777777777777777"
 BASE = "main"

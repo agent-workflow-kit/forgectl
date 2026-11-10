@@ -41,6 +41,17 @@ def error_text(err: ForgectlError) -> str:
     return f"forgectl: error: {label}: {sanitize_line(err.message)}"
 
 
+def warning_text(message: str) -> str:
+    """The one stderr line for a warning, in the form of the error line."""
+    return f"forgectl: warning: {sanitize_line(message)}"
+
+
+def emit_warning(message: str) -> None:
+    """Write a warning line to stderr; a failed stream never raises."""
+    # TODO(#9): also write a `warn` line to the log (jsonlog.py)
+    write_line(sys.stderr, warning_text(message))
+
+
 def would_refuse_result(command: str, args: Namespace, err: ForgectlError) -> dict[str, Any]:
     """The `--dry-run` result for an exit 20: the command's output with `would_refuse` set.
 
@@ -134,8 +145,8 @@ def _discard(stream: TextIO) -> None:
         pass
 
 
-def write_line(stream: TextIO | None, text: str) -> bool:
-    """Write ``text`` and a newline, flushed; False when the stream is missing or failed.
+def write_text(stream: TextIO | None, text: str) -> bool:
+    """Write ``text`` as it is, flushed; False when the stream is missing or failed.
 
     A failure (closed or absent stream, broken pipe, full disk) never raises: the exit code is
     already decided and an output problem must not change it.
@@ -143,12 +154,17 @@ def write_line(stream: TextIO | None, text: str) -> bool:
     if stream is None:
         return False
     try:
-        stream.write(text + "\n")
+        stream.write(text)
         stream.flush()
     except (OSError, ValueError):
         _discard(stream)
         return False
     return True
+
+
+def write_line(stream: TextIO | None, text: str) -> bool:
+    """Write ``text`` and a newline, as ``write_text`` does."""
+    return write_text(stream, text + "\n")
 
 
 @dataclass
@@ -192,9 +208,17 @@ def _write_stream(stream: TextIO | None, records: Iterable[dict[str, Any]], *, a
         _discard(stream)
 
 
-def emit_success(data: dict[str, Any] | RecordStream, *, json_mode: bool) -> None:
+def emit_success(
+    data: dict[str, Any] | RecordStream, *, json_mode: bool, command: str | None = None
+) -> None:
+    """The result on stdout. Human `diff` prints the unified diff alone, as the backend
+    sanitized it (interface: `diff`; Sanitizing): LF, tab and a CR before LF stay raw, so its
+    lines are the diff's own."""
     if isinstance(data, RecordStream):
         _write_stream(sys.stdout, data.records, array=json_mode)
+        return
+    if command == "diff" and not json_mode:
+        write_text(sys.stdout, data["diff"])
         return
     write_line(sys.stdout, dumps(data) if json_mode else format_human(data))
 

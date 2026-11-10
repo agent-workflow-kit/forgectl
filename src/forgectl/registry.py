@@ -48,6 +48,7 @@ HANDLERS: dict[str, Handler] = {}
 # Modules that register handlers, as dotted names. Each command's issue adds its own line.
 HANDLER_MODULES: tuple[str, ...] = (
     "forgectl.reads",
+    "forgectl.listing",
     "forgectl.snapshot_reads",  # snapshot, comments, reviews, ci (#12)
     "forgectl.exportcmd",
     "forgectl.merge",  # merge (#21)
