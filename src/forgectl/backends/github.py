@@ -476,7 +476,7 @@ def latest_by_reviewer(reviews: Sequence[Any]) -> ReviewTable:
 
 def _check_name(raw: object) -> str:
     name = sanitize_line(raw) if isinstance(raw, str) else ""
-    return name or "(unnamed check)"
+    return name or m.UNNAMED_CHECK
 
 
 def _check_url(raw: object) -> str | None:

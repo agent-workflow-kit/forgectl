@@ -476,7 +476,6 @@ def test_every_other_protocol_method_is_a_typed_not_yet_error(
         lambda: backend.snapshot(ref()),
         lambda: backend.comments(ref()),
         lambda: backend.reviews(ref()),
-        lambda: backend.ci(ref()),
         lambda: backend.files(ref()),
         lambda: backend.diff(ref()),
         lambda: backend.compare(ref(), HEAD, BASE),

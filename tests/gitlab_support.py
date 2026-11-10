@@ -221,6 +221,7 @@ def standard(fake: FakeGitLab, **overrides: Any) -> dict[str, Any]:
     for project in (101, 202):
         fake.pages(f"projects/{project}/repository/commits/{HEAD}/statuses", [data["statuses"]])
         fake.pages(f"projects/{project}/pipelines/5001/bridges", [data["bridges"]])
+        fake.pages(f"projects/{project}/pipelines/5001/trigger_jobs", [data["bridges"]])
     fake.pages(f"{MR_ID}/notes", [data["notes"]])
     fake.on("projects/101/members/all/12", data["member"])
     fake.on("users/11", data["user"])
