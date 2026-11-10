@@ -1161,7 +1161,7 @@ class Identity:
     scopes: tuple[str, ...] | None
 
 
-# --- queries (the references are identifiers.py's `PrRef` and `RepoRef`) -----------------------
+# --- queries (identifiers are validated and bound by identifiers.py) ----------------------------
 
 
 @dataclass(frozen=True, slots=True)

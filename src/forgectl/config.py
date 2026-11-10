@@ -48,6 +48,7 @@ from yaml.parser import ParserError
 from yaml.scanner import ScannerError
 
 from .errors import ForgectlError
+from .limits import MAX_DURATION_SECONDS
 
 __all__ = [
     "DEFAULT_TIMEOUT",
@@ -62,7 +63,7 @@ DEFAULT_TIMEOUT = 60.0
 MAX_FILE_BYTES = 256 * 1024
 MAX_DROP_INS = 256
 MAX_NODES = 10_000  # per file: bounds parse time, far above any real config
-_MAX_DURATION_SECONDS = Decimal(100 * 365 * 86400)  # as for the --timeout flag: 100 years
+_MAX_DURATION_SECONDS = Decimal(MAX_DURATION_SECONDS)  # the largest duration a config may give
 
 BUILT_IN_HOSTS = {"github.com": "github", "gitlab.com": "gitlab"}
 

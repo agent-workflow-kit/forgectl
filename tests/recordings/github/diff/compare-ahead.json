@@ -1,0 +1,20 @@
+{
+  "html_url": "https://github.com/user-1/example-repo/compare/1111111111111111111111111111111111111111...2222222222222222222222222222222222222222",
+  "status": "ahead",
+  "ahead_by": 2,
+  "behind_by": 0,
+  "total_commits": 2,
+  "merge_base_commit": {"sha": "1111111111111111111111111111111111111111"},
+  "commits": [],
+  "files": [
+    {
+      "sha": "2222222222222222222222222222222222222222",
+      "filename": "src/app.py",
+      "status": "modified",
+      "additions": 2,
+      "deletions": 1,
+      "changes": 3,
+      "patch": "@@ -1,2 +1,4 @@\n a\n-b\n+c\n+d"
+    }
+  ]
+}
