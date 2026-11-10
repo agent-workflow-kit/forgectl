@@ -190,7 +190,7 @@ def test_the_handler_writes_the_apps_result_to_the_result_file(
 ) -> None:
     seen: list[str | None] = []
 
-    def fake_run(focus: str | None) -> dict[str, Any]:
+    def fake_run(focus: str | None, config_path: str | None = None) -> dict[str, Any]:
         seen.append(focus)
         return _result(intent="open", selected=[PR])
 
@@ -291,7 +291,7 @@ def test_the_temp_file_is_removed_when_the_write_fails(
 def test_browse_json_success_output_matches_its_schema(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(browse, "_run_app", lambda focus: _result())
+    monkeypatch.setattr(browse, "_run_app", lambda *a, **k: _result())
     assert main(["browse", "--json"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out == {}

@@ -28,34 +28,6 @@ class DataSource(Protocol):
     def diff(self, pr: str) -> dict[str, Any]: ...
 
 
-class UnwiredSource:
-    """The source until the reads exist: every call fails with a clear error.
-
-    TODO(#14): ``prs`` through the real read.
-    TODO(#11): ``snapshot`` (the PR object, CI, reviews, threads) and ``diff`` through the real
-    reads, on the gateway.
-    """
-
-    def _fail(self) -> ForgectlError:
-        return ForgectlError("internal", "browse: the forge reads are not implemented yet")
-
-    def prs(
-        self,
-        *,
-        author: str | None = None,
-        review_requested_from: str | None = None,
-        state: str = "open",
-        limit: int = 100,
-    ) -> dict[str, Any]:
-        raise self._fail()
-
-    def snapshot(self, pr: str) -> dict[str, Any]:
-        raise self._fail()
-
-    def diff(self, pr: str) -> dict[str, Any]:
-        raise self._fail()
-
-
 @dataclass
 class Row:
     """One list row: the ``prs`` item and why it is listed."""
@@ -93,9 +65,9 @@ def load_list(source: DataSource) -> Listing:
             continue
         complete = complete and bool(answer.get("complete", False))
         for err_item in answer.get("errors") or []:
-            errors.append(
-                f"{err_item.get('host')}: {err_item.get('code')}: {err_item.get('message')}"
-            )
+            text = f"{err_item.get('host')}: {err_item.get('code')}: {err_item.get('message')}"
+            if text not in errors:  # both calls ask every host, so a host fails twice
+                errors.append(text)
         for item in answer.get("items") or []:
             row = rows.setdefault(str(item["pr"]), Row(item=item))
             row.roles.add(role)

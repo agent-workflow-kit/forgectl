@@ -133,11 +133,11 @@ def _require_extra() -> None:
         ) from None
 
 
-def _run_app(focus: str | None) -> dict[str, Any]:
+def _run_app(focus: str | None, config_path: str | None = None) -> dict[str, Any]:
     """Start the UI and return the result it ends with."""
     from .tui.run import run_browse  # imported only with the extra
 
-    return run_browse(focus=focus)
+    return run_browse(focus=focus, config_path=config_path)
 
 
 @register("browse")
@@ -148,7 +148,7 @@ def browse(inv: Invocation) -> dict[str, Any]:
     if result_file is not None:
         preflight_result_file(result_file)
     _require_extra()
-    result = _run_app(focus)
+    result = _run_app(focus, getattr(args, "config", None))
     if result_file is not None:
         write_result_file(result_file, result)
     # The result goes to the file; stdout stays empty apart from the empty object.
