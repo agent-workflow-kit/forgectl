@@ -196,7 +196,7 @@ def rest_text(snap: dict[str, Any], diff: dict[str, Any] | None) -> str:
     if diff is None:
         lines.append("  (not loaded)")
     else:
-        lines.append(safe.text(diff.get("diff"), safe.DIFF_LIMIT))
+        lines.append(safe.diff(diff.get("diff")))
     return "\n".join(lines)
 
 

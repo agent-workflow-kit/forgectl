@@ -3,13 +3,11 @@
 Only an ``http`` or ``https`` URL of plain printable ASCII, at most 2048 characters and with no
 userinfo, is ever passed on, whatever the caller says; anything else raises ``OpenRefused``
 before a process exists. The opener program is started through the gateway with an
-environment built from a list, never the whole caller environment, and with ``/`` as its
-working directory. forgectl signals no process it did not start, and kills nothing here: the
-launcher is left to finish (it may stay alive as the browser), and a thread reaps it.
-
-TODO(#7): start the opener through ``Gateway.run_external(mode="browser")`` (env = forgectl's
-environment minus every token variable, a private cwd) instead of this allowlist, keeping the
-no-kill, detached lifecycle.
+environment built from an allowlist (never the whole caller environment, so no token variable),
+and with ``/`` as its working directory. It runs detached in its own session through
+``gateway.start``, outside the deadline group-kill of ``Gateway.run_external``. forgectl signals
+no process it did not start, and kills nothing here: the launcher is left to finish (it may stay
+alive as the browser), and a thread reaps it.
 """
 
 from __future__ import annotations

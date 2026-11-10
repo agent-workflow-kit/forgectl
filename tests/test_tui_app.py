@@ -20,7 +20,7 @@ from forgectl.tui import render
 from forgectl.tui.app import BrowseApp
 from forgectl.tui.opener import BrowserOpener
 
-from .cli_schema_check import validate
+from .harness.schemas import validate
 from .tui_fakes import (
     FakeOpener,
     FakeSource,

@@ -15,7 +15,7 @@ from forgectl import browse
 from forgectl.cli import main
 from forgectl.errors import ForgectlError
 
-from .cli_schema_check import validate
+from .harness.schemas import validate
 
 PR = "github.com/acme/widgets#7"
 
