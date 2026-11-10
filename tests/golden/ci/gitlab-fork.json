@@ -1,0 +1,36 @@
+{
+  "ci": {
+    "checks": [
+      {
+        "counted": true,
+        "finished_at": "2026-10-05T12:10:00.000Z",
+        "name": "build",
+        "required": null,
+        "state": "passing",
+        "url": "https://gitlab.com/user-8/proj/-/jobs/7003"
+      },
+      {
+        "counted": false,
+        "finished_at": "2026-10-05T12:05:00.000Z",
+        "name": "lint",
+        "required": false,
+        "state": "failing",
+        "url": "https://gitlab.com/user-8/proj/-/jobs/7005"
+      },
+      {
+        "counted": true,
+        "finished_at": "2026-10-05T12:20:00.000Z",
+        "name": "test",
+        "required": null,
+        "state": "passing",
+        "url": "https://gitlab.com/user-8/proj/-/jobs/7004"
+      }
+    ],
+    "complete": true,
+    "for_current_head": true,
+    "head_sha": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "state": "passing"
+  },
+  "head_sha": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+  "pr": "gitlab.com/user-9/proj#7"
+}

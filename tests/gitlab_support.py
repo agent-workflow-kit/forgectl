@@ -132,18 +132,15 @@ class FakeGitLab:
         return ProcessResult(1, 1, 0 if ok else 1, head.encode() + raw, b"")
 
 
-def make_backend(
+def make_hosts(
     fake: FakeGitLab,
     tmp_path: Path,
     *,
     host: str = "gitlab.com",
     prefix: str = "",
-    warn: Callable[[str], None] | None = None,
-    retry: Any = None,
-    today: Any = None,
-    until_known: Any = None,
     timeout: float = 30.0,
-) -> GitLabBackend:
+) -> Hosts:
+    """The hosts (and their gateway) of a GitLab test: `glab` answered by ``fake``."""
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
     glab = bindir / "glab"
@@ -166,7 +163,22 @@ def make_backend(
         "MY_TOKEN": TOKEN,
     }
     gateway = Gateway(config, timeout=timeout, environ=environ, runner=fake.runner)
-    hosts = Hosts(gateway)
+    return Hosts(gateway)
+
+
+def make_backend(
+    fake: FakeGitLab,
+    tmp_path: Path,
+    *,
+    host: str = "gitlab.com",
+    prefix: str = "",
+    warn: Callable[[str], None] | None = None,
+    retry: Any = None,
+    today: Any = None,
+    until_known: Any = None,
+    timeout: float = 30.0,
+) -> GitLabBackend:
+    hosts = make_hosts(fake, tmp_path, host=host, prefix=prefix, timeout=timeout)
     return GitLabBackend(hosts, warn=warn, retry=retry, today=today, until_known=until_known)
 
 
@@ -209,6 +221,7 @@ def standard(fake: FakeGitLab, **overrides: Any) -> dict[str, Any]:
     for project in (101, 202):
         fake.pages(f"projects/{project}/repository/commits/{HEAD}/statuses", [data["statuses"]])
         fake.pages(f"projects/{project}/pipelines/5001/bridges", [data["bridges"]])
+        fake.pages(f"projects/{project}/pipelines/5001/trigger_jobs", [data["bridges"]])
     fake.pages(f"{MR_ID}/notes", [data["notes"]])
     fake.on("projects/101/members/all/12", data["member"])
     fake.on("users/11", data["user"])
@@ -227,6 +240,7 @@ __all__ = [
     "Answer",
     "FakeGitLab",
     "make_backend",
+    "make_hosts",
     "mr_path",
     "recording",
     "ref",

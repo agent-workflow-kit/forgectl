@@ -18,7 +18,7 @@
     },
     "files_complete": {
       "type": "boolean",
-      "description": "GitHub: the list's length equals changed_files. GitLab: pagination reached the end."
+      "description": "GitHub: the list's length equals changed_files. GitLab: pagination reached the end, and changes_count is neither of the form 1000+ nor an integer other than the listed count."
     },
     "changed_files": {
       "type": [

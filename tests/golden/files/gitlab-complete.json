@@ -1,0 +1,29 @@
+{
+  "changed_files": 3,
+  "files": [
+    {
+      "additions": 1,
+      "deletions": 0,
+      "path": "docs/new name.md",
+      "previous_path": "docs/old name.md",
+      "status": "renamed"
+    },
+    {
+      "additions": 0,
+      "deletions": 2,
+      "path": "src/gone.py",
+      "previous_path": null,
+      "status": "deleted"
+    },
+    {
+      "additions": 2,
+      "deletions": 1,
+      "path": "src/widget.py",
+      "previous_path": null,
+      "status": "modified"
+    }
+  ],
+  "files_complete": true,
+  "head_sha": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+  "pr": "gitlab.com/user-9/proj#7"
+}
