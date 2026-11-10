@@ -208,7 +208,7 @@ def test_a_failed_snapshot_refresh_keeps_the_data_and_marks_the_row_stale() -> N
         await pilot.press("R")
         await settle(app, pilot)
         bad = prompt_of(app, prefix(GH, 2))
-        assert "✓" in bad and "[stale: upstream_error]" in bad and "ERROR" not in bad
+        assert "✓" in bad and "[stale: up" in bad and "ERROR" not in bad
         assert "[stale" not in prompt_of(app, prefix(GH, 1))
         assert "1 stale" in bar(app)
         source.failing.clear()  # the next good refresh clears it
@@ -254,7 +254,7 @@ def test_an_incomplete_list_keeps_the_rows_it_did_not_return_as_stale() -> None:
         await pilot.press("R")
         await settle(app, pilot)
         assert len(list_prompts(app)) == 3
-        assert "[stale: list incomplete]" in prompt_of(app, prefix(GH, 3))
+        assert "[stale: li" in prompt_of(app, prefix(GH, 3))
         source.partial = False  # a complete answer closes it
         await pilot.press("R")
         await settle(app, pilot)
@@ -528,7 +528,7 @@ def test_an_incomplete_list_keeps_only_the_unlisted_prs_of_the_failed_host() -> 
         await pilot.press("R")
         await settle(app, pilot)
         assert len(list_prompts(app)) == 1
-        assert "[stale: list incomplete]" in prompt_of(app, prefix(GL, 1))
+        assert "[stale: li" in prompt_of(app, prefix(GL, 1))
         source.partial = False
         await pilot.press("R")
         await settle(app, pilot)
@@ -675,7 +675,7 @@ def test_a_superseded_detail_read_that_fails_marks_its_row_stale() -> None:
         app._start_detail(b)
         source.gate.set()
         await settle(app, pilot)
-        assert "[stale: upstream_error]" in prompt_of(app, a)
+        assert "[stale: up" in prompt_of(app, a)
 
     run(source, script)
 

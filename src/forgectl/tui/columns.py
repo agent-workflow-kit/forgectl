@@ -214,7 +214,37 @@ def _login(author: Any) -> str:
     return safe.line(login) if login else "(unknown)"
 
 
-WIDTHS = (0, 26, 1, 5, 3, 20, 9)  # columns 0..6; the first is set per list, the rest are fixed
+SEPARATOR = "  "
+PR_MAX_WIDTH = 28  # a longer PR id is cut from the left, so the number stays visible
+PINNED = 2  # the first columns that stay at the left while the rest scroll: pr, note
+
+
+@dataclass(frozen=True)
+class Column:
+    """One list column. ``index`` is the cell's place in ``cells()``; ``width`` is None for the
+    PR column, whose width is set per list. ``header`` is constant text, never forge text."""
+
+    id: str
+    header: str
+    index: int
+    width: int | None
+
+
+# The one place that says what the columns are, in what order and how wide. Sort keys and click
+# targets (todo(#104)) and colors (todo(#105)) attach here.
+COLUMNS = (
+    Column("pr", "PR", 0, None),
+    Column("note", "note", 10, 12),  # [refreshing], [stale: code], [changed]; pinned
+    Column("badge", "badge", 1, 26),
+    Column("ci", "CI", 2, 2),
+    Column("approvals", "appr", 3, 5),
+    Column("review", "rev", 4, 3),
+    Column("comments", "comments", 5, 20),
+    Column("age", "age", 6, 9),
+    Column("title", "title", 7, 40),
+    Column("author", "author", 8, 20),
+    Column("roles", "roles", 9, 18),  # "authored+requested"
+)
 TITLE_WIDTH = 40
 
 
@@ -227,12 +257,137 @@ def fit(text: str, width: int) -> str:
     return set_cell_size(text, width - 1) + "…"
 
 
-def row_line(parts: list[str], pr_width: int) -> str:
-    """One line: the seven fixed columns, the title, then the author and roles."""
-    widths = (pr_width, *WIDTHS[1:])
-    fixed = [fit(p, w) for p, w in zip(parts[:7], widths, strict=True)]
-    rest = [fit(parts[7], TITLE_WIDTH), *parts[8:]]
-    return "  ".join([*fixed, *[p for p in rest if p]]).rstrip()
+def fit_tail(text: str, width: int) -> str:
+    """Like ``fit`` but a cut text keeps its end and starts with ``…`` (``…repo#12``)."""
+    if cell_len(text) <= width:
+        return set_cell_size(text, width)
+    if width < 1:
+        return ""
+    tail = ""
+    for ch in reversed(text):
+        if cell_len(ch + tail) > width - 1:
+            break
+        tail = ch + tail
+    return set_cell_size("…" + tail, width)
+
+
+def _widths(pr_width: int) -> list[int]:
+    return [pr_width if c.width is None else c.width for c in COLUMNS]
+
+
+def layout(pr_width: int) -> list[tuple[Column, int, int]]:
+    """``(column, start, width)`` in table coordinates: the pinned columns first, then the
+    scrolling ones, separated by ``SEPARATOR``. The one source for rendering and hit tests."""
+    out: list[tuple[Column, int, int]] = []
+    x = 0
+    for column, width in zip(COLUMNS, _widths(pr_width), strict=True):
+        out.append((column, x, width))
+        x += width + len(SEPARATOR)
+    return out
+
+
+def pinned_width(pr_width: int) -> int:
+    column, start, width = layout(pr_width)[PINNED - 1]
+    return start + width
+
+
+def scroll_extent(pr_width: int) -> int:
+    """The width of the scrolling columns (the offset is counted from their start)."""
+    column, start, width = layout(pr_width)[-1]
+    first = layout(pr_width)[PINNED][1]
+    return start + width - first
+
+
+def _scroll_room(pr_width: int, view_width: int) -> int:
+    return max(0, view_width - pinned_width(pr_width) - len(SEPARATOR))
+
+
+def clamp_offset(offset: int, pr_width: int, view_width: int) -> int:
+    """The horizontal offset (cells into the scrolling columns) kept within the table: 0 when
+    the table is not wider than the view, never past the point where its end meets the edge."""
+    furthest = max(0, scroll_extent(pr_width) - _scroll_room(pr_width, view_width))
+    return max(0, min(offset, furthest))
+
+
+def step_offset(offset: int, direction: int, pr_width: int, view_width: int) -> int:
+    """The offset one column to the left (``direction`` -1) or right (+1), clamped."""
+    first = layout(pr_width)[PINNED][1]
+    starts = [start - first for _, start, _ in layout(pr_width)[PINNED:]]
+    current = clamp_offset(offset, pr_width, view_width)
+    if direction > 0:
+        later = [s for s in starts if s > current]
+        return clamp_offset(later[0] if later else current, pr_width, view_width)
+    earlier = [s for s in starts if s < current]
+    return clamp_offset(earlier[-1] if earlier else 0, pr_width, view_width)
+
+
+def column_at(x: int, pr_width: int, offset: int, view_width: int) -> str | None:
+    """The id of the column under cell ``x`` of the list area (0 is its left edge), or None on
+    a separator or outside the view. Counts the pinned columns and the horizontal offset."""
+    if x < 0 or x >= view_width:
+        return None
+    pinned = pinned_width(pr_width)
+    rows = layout(pr_width)
+    first = rows[PINNED][1]
+    if x < pinned:
+        table_x, candidates = x, rows[:PINNED]
+    elif x < pinned + len(SEPARATOR):
+        return None
+    else:
+        table_x = x - pinned - len(SEPARATOR) + clamp_offset(offset, pr_width, view_width) + first
+        candidates = rows[PINNED:]
+    for column, start, width in candidates:
+        if start <= table_x < start + width:
+            return column.id
+    return None
+
+
+def _slice_cells(text: str, start: int, width: int) -> str:
+    """``width`` cells of ``text`` from cell ``start``; a wide char cut by an edge becomes a
+    space."""
+    out: list[str] = []
+    x = 0
+    end = start + width
+    for ch in text:
+        w = cell_len(ch)
+        if x >= end:
+            break
+        if x >= start and x + w <= end:
+            out.append(ch)
+        elif x + w > start and x < end:
+            out.append(" " * (min(x + w, end) - max(x, start)))
+        x += w
+    return set_cell_size("".join(out), width)
+
+
+def _compose(texts: list[str], pr_width: int, offset: int, view_width: int | None) -> str:
+    widths = _widths(pr_width)
+    cut = [
+        (fit_tail if c.id == "pr" else fit)(texts[i], w)
+        for i, (c, w) in enumerate(zip(COLUMNS, widths, strict=True))
+    ]
+    pinned = SEPARATOR.join(cut[:PINNED])
+    scrolling = SEPARATOR.join(cut[PINNED:])
+    if view_width is None:
+        return pinned + SEPARATOR + scrolling
+    offset = clamp_offset(offset, pr_width, view_width)
+    room = min(_scroll_room(pr_width, view_width), cell_len(scrolling))
+    line = pinned + SEPARATOR + _slice_cells(scrolling, offset, room)
+    return _slice_cells(line, 0, min(view_width, cell_len(line)))
+
+
+def row_line(
+    parts: list[str], pr_width: int, offset: int = 0, view_width: int | None = None
+) -> str:
+    """One line from ``cells()``: every cell cut and padded to its column. With ``view_width``
+    the first columns stay and the rest are shifted left by ``offset`` and clipped to the view;
+    without it the whole table is returned."""
+    return _compose([parts[c.index] for c in COLUMNS], pr_width, offset, view_width)
+
+
+def header_line(pr_width: int, offset: int = 0, view_width: int | None = None) -> str:
+    """The column names, laid out exactly like ``row_line``."""
+    return _compose([c.header for c in COLUMNS], pr_width, offset, view_width)
 
 
 # -- ordering ----------------------------------------------------------------------------------

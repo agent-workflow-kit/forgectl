@@ -55,11 +55,12 @@ def drive(
     focus: str | None = None,
     wait: bool = True,
     concurrency: int = 0,  # 0: no per-row snapshots, so these tests count only their own reads
+    size: tuple[int, int] = (140, 50),
 ) -> BrowseApp:
     app = BrowseApp(source, opener or FakeOpener(), focus=focus, concurrency=concurrency)
 
     async def go() -> None:
-        async with app.run_test(size=(140, 50)) as pilot:
+        async with app.run_test(size=size) as pilot:
             if wait:
                 await settle(app, pilot)
             else:
@@ -127,7 +128,7 @@ def test_list_is_the_union_of_two_prs_calls_newest_first() -> None:
         assert PR2 in prompts[0] and "Theirs" in prompts[0]  # updated_at descending
         assert PR1 in prompts[1] and "authored+requested" in prompts[1]
 
-    drive(source, script)
+    drive(source, script, size=(220, 50))
     assert source.calls[:2] == [
         ("prs", {"author": None, "review_requested_from": "me"}),
         ("prs", {"author": "me", "review_requested_from": None}),
@@ -422,7 +423,7 @@ def test_the_markup_title_is_shown_literally() -> None:
         await pilot.pause()
         assert app.is_running
 
-    drive(source, script)
+    drive(source, script, size=(220, 50))
 
 
 def test_control_and_bidi_characters_become_visible_markers() -> None:

@@ -57,7 +57,9 @@ R       refresh all (both lists, every row, then the detail pane)
         and marks the row [stale: code]; [changed] marks a row whose data changed, until
         the next refresh or a key; the timed refresh re-reads only what may have changed
 
-columns: PR  badge  CI  approvals  review  comments  age  title
+left/right (or h/l) scroll the list sideways one column; the PR and note columns stay
+columns: PR  note  badge  CI  appr  rev  comments  age  title  author  roles
+  note: [refreshing], [stale: code] or [changed]
   CI: ✓ passing, ✗ failing, … pending, - none, · loading, ! snapshot failed
   comments: c total, u unresolved threads, n new from others since the push,
             r threads awaiting my reply
@@ -109,6 +111,24 @@ class HelpScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
+class RowList(OptionList):
+    """The list of rows. Left and right scroll the table sideways while it has focus; up and
+    down still move the highlight. The table itself is drawn by ``BrowseApp``."""
+
+    BINDINGS = [
+        Binding("left", "scroll_cols(-1)", "left", show=False),
+        Binding("h", "scroll_cols(-1)", "left", show=False),
+        Binding("right", "scroll_cols(1)", "right", show=False),
+        Binding("l", "scroll_cols(1)", "right", show=False),
+    ]
+
+    def action_scroll_cols(self, direction: int) -> None:
+        self.app.scroll_columns(direction)  # type: ignore[attr-defined]
+
+    def on_resize(self, event: Any) -> None:
+        self.app.relayout()  # type: ignore[attr-defined]
+
+
 class BrowseApp(App[None]):
     ENABLE_COMMAND_PALETTE = False  # its screenshot command would write forge text to a file
     CSS = """
@@ -116,6 +136,7 @@ class BrowseApp(App[None]):
     #left { width: 3fr; }
     #detail { width: 2fr; display: none; border-left: solid $primary; padding: 0 1; }
     #filter { display: none; }
+    #header { height: 1; text-style: bold; }
     #list { text-wrap: nowrap; text-overflow: ellipsis; }
     #checks { height: auto; max-height: 12; }
     #footer { dock: bottom; height: 2; }
@@ -188,6 +209,7 @@ class BrowseApp(App[None]):
         self._snap_slots = asyncio.Semaphore(max(1, self.concurrency))
         self._row_by_pr: dict[str, Row] = {}
         self._pr_width = 0
+        self._hoffset = 0  # cells the scrolling columns are shifted left; kept across refreshes
         self._snap_done = 0
         self._snap_total = 0
         self._filter = ""
@@ -214,7 +236,8 @@ class BrowseApp(App[None]):
         with Horizontal(id="main"):
             with Vertical(id="left"):
                 yield Input(placeholder="filter", id="filter")
-                yield OptionList(id="list")
+                yield Static(safe.plain(""), id="header", markup=False)
+                yield RowList(id="list")
             with VerticalScroll(id="detail"):
                 yield Static(safe.plain(""), id="facts", markup=False)
                 yield OptionList(id="checks")
@@ -409,8 +432,11 @@ class BrowseApp(App[None]):
             ]
             now = self.clock()
             parts = [columns.cells(r, self._state(r), now) for r in visible]
-            width = min(60, max((cell_len(p[0]) for p in parts), default=0))
+            width = min(columns.PR_MAX_WIDTH, max((cell_len(p[0]) for p in parts), default=0))
+            width = max(width, cell_len(columns.COLUMNS[0].header))
             self._pr_width = width
+            self._hoffset = columns.clamp_offset(self._hoffset, width, self._view_width())
+            self._paint_header()
             prompts = [self._prompt(p, self._state(r)) for p, r in zip(parts, visible, strict=True)]
         except Exception as exc:  # bad data reaches the status line, not a traceback
             self._list_note = self._internal(exc)
@@ -603,8 +629,32 @@ class BrowseApp(App[None]):
 
     def _prompt(self, parts: list[str], state: columns.RowState) -> Content:
         """One row's text; a changed row is also bold."""
-        content = safe.plain(columns.row_line(parts, self._pr_width))
+        content = safe.plain(
+            columns.row_line(parts, self._pr_width, self._hoffset, self._view_width())
+        )
         return content.stylize("bold", 0, len(content)) if state.changed else content
+
+    def _view_width(self) -> int:
+        """Cells the list can show; the whole table before the list has a size."""
+        width = self.query_one("#list", OptionList).size.width
+        return width if width > 0 else 10_000
+
+    def _paint_header(self) -> None:
+        line = columns.header_line(self._pr_width, self._hoffset, self._view_width())
+        self.query_one("#header", Static).update(safe.plain(line))
+
+    def relayout(self) -> None:
+        """The list was resized: clamp the offset and redraw the header and the rows."""
+        if self.is_running and self._loaded_once:
+            self._apply_filter()
+
+    def scroll_columns(self, direction: int) -> None:
+        """Left (-1) or right (+1) by one column; the highlight and the vertical scroll stay."""
+        view = self._view_width()
+        new = columns.step_offset(self._hoffset, direction, self._pr_width, view)
+        if new != self._hoffset:
+            self._hoffset = new
+            self._apply_filter()
 
     def _highlighted_row(self) -> Row | None:
         index = self.query_one("#list", OptionList).highlighted
