@@ -82,12 +82,16 @@ activity: {}
 # re-snapshots every PR, the others only those that may have changed (1 to 1000).
 # concurrency: snapshot reads at once (1 to 16). detail_collapsed: the detail pane sections that
 # start collapsed, from facts, description, changes, ci, comments, reviews (default [changes]).
+# query: the filter and order the list starts with, in the query language of `browse` (default
+# empty: no filter, the usual order). In `browse`, F edits it and "set as default" writes it to
+# config.d/90-browse-query.yaml, a file that wins over this one (config.d is read after config.yaml).
 browse: {}
 # browse:
 #   refresh_interval: 120s
 #   full_refresh_every: 5
 #   concurrency: 4
 #   detail_collapsed: [changes]
+#   query: "authored AND NOT draft ORDER BY age DESC"
 
 # Hooks, each a list of entries (default []). cmd runs through sh -c in its own process group.
 # Exit 0 continues; on a pre- hook, exit 13 escalates and any other failure or a timeout vetoes;
