@@ -63,8 +63,7 @@ class Cancelled(Exception):
 
 READ_COMMANDS = frozenset({"prs", "snapshot", "snapshots", "diff"})
 
-# ``registry._loaded`` is process-wide and set before the handlers are imported, so the race is
-# between every runner in the process, not within one. One lock for all of them.
+# Guards the once-only config load of a runner (``registry.load_handlers`` locks itself).
 _LOAD_LOCK = threading.Lock()
 
 
@@ -93,15 +92,10 @@ def in_process_runner(
     loaded: list[Any] = []  # the LoadedConfig, once
 
     def config() -> Any:
-        """The config, with the handlers imported, once and before any call goes on.
-
-        ``registry.load_handlers`` marks itself done before it has imported anything, so a second
-        thread calling it meanwhile finds no handler. Every call comes through this lock first, so
-        the first caller finishes the imports before another one looks.
-        """
+        """The config, loaded once, after the handlers are imported."""
+        registry.load_handlers()  # thread-safe: it returns only once every handler is registered
         with _LOAD_LOCK:
             if not loaded:  # a failure is not cached: fixing the config and refreshing works
-                registry.load_handlers()
                 loaded.append(
                     load_config(config_path, env=environ if environ is not None else os.environ)
                 )

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib
 import math
+import threading
 from argparse import Namespace
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -57,6 +58,7 @@ HANDLER_MODULES: tuple[str, ...] = (
 )
 
 _loaded = False
+_load_lock = threading.RLock()  # held for the whole import: a caller waits for a full HANDLERS
 
 
 def register(command: str) -> Callable[[Handler], Handler]:
@@ -68,9 +70,18 @@ def register(command: str) -> Callable[[Handler], Handler]:
 
 
 def load_handlers() -> None:
+    """Import every handler module once. Safe to call from several threads: a caller that
+    arrives mid-import waits, so none sees a partial ``HANDLERS``. ``_loaded`` is set only after
+    every import succeeded, so a failed import is retried (and raises again) on the next call.
+
+    Handler modules must not call ``load_handlers`` at import time: it runs under the registry
+    lock, so one could deadlock against a thread importing that module directly."""
     global _loaded
     if _loaded:
         return
-    _loaded = True
-    for name in HANDLER_MODULES:
-        importlib.import_module(name)
+    with _load_lock:
+        if _loaded:
+            return
+        for name in HANDLER_MODULES:
+            importlib.import_module(name)
+        _loaded = True

@@ -35,12 +35,6 @@ SORT_REPO = "repo"
 SORT_ATTENTION = "attention"
 SORT_MODES = (SORT_REPO, SORT_ATTENTION)
 
-FILTER_AUTHORED = "authored"
-FILTER_REQUESTED = "requested"
-FILTER_CI_FAILING = "ci-failing"
-FILTER_NEW_COMMENTS = "new-comments"
-FILTER_ORDER = (FILTER_AUTHORED, FILTER_REQUESTED, FILTER_CI_FAILING, FILTER_NEW_COMMENTS)
-
 CI_GLYPHS = {"passing": "✓", "failing": "✗", "pending": "…", "none": "-"}
 DECISIONS = {"approved": "ok", "changes_requested": "chg", "review_required": "req", "none": "-"}
 
@@ -236,9 +230,9 @@ COLUMNS = (
     Column("pr", "PR", 0, None),
     Column("note", "note", 10, 12),  # [refreshing], [stale: code], [changed]; pinned
     Column("badge", "badge", 1, 26),
-    Column("ci", "CI", 2, 3),  # a glyph; wide enough for the sort arrow beside the header
-    Column("approvals", "appr", 3, 5),
-    Column("review", "rev", 4, 4),
+    Column("ci", "CI", 2, 4),  # a glyph; wide enough for the sort arrow and its position
+    Column("approvals", "appr", 3, 6),
+    Column("review", "rev", 4, 5),
     Column("comments", "comments", 5, 20),
     Column("age", "age", 6, 9),
     Column("title", "title", 7, 40),
@@ -412,8 +406,10 @@ def header_line(
 ) -> str:
     """The column names, laid out exactly like ``row_line``. A sorted column's name is followed
     by an arrow for its direction. Constant text only: no forge text reaches the header."""
-    # todo(#105): with several keys, show each key's position beside its arrow
-    arrows = {k.column: DESC_GLYPH if k.descending else ASC_GLYPH for k in sort}
+    arrows = {
+        k.column: (DESC_GLYPH if k.descending else ASC_GLYPH) + (str(i) if len(sort) > 1 else "")
+        for i, k in enumerate(sort, 1)
+    }
     texts = [c.header + arrows.get(c.id, "") for c in COLUMNS]
     cut = [fit(t, w) for t, w in zip(texts, _widths(pr_width), strict=True)]
     return view(
@@ -473,8 +469,8 @@ class SortKey:
 
 
 # The one sort state: an ordered list of keys, most significant first; empty means the preset
-# order. The header (click and cursor) sets it, and ``order`` applies it, in one place.
-# todo(#105): the ORDER BY of the query line reads and writes this same tuple, with several keys.
+# order. The header (click and cursor) and the query's ORDER BY both set it, through
+# ``BrowseApp.set_sort``, and ``order`` applies it, in one place.
 SortState = tuple[SortKey, ...]
 
 SORTABLE = tuple(c.id for c in COLUMNS if c.id != "note")  # the note is a status, not data
@@ -487,7 +483,7 @@ def toggle_sort(sort: SortState, column: str) -> SortState:
         return sort
     if len(sort) == 1 and sort[0].column == column:
         return (SortKey(column, not sort[0].descending),)
-    # todo(#105): a multi-key sort is built in the query form, not by header activation
+    # a multi-key sort is built in the query form, never by header activation
     return (SortKey(column),)
 
 
@@ -504,7 +500,7 @@ def _instant(value: Any) -> float | None:
     return None if when is None else when.timestamp()
 
 
-def _number(row: Row) -> int:
+def number_of(row: Row) -> int:
     n = row.item.get("number")
     if isinstance(n, int) and not isinstance(n, bool):
         return n
@@ -518,7 +514,7 @@ def _value(column: str, row: Row, state: RowState) -> Any:
     item = row.item
     s = state.summary if state.status == LOADED else None
     if column == "pr":
-        return (repo_of(row).casefold(), _number(row))
+        return (repo_of(row).casefold(), number_of(row))
     if column == "title":
         return safe.line(item.get("title")).casefold()
     if column == "author":
@@ -595,7 +591,7 @@ def sort_key(sort: SortState, row: Row, state: RowState) -> tuple[Any, ...]:
                 ),
             )
         )
-    key.append((repo_of(row).casefold(), _number(row), row.pr))
+    key.append((repo_of(row).casefold(), number_of(row), row.pr))
     return tuple(key)
 
 
@@ -645,25 +641,7 @@ def order(
 
 
 # -- filters -----------------------------------------------------------------------------------
-
-
-def matches(row: Row, state: RowState, filters: set[str]) -> bool:
-    """Every active filter must hold (an intersection). The two snapshot-based filters need a
-    loaded snapshot: a loading or failed row does not match them."""
-    s = state.summary if state.status == LOADED else None
-    if FILTER_AUTHORED in filters and "authored" not in row.roles:
-        return False
-    if FILTER_REQUESTED in filters and "requested" not in row.roles:
-        return False
-    if FILTER_CI_FAILING in filters and not (s is not None and s.ci_state == "failing"):
-        return False
-    if FILTER_NEW_COMMENTS in filters and not (s is not None and (s.others_since_push or 0) > 0):
-        return False
-    return True
-
-
-def filters_text(filters: set[str]) -> str:
-    return ", ".join(f for f in FILTER_ORDER if f in filters)
+# The filter is a query (``query.py``, ``filtering.py``). The four quick filters are presets of it.
 
 
 def utc_now() -> datetime:
