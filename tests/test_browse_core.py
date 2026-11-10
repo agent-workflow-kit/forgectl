@@ -190,7 +190,9 @@ def test_the_handler_writes_the_apps_result_to_the_result_file(
 ) -> None:
     seen: list[str | None] = []
 
-    def fake_run(focus: str | None, config_path: str | None = None) -> dict[str, Any]:
+    def fake_run(
+        focus: str | None, config_path: str | None = None, timeout: float | None = None
+    ) -> dict[str, Any]:
         seen.append(focus)
         return _result(intent="open", selected=[PR])
 
@@ -346,3 +348,17 @@ def test_a_crash_inside_the_real_app_is_internal(monkeypatch: pytest.MonkeyPatch
         tui_run.run_browse(focus=None, source=FakeSource(), opener=FakeOpener())
     assert exc.value.code == "internal"
     assert "boom" not in exc.value.message
+
+
+def test_the_timeout_flag_reaches_the_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[float | None] = []
+
+    def fake_run(
+        focus: str | None, config_path: str | None = None, timeout: float | None = None
+    ) -> dict[str, Any]:
+        seen.append(timeout)
+        return _result()
+
+    monkeypatch.setattr(browse, "_run_app", fake_run)
+    assert main(["browse", "--timeout", "3s"]) == 0
+    assert seen == [3.0]

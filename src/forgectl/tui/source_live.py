@@ -17,16 +17,29 @@ Cancelling: a call that is already running cannot be stopped. ``cancelled`` (a c
 caller owns, for example ``lambda: token != self._token``) is checked once before the call
 starts; if it is true the call raises ``Cancelled`` without any host traffic. A finished call
 whose answer is no longer wanted is dropped by the caller's own token, as in ``tui.app``.
+``snapshot`` and ``diff`` may therefore raise ``Cancelled``; it is not an error to show, so a
+caller must catch it before it treats an exception as a failure.
+
+Failures are logged as the CLI logs them (``log.jsonl``), by the in-process runner.
+
+TODO(#59): two lifecycle gaps that need the refresh and cancel work of #59. (1) Quitting while a
+read is in flight leaves the child ``gh``/``glab`` process group and its private temp dir alive:
+the worker is a daemon thread that dies before the gateway cleans up, and a kill only happens
+from the main thread. ``LiveSource`` should track the in-flight process groups, and a
+``close()`` called on app exit should kill them and remove their dirs. (2) ``cancelled`` is
+only checked before a call, not between the handler's host calls; mid-call cancellation needs
+``ReadEnv.call`` (the gateway) to take a cancel check.
 """
 
 from __future__ import annotations
 
 import os
 import threading
+from argparse import Namespace
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from forgectl import registry
+from forgectl import cli, registry
 from forgectl.browse import is_pr
 from forgectl.config import load_config
 from forgectl.errors import ForgectlError
@@ -40,18 +53,43 @@ Runner = Callable[[list[str]], dict[str, Any]]
 
 
 class Cancelled(Exception):
-    """The call was cancelled before it started; nothing was sent to any host."""
+    """The call was cancelled before it started; nothing was sent to any host.
+
+    It is a plain ``Exception``, not a ``ForgectlError``, and not an error to display: a caller
+    of ``LiveSource.snapshot`` or ``diff`` that passes ``cancelled`` must catch it before it
+    treats an exception as a failure.
+    """
+
+
+READ_COMMANDS = frozenset({"prs", "snapshot", "diff"})
+
+# ``registry._loaded`` is process-wide and set before the handlers are imported, so the race is
+# between every runner in the process, not within one. One lock for all of them.
+_LOAD_LOCK = threading.Lock()
+
+
+def _log_failure(err: ForgectlError, args: Namespace | None) -> None:
+    """One ``log.jsonl`` line for a failed read, as ``cli._fail`` writes it (nothing printed)."""
+    details = {
+        "command": getattr(args, "command", None),
+        "exit_code": err.exit_code,
+        "reason": err.reason,
+        "message": err.message,
+    }
+    cli._log(cli._failure_level(err), err.code, args, details)
 
 
 def in_process_runner(
-    config_path: str | None = None, environ: Mapping[str, str] | None = None
+    config_path: str | None = None,
+    environ: Mapping[str, str] | None = None,
+    timeout: float | None = None,
 ) -> Runner:
     """A runner over the registered handlers (see the module docstring).
 
-    ``config_path`` is the command line's ``--config`` (else the default lookup). It mirrors
-    ``cli._run`` between parsing and the handler call: keep the two in step.
+    ``config_path`` is the command line's ``--config`` (else the default lookup) and ``timeout``
+    its ``--timeout`` (else the config's). It mirrors ``cli._run`` between parsing and the
+    handler call: keep the two in step.
     """
-    lock = threading.Lock()
     loaded: list[Any] = []  # the LoadedConfig, once
 
     def config() -> Any:
@@ -61,7 +99,7 @@ def in_process_runner(
         thread calling it meanwhile finds no handler. Every call comes through this lock first, so
         the first caller finishes the imports before another one looks.
         """
-        with lock:
+        with _LOAD_LOCK:
             if not loaded:  # a failure is not cached: fixing the config and refreshing works
                 registry.load_handlers()
                 loaded.append(
@@ -70,25 +108,32 @@ def in_process_runner(
             return loaded[0]
 
     def run(argv: list[str]) -> dict[str, Any]:
-        args = parse(argv)
-        cfg = config()
-        bind_args(args, cfg.config)
-        handler = registry.HANDLERS.get(args.command)
-        if handler is None:
-            raise ForgectlError("internal", f"{args.command}: not implemented")
-        out = handler(
-            Invocation(
-                command=args.command,
-                args=args,
-                json=True,
-                human=None,
-                config=cfg,
-                timeout=cfg.timeout_for(None),
+        args: Namespace | None = None
+        try:
+            args = parse(argv)
+            if args.command not in READ_COMMANDS:
+                raise ForgectlError("internal", f"{args.command}: not a read command of browse")
+            cfg = config()
+            bind_args(args, cfg.config)
+            handler = registry.HANDLERS.get(args.command)
+            if handler is None:
+                raise ForgectlError("internal", f"{args.command}: not implemented")
+            out = handler(
+                Invocation(
+                    command=args.command,
+                    args=args,
+                    json=True,
+                    human=None,
+                    config=cfg,
+                    timeout=cfg.timeout_for(timeout),
+                )
             )
-        )
-        if not isinstance(out, dict):
-            raise ForgectlError("internal", f"{args.command}: the handler gave no object")
-        return out
+            if not isinstance(out, dict):
+                raise ForgectlError("internal", f"{args.command}: the handler gave no object")
+            return out
+        except ForgectlError as err:
+            _log_failure(err, args)
+            raise
 
     return run
 
@@ -96,8 +141,14 @@ def in_process_runner(
 class LiveSource:
     """``DataSource`` over a runner. ``LiveSource()`` uses the in-process handlers."""
 
-    def __init__(self, runner: Runner | None = None, *, config_path: str | None = None) -> None:
-        self._runner = runner or in_process_runner(config_path)
+    def __init__(
+        self,
+        runner: Runner | None = None,
+        *,
+        config_path: str | None = None,
+        timeout: float | None = None,
+    ) -> None:
+        self._runner = runner or in_process_runner(config_path, timeout=timeout)
 
     def _run(self, argv: list[str]) -> dict[str, Any]:
         try:
@@ -105,7 +156,7 @@ class LiveSource:
         except ForgectlError:
             raise
         except Exception as exc:  # a handler bug: the type only, its text may hold anything
-            raise ForgectlError("internal", f"{argv[0]}: {type(exc).__name__}") from None
+            raise ForgectlError("internal", f"{argv[0]}: {type(exc).__name__}") from exc
 
     def prs(
         self,
@@ -122,10 +173,10 @@ class LiveSource:
         """
         argv = ["prs"]
         if author is not None:
-            argv += ["--author", author]
+            argv.append(f"--author={author}")  # `=`: a value that starts with `-` stays a value
         if review_requested_from is not None:
-            argv += ["--review-requested-from", review_requested_from]
-        argv += ["--state", state, "--limit", str(limit)]
+            argv.append(f"--review-requested-from={review_requested_from}")
+        argv += [f"--state={state}", f"--limit={limit}"]
         try:
             return self._run(argv)
         except ForgectlError as err:
@@ -142,8 +193,14 @@ class LiveSource:
         return self._one("diff", pr, cancelled)
 
     def _one(self, command: str, pr: str, cancelled: Callable[[], bool] | None) -> dict[str, Any]:
+        # `cancelled` is checked here only, before the call: see TODO(#59) in the module docstring.
         if not is_pr(pr):  # also keeps an option-looking value out of the argument list
             raise ForgectlError("invalid_pr", f"{command}: not a PR in the form host/path#N")
-        if cancelled is not None and cancelled():
-            raise Cancelled(pr)
+        if cancelled is not None:
+            try:
+                stop = cancelled()
+            except Exception as exc:  # the caller's callable: its text may hold anything
+                raise ForgectlError("internal", f"cancelled: {type(exc).__name__}") from exc
+            if stop:
+                raise Cancelled(pr)
         return self._run([command, pr])

@@ -6,15 +6,19 @@ handlers through the fake gh/glab once the read stack is on this branch.
 
 from __future__ import annotations
 
+import json
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from forgectl import registry
 from forgectl.errors import ForgectlError
 from forgectl.tui.source import DataSource, load_list
-from forgectl.tui.source_live import Cancelled, LiveSource
+from forgectl.tui.source_live import Cancelled, LiveSource, in_process_runner
 
 from .tui_fakes import make_diff, make_item, make_snapshot
 
@@ -55,15 +59,13 @@ def test_it_is_a_data_source() -> None:
 def test_prs_passes_the_filters_as_arguments() -> None:
     run = Recorder(lambda argv: listing([]))
     LiveSource(run).prs(author="me", review_requested_from=None, state="all", limit=7)
-    assert run.calls == [["prs", "--author", "me", "--state", "all", "--limit", "7"]]
+    assert run.calls == [["prs", "--author=me", "--state=all", "--limit=7"]]
 
 
 def test_prs_review_requested_filter() -> None:
     run = Recorder(lambda argv: listing([]))
     LiveSource(run).prs(review_requested_from="me")
-    assert run.calls == [
-        ["prs", "--review-requested-from", "me", "--state", "open", "--limit", "100"]
-    ]
+    assert run.calls == [["prs", "--review-requested-from=me", "--state=open", "--limit=100"]]
 
 
 def test_prs_returns_the_handler_answer() -> None:
@@ -124,6 +126,7 @@ def test_a_bug_in_a_handler_becomes_an_internal_error_without_its_text() -> None
         assert caught.value.code == "internal"
         assert "hunter2" not in caught.value.message
         assert "RuntimeError" in caught.value.message
+        assert isinstance(caught.value.__cause__, RuntimeError)  # kept for debugging, not shown
 
 
 def test_keyboard_interrupt_is_not_swallowed() -> None:
@@ -252,10 +255,156 @@ def test_the_config_path_reaches_the_in_process_runner(monkeypatch: pytest.Monke
 
     paths: list[str | None] = []
 
-    def fake_runner(config_path: str | None = None, environ: Any = None) -> Any:
+    def fake_runner(
+        config_path: str | None = None, environ: Any = None, timeout: float | None = None
+    ) -> Any:
         paths.append(config_path)
         return Recorder(lambda argv: listing([]))
 
     monkeypatch.setattr(source_live, "in_process_runner", fake_runner)
     LiveSource(config_path="/x.yaml").prs(author="me")
     assert paths == ["/x.yaml"]
+
+
+CONFIG_TEXT = "retries: 0\nme:\n  github: user-1\nhosts:\n  github.com:\n    token_env: TOK_A\n"
+
+
+def write_config(tmp_path: Path) -> Path:
+    path = tmp_path / "config.yaml"
+    path.write_text(CONFIG_TEXT, encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def fresh_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Handlers not loaded yet, as at the start of a process; the real state comes back after."""
+    registry.load_handlers()  # so every handler module is in sys.modules and is put back after
+    monkeypatch.setattr(registry, "_loaded", False)
+    monkeypatch.setattr(registry, "HANDLERS", {})
+    for name in registry.HANDLER_MODULES:  # import runs the decorators again
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+
+def test_an_option_looking_filter_value_is_one_literal_argument() -> None:
+    run = Recorder(lambda argv: listing([]))
+    LiveSource(run).prs(author="-x", review_requested_from="-y")
+    assert run.calls[0][1:3] == ["--author=-x", "--review-requested-from=-y"]
+
+
+def test_an_option_looking_author_reaches_the_parser_as_a_value(tmp_path: Path) -> None:
+    source = LiveSource(config_path=str(write_config(tmp_path)))
+    with pytest.raises(ForgectlError) as caught:
+        source.prs(author="-x")
+    assert caught.value.code == "usage"
+    assert "not a valid login" in caught.value.message  # not "expected one argument"
+
+
+def test_the_first_calls_from_many_threads_all_find_the_handlers(
+    fresh_registry: None, tmp_path: Path
+) -> None:
+    path = str(write_config(tmp_path))
+    barrier = threading.Barrier(8, timeout=10)
+
+    def go(_: int) -> str:
+        run = in_process_runner(path, {})  # one runner per source: the race is process-wide
+        barrier.wait()
+        try:
+            run(["snapshot", PR1])
+        except ForgectlError as err:
+            return f"{err.code}: {err.message}"
+        return "ok"
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        seen = list(pool.map(go, range(8)))
+    assert not [s for s in seen if "not implemented" in s], seen
+
+
+def test_a_failed_config_load_is_not_cached(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("hosts: [", encoding="utf-8")
+    run = in_process_runner(str(path), {})
+    with pytest.raises(ForgectlError):
+        run(["snapshot", PR1])
+    path.write_text(CONFIG_TEXT, encoding="utf-8")
+    registry.load_handlers()
+    seen: list[str] = []
+
+    def handler(inv: Any) -> dict[str, Any]:
+        seen.append(inv.command)
+        return {"ok": True}
+
+    original = registry.HANDLERS["snapshot"]
+    registry.HANDLERS["snapshot"] = handler
+    try:
+        assert run(["snapshot", PR1]) == {"ok": True}
+    finally:
+        registry.HANDLERS["snapshot"] = original
+    assert seen == ["snapshot"]
+
+
+def test_a_failing_call_is_logged_like_the_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = tmp_path / "state"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    run = in_process_runner(str(tmp_path / "missing.yaml"), {})
+    with pytest.raises(ForgectlError) as caught:
+        run(["snapshot", PR1])
+    lines = (state / "forgectl" / "log.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["event"] == caught.value.code
+    assert record["details"]["command"] == "snapshot"
+
+
+def test_the_timeout_reaches_the_handler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    registry.load_handlers()
+    seen: list[float] = []
+
+    def handler(inv: Any) -> dict[str, Any]:
+        seen.append(inv.timeout)
+        return {}
+
+    monkeypatch.setitem(registry.HANDLERS, "snapshot", handler)
+    LiveSource(config_path=str(write_config(tmp_path)), timeout=7.5).snapshot(PR1)
+    assert seen == [7.5]
+
+
+def test_without_a_timeout_the_config_value_is_used(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry.load_handlers()
+    seen: list[float] = []
+    monkeypatch.setitem(registry.HANDLERS, "snapshot", lambda inv: seen.append(inv.timeout) or {})
+    LiveSource(config_path=str(write_config(tmp_path))).snapshot(PR1)
+    assert seen and seen[0] > 0
+
+
+@pytest.mark.parametrize("argv", [["whoami"], ["merge", PR1, "--yes"], ["merge", PR1]])
+def test_the_runner_refuses_a_command_outside_the_three_reads(
+    argv: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry.load_handlers()
+    called: list[str] = []
+    for name in ("whoami", "merge"):
+        monkeypatch.setitem(registry.HANDLERS, name, lambda inv: called.append(inv.command) or {})
+    run = in_process_runner(str(write_config(tmp_path)), {})
+    with pytest.raises(ForgectlError) as caught:
+        run(argv)
+    assert caught.value.code in {"internal", "usage"}
+    assert called == []
+    if caught.value.code == "usage":
+        pytest.fail("the command was refused by the parser, not by the runner: " + str(argv))
+
+
+def test_a_cancelled_check_that_raises_is_an_internal_error() -> None:
+    def broken() -> bool:
+        raise ValueError("token=hunter2")
+
+    run = Recorder()
+    with pytest.raises(ForgectlError) as caught:
+        LiveSource(run).snapshot(PR1, cancelled=broken)
+    assert caught.value.code == "internal"
+    assert caught.value.message == "cancelled: ValueError"
+    assert run.calls == []

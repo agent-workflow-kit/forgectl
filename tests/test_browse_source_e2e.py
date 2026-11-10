@@ -33,6 +33,8 @@ from .test_snapshot_cli import PR  # noqa: E402
 from .test_snapshot_cli import script as script_snapshot
 from .tui_fakes import FakeOpener  # noqa: E402
 
+FAILED_CODE = "not_found"
+
 
 @pytest.fixture
 def config(tmp_path: Path) -> Path:
@@ -54,6 +56,13 @@ def forged(fake_forges: FakeForges, monkeypatch: pytest.MonkeyPatch) -> FakeForg
     return fake_forges
 
 
+def listing_with_the_snapshot_pr() -> dict[str, Any]:
+    """The recorded search, its newest row renumbered to the PR that the snapshot fakes serve."""
+    doc = list_recording()
+    doc["data"]["search"]["nodes"][0]["number"] = 7
+    return doc
+
+
 def two_hosts_one_failing(forges: FakeForges) -> None:
     # Only the list query: snapshot's own GraphQL queries must not match these answers.
     prs_query = r"query ForgectlPrs\b"
@@ -63,7 +72,7 @@ def two_hosts_one_failing(forges: FakeForges) -> None:
         method="POST",
         host="github.com",
         stdin_re=prs_query,
-        body=list_recording(),
+        body=listing_with_the_snapshot_pr(),
         headers=rate(900),
     )
     forges.answer(
@@ -140,7 +149,11 @@ def test_the_filter_reaches_the_host_query(forged: FakeForges, tmp_path: Path) -
         body=list_recording(),
     )
     forged.answer("glab", "user", status=401, body={"message": "401 Unauthorized"})
-    LiveSource(config_path=str(only)).prs(review_requested_from="me")
+    answer = LiveSource(config_path=str(only)).prs(review_requested_from="me")
+    assert answer["items"], "the scripted search answered"
+    queries = [c.stdin or "" for c in forged.calls("gh") if "ForgectlPrs" in (c.stdin or "")]
+    assert len(queries) == 1
+    assert "user-review-requested:user-9" in queries[0]
 
 
 def snapshot_and_diff_fakes(forges: FakeForges) -> None:
@@ -165,9 +178,22 @@ def test_a_failing_snapshot_is_a_forgectl_error_and_the_next_call_works(
 ) -> None:
     forged.allow_unmatched = True  # the first call asks for what nothing answers
     source = LiveSource(config_path=str(config))
-    with pytest.raises(ForgectlError):  # nothing scripted: the fake answers an error
+    with pytest.raises(ForgectlError) as caught:  # nothing scripted: the fake answers an error
         source.snapshot("github.com/user-7/missing#9")
+    assert caught.value.code == FAILED_CODE
     snapshot_and_diff_fakes(forged)
+    assert source.snapshot(PR)["pr"] == PR
+
+
+def test_a_failing_diff_is_a_forgectl_error_and_the_snapshot_still_works(
+    forged: FakeForges, config: Path
+) -> None:
+    forged.allow_unmatched = True  # only the snapshot is scripted: the diff reads get no answer
+    script_snapshot(forged)
+    source = LiveSource(config_path=str(config))
+    with pytest.raises(ForgectlError) as caught:
+        source.diff(PR)
+    assert caught.value.code == FAILED_CODE
     assert source.snapshot(PR)["pr"] == PR
 
 
@@ -187,6 +213,69 @@ def test_browse_lists_both_hosts_and_enter_shows_the_snapshot(
             assert app.query_one("#detail").display is True, status
             assert "user-7/example-repo#7" in str(app.query_one("#facts", Static).content)
             assert "src/app.py" in str(app.query_one("#rest", Static).content)  # the diff
+
+    asyncio.run(go())
+
+
+class FailsFor(LiveSource):
+    """The live source, except that the snapshot of one PR fails."""
+
+    def __init__(self, bad: list[str], **kw: Any) -> None:
+        super().__init__(**kw)
+        self.bad = bad
+
+    def snapshot(self, pr: str, **kw: Any) -> dict[str, Any]:
+        if pr in self.bad:
+            raise ForgectlError("not_found", "no such pull request")
+        return super().snapshot(pr, **kw)
+
+
+def test_enter_on_a_row_shows_the_snapshot_and_the_diff(forged: FakeForges, config: Path) -> None:
+    # No `focus`: the detail comes from selecting a listed row, through the real handlers.
+    # The newest row is the PR that the scripted snapshot is for.
+    # GAP: forgectl has no GitLab `prs` list yet (only github_lists), so no GitLab row can be
+    # listed here; the GitLab reads are covered by their own backend tests.
+    two_hosts_one_failing(forged)
+    snapshot_and_diff_fakes(forged)
+    app = BrowseApp(LiveSource(config_path=str(config)), FakeOpener(), focus=None)
+
+    async def go() -> None:
+        async with app.run_test(size=(140, 50)) as pilot:
+            await _settle(app, pilot)
+            assert app.query_one("#list", OptionList).option_count >= 1
+            assert app.query_one("#detail").display is False
+            await pilot.press("enter")
+            await _settle(app, pilot)
+            status = str(app.query_one("#status", Static).content)
+            assert app.query_one("#detail").display is True, status
+            assert "user-7/example-repo#7" in str(app.query_one("#facts", Static).content)
+            assert "src/app.py" in str(app.query_one("#rest", Static).content)
+
+    asyncio.run(go())
+
+
+def test_one_pr_failing_to_load_leaves_the_next_one_working(
+    forged: FakeForges, config: Path
+) -> None:
+    two_hosts_one_failing(forged)
+    snapshot_and_diff_fakes(forged)
+    bad: list[str] = []
+    app = BrowseApp(FailsFor(bad, config_path=str(config)), FakeOpener(), focus=None)
+
+    async def go() -> None:
+        async with app.run_test(size=(140, 50)) as pilot:
+            await _settle(app, pilot)
+            assert app.query_one("#list", OptionList).option_count >= 2
+            bad.append(app._visible[1].pr)
+            await pilot.press("down", "enter")
+            await _settle(app, pilot)
+            status = str(app.query_one("#status", Static).content)
+            assert "not_found" in status
+            assert app.query_one("#detail").display is False
+            await pilot.press("up", "enter")
+            await _settle(app, pilot)
+            assert app.query_one("#detail").display is True
+            assert "user-7/example-repo#7" in str(app.query_one("#facts", Static).content)
 
     asyncio.run(go())
 
