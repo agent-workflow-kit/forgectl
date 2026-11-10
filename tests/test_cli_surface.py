@@ -262,6 +262,12 @@ HOSTILE: list[tuple[str, list[str]]] = [
     ("resolve without thread", ["resolve", PR]),
     ("access one arg", ["access", "github.com/o/r"]),
     ("browse positional", ["browse", PR]),
+    ("browse interval negative", ["browse", "--interval", "-5"]),
+    ("browse interval word", ["browse", "--interval", "soon"]),
+    ("browse interval empty", ["browse", "--interval", ""]),
+    ("browse interval zero with unit", ["browse", "--interval", "0s"]),
+    ("browse interval over a hundred years", ["browse", "--interval", "36501d"]),
+    ("browse interval twice", ["browse", "--interval", "5", "--interval", "6"]),
     (
         "comment allow-self",
         ["comment", PR, "--body-file", "b", "--allow-self", "--actor", "human:b"],
@@ -1122,6 +1128,8 @@ def test_export_whoami_and_browse_flags_parse(capsys: pytest.CaptureFixture[str]
     reaches_handler(capsys, ["whoami", "--host", "github.com"], "whoami")
     reaches_handler(capsys, ["browse", "--focus", PR], "browse")
     reaches_handler(capsys, ["browse", "--result-file", "out.json"], "browse")
+    for good in ("0", "30", "90s", "2m", "1.5"):
+        reaches_handler(capsys, ["browse", "--interval", good], "browse")
     reaches_handler(capsys, ["browse", "--focus", PR, "--result-file", "out.json"], "browse")
 
 
