@@ -24,7 +24,7 @@ from textual.widgets import OptionList
 from forgectl import model as m
 from forgectl.activity import Viewer, derive
 from forgectl.errors import ForgectlError
-from forgectl.tui import columns
+from forgectl.tui import columns, filtering, query
 from forgectl.tui.app import BrowseApp
 from forgectl.tui.source import Row
 
@@ -399,20 +399,20 @@ def test_each_filter_narrows_and_combinations_intersect() -> None:
         assert len(order_of(app)) == 4
         await pilot.press("a")
         assert order_of(app) == [prefix(GH, 1), prefix(GH, 2)]
-        assert "filters: authored" in bar()
+        assert "query: authored" in bar()
         await pilot.press("f")  # authored AND ci failing
         assert order_of(app) == [prefix(GH, 1)]
-        assert "filters: authored, ci-failing" in bar()
+        assert "query: authored AND ci = failing" in bar()
         await pilot.press("a", "v")  # review requested AND ci failing
         assert order_of(app) == [prefix(GH, 3), prefix(GH, 4)]
         await pilot.press("n")  # + new comments from others
         assert order_of(app) == [prefix(GH, 4)]
-        assert "filters: requested, ci-failing, new-comments" in bar()
+        assert "query: ci = failing AND requested AND others_since_push" in bar()
         await pilot.press("v", "f")  # new comments only
         assert order_of(app) == [prefix(GH, 2), prefix(GH, 4)]
         await pilot.press("n")
         assert len(order_of(app)) == 4
-        assert "filters" not in bar()
+        assert "query" not in bar()
 
     driven(filter_source(), script)
 
@@ -433,16 +433,23 @@ def test_authored_and_requested_together_keep_only_prs_that_are_both() -> None:
 
 
 def test_snapshot_filters_hide_rows_until_their_snapshot_arrives() -> None:
+    now = columns.utc_now()
     rows = [Row(item=make_item(1))]
-    states = {prefix(GH, 1): columns.RowState()}
-    assert not columns.matches(rows[0], states[rows[0].pr], {columns.FILTER_CI_FAILING})
+    state = columns.RowState()
+
+    def shown(text: str, state: columns.RowState = state) -> bool:
+        parsed = query.parse(text)
+        assert isinstance(parsed, query.Query)
+        return filtering.matches(parsed.where, rows[0], state, now)
+
+    assert not shown("ci = failing")
     # a loading row has no roles here, so the role filters do not match it either
-    assert not columns.matches(rows[0], states[rows[0].pr], {columns.FILTER_AUTHORED})
+    assert not shown("authored")
     rows[0].roles.add("authored")
-    assert columns.matches(rows[0], states[rows[0].pr], {columns.FILTER_AUTHORED})
-    assert not columns.matches(rows[0], states[rows[0].pr], {columns.FILTER_REQUESTED})
+    assert shown("authored")
+    assert not shown("requested")
     failed = columns.RowState(columns.FAILED, error="x")
-    assert not columns.matches(rows[0], failed, {columns.FILTER_NEW_COMMENTS})
+    assert not shown("others_since_push", failed)
 
 
 # -- progressive loading ---------------------------------------------------------------------

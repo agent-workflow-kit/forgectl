@@ -253,7 +253,7 @@ def test_help_source_has_no_hard_line_breaks() -> None:
 def test_help_reflows_to_the_terminal_width(width: int) -> None:
     async def go() -> None:
         app = BrowseApp(basic_source(), FakeOpener(), concurrency=0)
-        async with app.run_test(size=(width, 60)) as pilot:
+        async with app.run_test(size=(width, 72)) as pilot:
             await settle(app, pilot)
             await pilot.press("question_mark")
             await pilot.pause()
@@ -451,6 +451,8 @@ def test_there_is_no_write_action() -> None:
         "v",
         "f",
         "n",
+        "F",
+        "D",
         "H",
         *"123456",  # the detail sections: view only
     }

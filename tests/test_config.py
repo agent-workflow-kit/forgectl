@@ -1440,6 +1440,7 @@ def test_hash_is_sha256_of_sorted_key_json_of_the_merged_config_after_defaults(
             "full_refresh_every": 5,
             "concurrency": 4,
             "detail_collapsed": ["changes"],
+            "query": "",
         },
         "hooks": {"pre-merge": [], "post-merge": [], "pre-post": [], "post-post": []},
     }
@@ -1548,3 +1549,48 @@ def test_browse_detail_collapsed_defaults_to_the_changes_and_takes_section_names
     assert load(home, text).config.browse.detail_collapsed == ("ci", "comments")
     assert load(home, "browse: {detail_collapsed: []}\n").config.browse.detail_collapsed == ()
     assert load(home, "").config_hash != load(home, "browse: {detail_collapsed: []}\n").config_hash
+
+
+def test_browse_query_defaults_to_empty_and_takes_a_valid_query(home: Path) -> None:
+    assert load(home, "").config.browse.query == ""
+    text = 'browse: {query: "ci IN (failing, pending) AND NOT draft ORDER BY age DESC, ci"}\n'
+    assert load(home, text).config.browse.query == (
+        "ci IN (failing, pending) AND NOT draft ORDER BY age DESC, ci"
+    )
+    assert load(home, "browse: {query: ''}\n").config.browse.query == ""
+    assert load(home, "").config_hash != load(home, text).config_hash
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "'ci ='",
+        "'nonsense = 1'",
+        "'ORDER BY'",
+        "'(' ",
+        '"title = \'x"',
+        "5",
+        "[draft]",
+        "'" + "draft AND " * 120 + "draft'",
+    ],
+)
+def test_an_invalid_browse_query_is_config_invalid(home: Path, value: str) -> None:
+    error = invalid(home, f"browse: {{query: {value}}}\n")
+    assert error.details == {"key": "browse.query"}
+
+
+def test_a_browse_query_error_names_the_position(home: Path) -> None:
+    error = invalid(home, "browse: {query: 'ci = failing AND'}\n")
+    assert "column 17" in error.message
+
+
+def test_the_browse_query_drop_in_wins_over_config_yaml(home: Path) -> None:
+    write(default_file(home), "browse: {query: 'draft'}\n")
+    drop = default_file(home).parent / "config.d" / "90-browse-query.yaml"
+    write(drop, 'browse:\n  query: "authored"\n')
+    assert load(home).config.browse.query == "authored"
+
+
+def test_the_schema_has_the_browse_query() -> None:
+    prop = SCHEMA["properties"]["browse"]["properties"]["query"]
+    assert prop["type"] == "string" and prop["default"] == ""
