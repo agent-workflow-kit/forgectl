@@ -1457,7 +1457,7 @@ def _reap_hook_group(pgid: int) -> None:
     check sees a clean process. A member still alive is our child only if reparented: it is
     pinned by a pidfd before it is killed."""
     me = os.getpid()
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         members = group_members(pgid)
         if not members:

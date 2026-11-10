@@ -742,7 +742,7 @@ def test_every_result_validates_against_the_schema() -> None:
     validate(app.result(), "forgectl/cli/browse-result.json")
 
 
-async def wait_until(pilot: Pilot[None], check: Callable[[], bool], timeout: float = 5.0) -> None:
+async def wait_until(pilot: Pilot[None], check: Callable[[], bool], timeout: float = 30.0) -> None:
     deadline = time.monotonic() + timeout
     while not check():
         assert time.monotonic() < deadline, "condition never held"

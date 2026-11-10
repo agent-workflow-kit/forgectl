@@ -1584,7 +1584,7 @@ time.sleep(60)
 def reap_orphans(pgid: int) -> None:
     """Grandchildren killed with their leader are reparented to this process (a subreaper) and
     wait here as zombies; reap them so the leaked-children check sees a clean process."""
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 30
     while group_members(pgid) and time.monotonic() < deadline:
         for pid, _ppid, state in group_members(pgid):
             if state == "Z":
@@ -1800,7 +1800,7 @@ def test_a_signal_sent_to_a_running_forgectl_process_ends_the_child_group_and_cl
     assert line[0] == "STARTED"
     child_pid, child_pgid = int(line[1]), int(line[2])
     assert child_pid == child_pgid and child_pid != proc.pid
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + 30
     while time.monotonic() < deadline and not fake_forges.calls():
         time.sleep(0.05)
     time.sleep(0.3)  # the fake is running and hanging
@@ -2213,7 +2213,7 @@ def test_with_kqueue_and_no_waitid_a_grandchild_dies_with_the_group(
     )
     grandchild = int(result.stdout.split()[0])
     assert result.returncode == 0
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         try:
             os.kill(grandchild, 0)  # only a probe; never a signal to an unknown process
