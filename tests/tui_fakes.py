@@ -37,7 +37,12 @@ def make_item(
         "state": "open",
         "draft": draft,
         "labels": labels or [],
-        "head": {"sha": SHA_A, "ref": "feature", "repo": repo, "is_fork": False},
+        "head": {
+            "sha": SHA_A,
+            "ref": "feature",
+            "repo": repo,
+            "is_fork": False,
+        },
         "base": {"ref": "main"},
         "updated_at": updated_at,
     }
@@ -148,7 +153,12 @@ def make_snapshot(
         "incomplete": [],
         "fetched_at": TS,
     }
-    snap["head"] = {**item["head"], "ref": branch}
+    snap["head"] = {
+        **item["head"],
+        "ref": branch,
+        "pushed_at": None,
+        "pushed_at_source": None,
+    }
     snap["base"] = {"ref": "main", "sha": SHA_B, "is_default": True}
     return snap
 

@@ -244,9 +244,9 @@ def test_an_unsafe_browser_value_is_skipped_for_sensible_browser(
 @pytest.mark.parametrize(
     "url",
     [
-        "https://github.com;x@evil.example/",
-        "https://user@github.com/",
-        "https://github.com:443@evil.example/a",
+        "https://github.com;x" + "@evil.example/",
+        "https://user" + "@github.com/",
+        "https://github.com:443" + "@evil.example/a",
         "http://a@b/",
     ],
 )

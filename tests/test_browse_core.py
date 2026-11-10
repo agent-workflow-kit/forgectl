@@ -26,7 +26,7 @@ def test_core_import_never_loads_textual() -> None:
         "forgectl.registry.load_handlers();"
         "sys.exit(1 if any(m == 'textual' or m.startswith('textual.') for m in sys.modules) else 0)"
     )
-    env = {"PATH": os.environ.get("PATH", ""), "HOME": "/nonexistent"}
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": os.environ["HOME"]}
     done = subprocess.run([sys.executable, "-I", "-c", code], env=env, check=False)
     assert done.returncode == 0
 

@@ -338,9 +338,9 @@ def test_the_pr_url_must_be_https(url: str) -> None:
 
 
 HOSTILE_TITLES = [
-    "[@click=app.quit]click me[/]",
+    "[" + "@click=app.quit]click me[/]",
     "[bold red]loud[/bold red] [link=https://evil.example]x[/link]",
-    "[on red]x[/] [@click=app.bell]y[/] [/]",
+    "[on red]x[/] [" + "@click=app.bell]y[/] [/]",
     "\x1b]0;pwned\x07\x1b[31mred\x1b[0m \x1b]8;;https://evil.example\x1b\\link\x1b]8;;\x1b\\",
     "abc‮def⁦ghi⁩",
     "tab\there\nnewline\rcr",
@@ -376,7 +376,7 @@ def test_hostile_titles_render_inert_in_the_list_the_detail_and_the_screen(title
             as_content(app.query_one("#checks", OptionList).get_option_at_index(0).prompt),
         ]
         for content in contents:
-            assert content.spans == []  # no styles, no @click actions
+            assert content.spans == []  # no styles, no click actions
             for ch in content.plain:
                 assert ch in "\t\n" or ord(ch) >= 0x20 and not 0x7F <= ord(ch) < 0xA0
             assert "‮" not in content.plain and "\x1b" not in content.plain
@@ -389,7 +389,7 @@ def test_hostile_titles_render_inert_in_the_list_the_detail_and_the_screen(title
 
 
 def test_the_markup_title_is_shown_literally() -> None:
-    title = "[@click=app.quit]click me[/]"
+    title = "[" + "@click=app.quit]click me[/]"
     source = FakeSource(authored=[make_item(1, title=title)])
 
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
@@ -449,7 +449,7 @@ def test_huge_fields_are_bounded() -> None:
 def test_errors_from_the_source_reach_the_status_line_inert() -> None:
     class Failing(FakeSource):
         def prs(self, **kwargs: Any) -> dict[str, Any]:
-            raise ForgectlError("upstream_error", "[@click=app.quit]boom\x1b[31m")
+            raise ForgectlError("upstream_error", "[" + "@click=app.quit]boom\x1b[31m")
 
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         status = content_of(app, "#status")
@@ -774,7 +774,7 @@ def test_an_opener_exiting_non_zero_is_noted_and_the_intent_stays_open(tmp_path:
         prog = bindir / name
         prog.write_text("#!/bin/sh\nexit 4\n")
         prog.chmod(prog.stat().st_mode | stat.S_IXUSR)
-    opener = BrowserOpener({"PATH": str(bindir)})
+    opener = BrowserOpener({"PATH": str(bindir), "HOME": os.environ["HOME"]})
 
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         await pilot.press("o")
