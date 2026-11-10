@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import stat
 import time
 from collections.abc import Awaitable, Callable
@@ -466,7 +467,7 @@ def test_partial_errors_and_incomplete_lists_show_in_the_status_line() -> None:
 
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         status = content_of(app, "#status").plain
-        assert "gitlab.com" in status and "auth_required" in status
+        assert re.search(r"(?<![\w.])gitlab\.com(?![\w.-])", status) and "auth_required" in status
         assert len(list_prompts(app)) == 2  # the rest is still shown
 
     drive(source, script)
