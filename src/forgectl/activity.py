@@ -15,6 +15,7 @@ import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from fractions import Fraction
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
@@ -24,9 +25,13 @@ if TYPE_CHECKING:
     from .reads import ReadEnv
 
 _RFC3339 = re.compile(
-    r"[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}"
-    r"(?:\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})"
+    r"([0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2})"
+    r"(?:\.([0-9]+))?([Zz]|[+-][0-9]{2}:[0-9]{2})"
 )
+
+# An instant: UTC to the whole second, then the exact fraction of the second. Tuples order
+# like the instants they stand for, however many fraction digits a host wrote.
+type _Instant = tuple[datetime, Fraction]
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,13 +42,16 @@ class Viewer:
     id: str | None
 
 
-def _instant(text: str, what: str) -> datetime:
-    if not isinstance(text, str) or not _RFC3339.fullmatch(text):
+def _instant(text: str, what: str) -> _Instant:
+    found = _RFC3339.fullmatch(text) if isinstance(text, str) else None
+    if found is None:
         raise ValueError(f"{what} is not an RFC 3339 time with an offset")
+    whole, digits, offset = found.groups()
     try:
-        return datetime.fromisoformat(text.upper()).astimezone(UTC)
+        moment = datetime.fromisoformat(f"{whole}{offset}".upper()).astimezone(UTC)
     except (ValueError, OverflowError):
         raise ValueError(f"{what} is not an RFC 3339 time with an offset") from None
+    return moment, Fraction(int(digits), 10 ** len(digits)) if digits else Fraction(0)
 
 
 @lru_cache(maxsize=256)
@@ -86,7 +94,15 @@ def derive(
     My own account is never "others" and never ignored, so my reply always counts as mine even
     when the config lists my login.
     """
+    # Every time is read, whoever wrote it: a bad one is an error, never a silent miss.
     pushed = _instant(pushed_at, "pushed_at") if pushed_at is not None else None
+    comment_at = {
+        id(c): _instant(c.created_at, "a comment's time") for t in threads for c in t.comments
+    }
+    review_at = [_instant(r.submitted_at, "a review's time") for r in reviews]
+    approval_at = [
+        _instant(a.at, "an approval's time") if a.at is not None else None for a in approvals
+    ]
 
     def other(login: str | None, id_: str | None) -> bool:
         return not _is_me(me, login, id_) and not ignored(login, ignore_authors)
@@ -97,19 +113,20 @@ def derive(
         for t in threads:
             for c in t.comments:
                 if other(c.author.login, c.author.id):
-                    others += _instant(c.created_at, "a comment's time") > pushed
-        for r in reviews:
+                    others += comment_at[id(c)] > pushed
+        for r, at in zip(reviews, review_at, strict=True):
             if other(r.author.login, r.author.id):
-                others += _instant(r.submitted_at, "a review's time") > pushed
-        for a in approvals:
-            if a.state == "approved" and a.at is not None and other(a.login, a.id):
-                others += _instant(a.at, "an approval's time") > pushed
+                others += at > pushed
+        for a, at in zip(approvals, approval_at, strict=True):
+            if a.state == "approved" and at is not None and other(a.login, a.id):
+                others += at > pushed
 
     awaiting = 0
     for t in threads:
         if t.resolved:
             continue
-        for c in reversed(t.ordered_comments):
+        # by instant; sorted() is stable, so equal instants keep the order the host gave
+        for c in reversed(sorted(t.comments, key=lambda c: comment_at[id(c)])):
             if _is_me(me, c.author.login, c.author.id):
                 break  # my reply is the last word
             if not ignored(c.author.login, ignore_authors):

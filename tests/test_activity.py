@@ -160,10 +160,6 @@ def test_a_time_that_is_not_rfc3339_with_an_offset_is_an_error_not_a_silent_miss
         run([thread(1, comment(1, OTHER, bad))])
 
 
-def test_a_bad_time_is_not_read_when_there_is_no_push_time() -> None:
-    assert run([thread(1, comment(1, OTHER, "garbage"))], pushed_at=None).others_since_push is None
-
-
 def test_my_own_comment_is_never_others() -> None:
     mine = author("user-1", "1001")
     assert run([thread(1, comment(1, mine, LATER))]).others_since_push == 0
@@ -319,6 +315,64 @@ def test_a_general_comment_by_someone_else_awaits_a_reply() -> None:
 def test_comments_are_ordered_by_time_not_by_position() -> None:
     threads = [thread(1, comment(2, ME_AUTHOR, LATER), comment(1, OTHER, EARLIER))]
     assert run(threads).awaiting_my_reply == 0
+
+
+def test_a_fractional_second_orders_after_the_whole_second_it_follows() -> None:
+    # as text "…05.5Z" < "…05Z"; as time the fraction is later, so my comment is the last word
+    mine = comment(1, ME_AUTHOR, "2026-10-02T09:00:05.5Z")
+    theirs = comment(2, OTHER, "2026-10-02T09:00:05Z")
+    assert run([thread(1, mine, theirs)]).awaiting_my_reply == 0
+
+
+def test_an_offset_comment_is_ordered_by_its_instant() -> None:
+    # 10:00+05:00 is 05:00Z, earlier than 06:00Z although "10…" sorts after "06…"
+    theirs = comment(1, OTHER, "2026-10-02T10:00:00+05:00")
+    mine = comment(2, ME_AUTHOR, "2026-10-02T06:00:00Z")
+    assert run([thread(1, theirs, mine)]).awaiting_my_reply == 0
+
+
+def test_comments_at_the_same_instant_keep_the_order_the_host_gave() -> None:
+    mine = comment(9, ME_AUTHOR, LATER)
+    theirs = comment(1, OTHER, LATER)
+    assert run([thread(1, mine, theirs)]).awaiting_my_reply == 1
+    assert run([thread(1, theirs, mine)]).awaiting_my_reply == 0
+
+
+@pytest.mark.parametrize("pushed", [PUSH, None])
+def test_a_bad_time_on_my_own_comment_is_an_error(pushed: str | None) -> None:
+    with pytest.raises(ValueError, match="time"):
+        run([thread(1, comment(1, ME_AUTHOR, "garbage"))], pushed_at=pushed)
+
+
+def test_a_bad_time_on_an_ignored_authors_comment_is_an_error() -> None:
+    with pytest.raises(ValueError, match="time"):
+        run([thread(1, comment(1, BOT, "garbage"))], ignore=["dependabot[bot]"])
+
+
+def test_a_bad_time_on_any_comment_is_an_error_when_there_is_no_push_time() -> None:
+    with pytest.raises(ValueError, match="time"):
+        run([thread(1, comment(1, OTHER, "garbage"))], pushed_at=None)
+
+
+def test_a_bad_review_time_is_an_error_even_for_my_review_and_without_a_push_time() -> None:
+    with pytest.raises(ValueError, match="time"):
+        run(reviews=[review(1, ME_AUTHOR, "garbage")], pushed_at=None)
+
+
+def test_a_bad_approval_time_is_an_error_even_for_me_and_without_a_push_time() -> None:
+    with pytest.raises(ValueError, match="time"):
+        run(approvals=[approval("user-1", "garbage")], pushed_at=None)
+
+
+def test_a_fraction_beyond_microseconds_still_counts_as_after() -> None:
+    late = [thread(1, comment(1, OTHER, "2026-10-02T08:30:00.0000009Z"))]
+    assert run(late, pushed_at="2026-10-02T08:30:00Z").others_since_push == 1
+
+
+@pytest.mark.parametrize("fraction", ["000000000", "000000000000"])
+def test_a_long_fraction_equal_to_the_push_time_is_not_after_it(fraction: str) -> None:
+    same = [thread(1, comment(1, OTHER, f"2026-10-02T08:30:00.{fraction}Z"))]
+    assert run(same, pushed_at="2026-10-02T08:30:00Z").others_since_push == 0
 
 
 def test_awaiting_does_not_depend_on_the_push_time() -> None:

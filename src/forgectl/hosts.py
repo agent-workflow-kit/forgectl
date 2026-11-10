@@ -220,6 +220,7 @@ class Hosts:
         self.gateway = gateway
         self._credentials: dict[str, Credential | _Failure] = {}
         self._viewers: dict[str, Viewer] = {}
+        self._viewer_locks: dict[str, threading.Lock] = {}
         self._lock = threading.Lock()  # select-and-store: a token_command runs once per host
 
     @property
@@ -363,23 +364,29 @@ class Hosts:
     def viewer(
         self, host: str, *, call: Callable[[Callable[[], User]], User] | None = None
     ) -> Viewer:
-        """Me on ``host`` for ``activity``: the authenticated account, read once per ``Hosts``
-        (one command run) however many snapshots follow. A configured ``me`` that names another
-        login than the authenticated one wins and has no id. A failed read raises and is not
-        remembered, so the next snapshot tries again."""
+        """Me on ``host`` for ``activity``. A configured ``me`` is used as it is, by login with no
+        id, and makes no request. Otherwise it is the authenticated account, read once per
+        ``Hosts`` (one command run) however many snapshots, on however many threads, follow. A
+        failed read raises and is not remembered, so the next snapshot tries again."""
         host = _ascii_host(host)
         with self._lock:
             known = self._viewers.get(host)
-        if known is None:
-            target = self.target(host)
-            user = (call or _once)(lambda: self.authenticated_user(target))
-            configured = self.me(host)
-            if configured is not None and not matches_login(configured, user.login):
-                known = Viewer(login=configured, id=None)
-            else:
-                known = Viewer(login=user.login, id=user.id)
+            gate = self._viewer_locks.setdefault(host, threading.Lock())
+        if known is not None:
+            return known
+        with gate:  # one read per host: the others wait for it, then find it stored
             with self._lock:
-                known = self._viewers.setdefault(host, known)
+                known = self._viewers.get(host)
+            if known is None:
+                configured = self.me(host)
+                if configured is not None:
+                    known = Viewer(login=configured, id=None)
+                else:
+                    target = self.target(host)
+                    user = (call or _once)(lambda: self.authenticated_user(target))
+                    known = Viewer(login=user.login, id=user.id)
+                with self._lock:
+                    self._viewers[host] = known
         return known
 
     # identity ---------------------------------------------------------------------------

@@ -1097,12 +1097,42 @@ def test_a_configured_me_for_another_login_wins_and_has_no_id(fake_forges: FakeF
     assert (me.login, me.id) == ("someone-else", None)
 
 
-def test_a_configured_me_that_is_the_account_keeps_the_id(fake_forges: FakeForges) -> None:
+def test_a_configured_me_makes_no_user_call_and_has_no_id(fake_forges: FakeForges) -> None:
     login("gh", "github.com")
     hosts = make_hosts(fake_forges, config_of({"github.com": Host(me="OCTO")}))
-    user_answer(fake_forges, "gh", "github.com", "octo")
+    fake_forges.answer("gh", "user", status=401, body={"message": "Bad credentials"})
     me = hosts.viewer("github.com")
-    assert (me.login, me.id) == ("octo", "12")
+    assert (me.login, me.id) == ("OCTO", None)
+    assert [c for c in fake_forges.calls("gh") if c.argv[-1] == "user"] == []
+
+
+def test_concurrent_first_viewer_calls_make_one_user_read(
+    fake_forges: FakeForges, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    login("gh", "github.com")
+    hosts = make_hosts(fake_forges)
+    reads: list[int] = []
+    gate = threading.Barrier(8)
+
+    def slow(target: Any) -> hosts_module.User:
+        reads.append(1)
+        threading.Event().wait(0.1)
+        return hosts_module.User(login="octo", id="12", scopes=None)
+
+    monkeypatch.setattr(hosts, "authenticated_user", slow)
+    seen: list[Any] = []
+
+    def worker() -> None:
+        gate.wait()
+        seen.append(hosts.viewer("github.com"))
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert len(reads) == 1
+    assert len(seen) == 8 and all(v is seen[0] for v in seen)
 
 
 def test_a_failed_viewer_read_is_not_remembered(fake_forges: FakeForges) -> None:
