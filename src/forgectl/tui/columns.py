@@ -245,7 +245,6 @@ COLUMNS = (
     Column("author", "author", 8, 20),
     Column("roles", "roles", 9, 18),  # "authored+requested"
 )
-TITLE_WIDTH = 40
 
 
 def fit(text: str, width: int) -> str:
@@ -287,13 +286,13 @@ def layout(pr_width: int) -> list[tuple[Column, int, int]]:
 
 
 def pinned_width(pr_width: int) -> int:
-    column, start, width = layout(pr_width)[PINNED - 1]
+    _, start, width = layout(pr_width)[PINNED - 1]
     return start + width
 
 
 def scroll_extent(pr_width: int) -> int:
     """The width of the scrolling columns (the offset is counted from their start)."""
-    column, start, width = layout(pr_width)[-1]
+    _, start, width = layout(pr_width)[-1]
     first = layout(pr_width)[PINNED][1]
     return start + width - first
 
@@ -311,9 +310,11 @@ def clamp_offset(offset: int, pr_width: int, view_width: int) -> int:
 
 def step_offset(offset: int, direction: int, pr_width: int, view_width: int) -> int:
     """The offset one column to the left (``direction`` -1) or right (+1), clamped."""
+    current = clamp_offset(offset, pr_width, view_width)
+    if _scroll_room(pr_width, view_width) == 0:
+        return current  # nothing of the scrolling columns is in view: do not step blindly
     first = layout(pr_width)[PINNED][1]
     starts = [start - first for _, start, _ in layout(pr_width)[PINNED:]]
-    current = clamp_offset(offset, pr_width, view_width)
     if direction > 0:
         later = [s for s in starts if s > current]
         return clamp_offset(later[0] if later else current, pr_width, view_width)
@@ -345,6 +346,8 @@ def column_at(x: int, pr_width: int, offset: int, view_width: int) -> str | None
 def _slice_cells(text: str, start: int, width: int) -> str:
     """``width`` cells of ``text`` from cell ``start``; a wide char cut by an edge becomes a
     space."""
+    if cell_len(text) == len(text):  # no wide chars: cells are characters
+        return set_cell_size(text[start : start + width], width)
     out: list[str] = []
     x = 0
     end = start + width
@@ -360,14 +363,22 @@ def _slice_cells(text: str, start: int, width: int) -> str:
     return set_cell_size("".join(out), width)
 
 
-def _compose(texts: list[str], pr_width: int, offset: int, view_width: int | None) -> str:
+Cut = tuple[str, str]  # a row's pinned text and its scrolling text, every cell cut and padded
+
+
+def _cut(texts: list[str], pr_width: int) -> Cut:
     widths = _widths(pr_width)
     cut = [
         (fit_tail if c.id == "pr" else fit)(texts[i], w)
         for i, (c, w) in enumerate(zip(COLUMNS, widths, strict=True))
     ]
-    pinned = SEPARATOR.join(cut[:PINNED])
-    scrolling = SEPARATOR.join(cut[PINNED:])
+    return SEPARATOR.join(cut[:PINNED]), SEPARATOR.join(cut[PINNED:])
+
+
+def view(cut: Cut, pr_width: int, offset: int, view_width: int | None) -> str:
+    """A cut row as one line. With ``view_width`` the pinned text stays, the rest is shifted
+    left by ``offset`` and clipped to the view; without it the whole table is returned."""
+    pinned, scrolling = cut
     if view_width is None:
         return pinned + SEPARATOR + scrolling
     offset = clamp_offset(offset, pr_width, view_width)
@@ -376,18 +387,23 @@ def _compose(texts: list[str], pr_width: int, offset: int, view_width: int | Non
     return _slice_cells(line, 0, min(view_width, cell_len(line)))
 
 
+def cut_row(parts: list[str], pr_width: int) -> Cut:
+    """The cut and padded cells of a row from ``cells()``; draw it with ``view``."""
+    return _cut([parts[c.index] for c in COLUMNS], pr_width)
+
+
 def row_line(
     parts: list[str], pr_width: int, offset: int = 0, view_width: int | None = None
 ) -> str:
     """One line from ``cells()``: every cell cut and padded to its column. With ``view_width``
     the first columns stay and the rest are shifted left by ``offset`` and clipped to the view;
     without it the whole table is returned."""
-    return _compose([parts[c.index] for c in COLUMNS], pr_width, offset, view_width)
+    return view(cut_row(parts, pr_width), pr_width, offset, view_width)
 
 
 def header_line(pr_width: int, offset: int = 0, view_width: int | None = None) -> str:
     """The column names, laid out exactly like ``row_line``."""
-    return _compose([c.header for c in COLUMNS], pr_width, offset, view_width)
+    return view(_cut([c.header for c in COLUMNS], pr_width), pr_width, offset, view_width)
 
 
 # -- ordering ----------------------------------------------------------------------------------

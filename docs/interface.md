@@ -842,16 +842,21 @@ forgectl stores no long-lived objects, so it has no labels of its own. Conventio
 
 The default list is the union of requested-from-you and authored-by-you, as two `prs` calls. Columns:
 
-| Column | Source |
-|---|---|
-| repo and number, title | the `prs` item |
-| badge | state, draft and the first blocker |
-| CI glyph | `ci.state` |
-| approvals | the bare `approvals` count on both hosts; the `1/2` form over the required count (on GitLab `approvals` plus the `approvals_left` of the approval rule) arrives with #86, because the snapshot does not expose the required count yet |
-| comments | `activity`: `comments_total`, `unresolved_threads`, `others_since_push` (new since push) and `awaiting_my_reply` |
-| age | since `head.pushed_at` (blank when it is null) and since `updated_at` |
+| Column | Header | Width | Source |
+|---|---|---|---|
+| repo and number | `PR` | at most 28, set per list | the `prs` item; a longer value is cut from the left, so the number stays visible |
+| note | `note` | 12 | `[refreshing]`, `[stale: code]` or `[changed]`; the cell is cut to 12 cells, and the detail pane does not repeat a stale reason |
+| badge | `badge` | 26 | state, draft and the first blocker |
+| CI glyph | `CI` | 2 | `ci.state` |
+| approvals | `appr` | 5 | the bare `approvals` count on both hosts; the `1/2` form over the required count (on GitLab `approvals` plus the `approvals_left` of the approval rule) arrives with #86, because the snapshot does not expose the required count yet |
+| review | `rev` | 3 | `review_decision` |
+| comments | `comments` | 20 | `activity`: `comments_total`, `unresolved_threads`, `others_since_push` (new since push) and `awaiting_my_reply` |
+| age | `age` | 9 | since `head.pushed_at` (blank when it is null) and since `updated_at` |
+| title | `title` | 40 | the `prs` item |
+| author | `author` | 20 | `@` and the author's login |
+| roles | `roles` | 18 | `authored`, `requested` or both joined with `+` |
 
-- **Layout.** A header line above the rows names the columns (`PR`, `note`, `badge`, `CI`, `appr`, `rev`, `comments`, `age`, `title`, `author`, `roles`); it is constant text and stays on the first line of the list while the rows scroll. Every cell is cut to its column width, by terminal cell width, with a trailing `…` (the PR column keeps its end, so the number stays visible, and is at most 28 cells wide), so a long value never moves the next column; an empty value stays as padding. The `note` column holds `[refreshing]`, `[stale: code]` or `[changed]`, cut to 12 cells. When the table is wider than the terminal, `left` and `right` (or `h` and `l`) scroll the columns after `note` by one column while the list has focus; `PR` and `note` stay in place, the header scrolls with the rows, the highlighted row is unchanged, and the offset is kept across refreshes and clamped to the table's width. Nothing scrolls when the table fits.
+- **Layout.** A header line above the rows names the columns (`PR`, `note`, `badge`, `CI`, `appr`, `rev`, `comments`, `age`, `title`, `author`, `roles`); it is constant text and stays on the first line of the list while the rows scroll. Every cell is cut to its column width, by terminal cell width, with a trailing `…` (the PR column keeps its end, so the number stays visible, and is at most 28 cells wide), so a long value never moves the next column; an empty value stays as padding. The `note` column holds `[refreshing]`, `[stale: code]` or `[changed]`, cut to 12 cells. When the table is wider than the terminal, `left` and `right` (or `h` and `l`) scroll the columns after `note` by one column while the list has focus; `PR` and `note` stay in place, the header scrolls with the rows, the highlighted row is unchanged, and the offset is kept across refreshes and clamped to the table's width. Nothing scrolls when the table fits. `home` and `end` stay the list's row jumps; the far ends of the table are reached by repeating `left` or `right` (or `h` or `l`).
 - **Grouping and order.** Rows group by repo. A "needs attention first" order puts rows with failing CI, new comments from others since the push, a thread awaiting my reply or changes requested first, then the rest; a key switches between it and the default order. Authors in `activity.ignore_authors` never move a row.
 - **Filters.** Authored by me or review-requested from me; CI failing; has new comments. Filters combine as an intersection, and the status bar names the active ones. `/` filters by text.
 - **Loading.** One `prs` call per query builds the rows, then `snapshot` runs per PR with bounded concurrency (`browse.concurrency`, default 4), visible rows first. Rows render as each snapshot arrives, with a per-row loading state and a progress count in the status bar. The tunables are `browse.concurrency` and `browse.full_refresh_every` ([Config](#config)); the rate-limit threshold is fixed. A failed snapshot marks its row with the error and does not block the others.

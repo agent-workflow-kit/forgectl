@@ -106,6 +106,14 @@ def test_the_offset_is_clamped_to_the_table() -> None:
     assert columns.clamp_offset(10_000, PR_W, 500) == 0  # the table fits: nothing scrolls
 
 
+@pytest.mark.parametrize("view", [1, 10, 20])
+def test_steps_do_not_move_when_there_is_no_room_to_scroll(view: int) -> None:
+    assert columns._scroll_room(PR_W, view) == 0
+    for direction in (1, -1):
+        assert columns.step_offset(0, direction, PR_W, view) == 0
+        assert columns.step_offset(7, direction, PR_W, view) == 7  # the offset is left as it is
+
+
 def test_steps_move_one_column_and_stop_at_the_ends() -> None:
     view = 80
     offset = 0
@@ -291,14 +299,34 @@ def test_the_offset_survives_a_refresh_and_is_clamped_after_a_resize() -> None:
         await pilot.press("R")
         await settle(app, pilot)
         assert app._hoffset == offset
-        await pilot.press("right", "right", "right", "right", "right", "right", "right", "right")
-        far = app._hoffset
-        assert far > offset
+        for _ in range(20):
+            await pilot.press("right")
+        furthest = columns.clamp_offset(10_000, app._pr_width, app._view_width())
+        assert furthest > offset and app._hoffset == furthest  # the far end is reached exactly
+        await pilot.resize_terminal(100, 14)  # still narrower than the table: clamped, not zero
+        await pilot.pause()
+        smaller = columns.clamp_offset(10_000, app._pr_width, app._view_width())
+        assert 0 < smaller < furthest and app._hoffset == smaller
         await pilot.resize_terminal(220, 14)
         await pilot.pause()
-        assert app._hoffset <= far
         assert app._hoffset == 0  # a table that fits does not scroll
         assert "roles" in header_text(app)
+
+    run_at(80, script)
+
+
+def test_a_right_press_keeps_the_highlight_and_the_vertical_scroll() -> None:
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        olist = app.query_one("#list", OptionList)
+        for _ in range(25):
+            await pilot.press("down")
+        await pilot.pause()
+        highlighted, scroll_y = olist.highlighted, olist.scroll_y
+        assert highlighted == 25 and scroll_y > 0
+        await pilot.press("right")
+        await pilot.pause()
+        assert app._hoffset > 0
+        assert olist.highlighted == highlighted and olist.scroll_y == scroll_y
 
     run_at(80, script)
 
@@ -333,3 +361,115 @@ def test_a_header_is_plain_text_even_beside_markup_shaped_rows() -> None:
         assert any("[@click=app.quit]" in p.plain for p in list_prompts(app))
 
     run_at(200, script, source)
+
+
+# -- geometry on the screen: header and rows start at the same x, nothing is clipped ----------
+
+
+def screen_lines(app: BrowseApp) -> list[str]:
+    return [strip.text for strip in app.screen._compositor.render_strips()]
+
+
+CELL_PREFIX = {"badge": "open", "ci": "✓", "title": "title ", "author": "@", "roles": "authored"}
+
+
+def assert_header_over_cells(app: BrowseApp) -> int:
+    """Every column name in view starts at the screen x where its cells start; returns how many
+    columns were checked."""
+    lines = screen_lines(app)
+    header_y = app.query_one("#header", Static).region.y
+    row_y = app.query_one("#list", OptionList).content_region.y
+    header, row = lines[header_y], lines[row_y]
+    checked = 0
+    for column in columns.COLUMNS:
+        prefix = CELL_PREFIX.get(column.id)
+        x = header.find(column.header)
+        if prefix is None or x < 0:
+            continue
+        assert row[x : x + len(prefix)] == prefix, (column.id, header, row)
+        checked += 1
+    return checked
+
+
+@pytest.mark.parametrize("width", [80, 120, 200])
+def test_header_names_start_at_the_same_screen_x_as_their_cells(width: int) -> None:
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        assert assert_header_over_cells(app) >= 1
+        olist = app.query_one("#list", OptionList)
+        assert app.query_one("#header", Static).content_region.x == olist.content_region.x
+        for _ in range(6):  # title, author and roles are in view after these steps at 80
+            await pilot.press("right")
+        await pilot.pause()
+        if app._hoffset:
+            assert assert_header_over_cells(app) >= 1
+
+    run_at(width, script, simple_source())
+
+
+def simple_source(count: int = 40) -> FakeSource:
+    """Short logins, a PR on both lists (so the roles cell is full), nothing a cell cuts."""
+    items = [make_item(n, title=f"title {n}", login="bob") for n in range(1, count + 1)]
+    return FakeSource(
+        authored=items,
+        requested=items,
+        snapshots={i["pr"]: snap(i["number"]) for i in items},
+    )
+
+
+@pytest.mark.parametrize("width", [80, 200])
+def test_the_last_column_is_fully_readable_with_a_vertical_scrollbar(width: int) -> None:
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        olist = app.query_one("#list", OptionList)
+        assert olist.show_vertical_scrollbar  # more rows than the height
+        for _ in range(20):
+            await pilot.press("right")
+        await pilot.pause()
+        assert app._hoffset == columns.clamp_offset(10_000, app._pr_width, app._view_width())
+        lines = screen_lines(app)[olist.content_region.y : olist.content_region.bottom]
+        assert all("…" not in line for line in lines), lines  # no cut by forgectl or Textual
+        assert all("authored+requested" in line for line in lines), lines
+
+    run_at(width, script, simple_source())
+
+
+# -- scrolling redraws the rows; it does not refilter or reorder them -------------------------
+
+
+def test_a_horizontal_scroll_does_not_run_the_filter_and_order_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+    real = columns.order
+
+    def counting(*args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        monkeypatch.setattr(columns, "order", counting)
+        olist = app.query_one("#list", OptionList)
+        for _ in range(4):
+            await pilot.press("down")
+        picked, scroll_y, before = olist.highlighted, olist.scroll_y, header_text(app)
+        await pilot.press("right", "right", "l")
+        await pilot.pause()
+        assert app._hoffset > 0 and header_text(app) != before
+        assert calls == []
+        rows = [p.plain for p in list_prompts(app)]
+        expected = columns.row_line(
+            columns.cells(app._visible[0], app._state(app._visible[0]), app.clock()),
+            app._pr_width,
+            app._hoffset,
+            app._view_width(),
+        )
+        assert rows[0] == expected and all(cell_len(r) == cell_len(rows[0]) for r in rows)
+        assert olist.highlighted == picked and olist.scroll_y == scroll_y
+        await pilot.resize_terminal(80, 20)  # a height-only resize
+        await pilot.pause()
+        assert calls == []
+        await pilot.resize_terminal(100, 20)  # a width change redraws, still without a refilter
+        await pilot.pause()
+        assert calls == []
+        assert cell_len(list_prompts(app)[0].plain) == app._view_width()
+
+    run_at(80, script)

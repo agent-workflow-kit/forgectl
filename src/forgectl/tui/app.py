@@ -45,6 +45,8 @@ enter   open the detail pane for the highlighted PR
 esc     close the detail pane or the filter
 o       open the PR in a browser; on a check in the detail pane, open the check
         (only an http or https url is opened)
+left    scroll the list sideways by one column (or h); the PR and note columns stay
+right   scroll the list sideways by one column the other way (or l)
 s       switch the order: by repo (default) or needs-attention first
 a       filter: authored by me
 v       filter: review requested from me
@@ -57,7 +59,6 @@ R       refresh all (both lists, every row, then the detail pane)
         and marks the row [stale: code]; [changed] marks a row whose data changed, until
         the next refresh or a key; the timed refresh re-reads only what may have changed
 
-left/right (or h/l) scroll the list sideways one column; the PR and note columns stay
 columns: PR  note  badge  CI  appr  rev  comments  age  title  author  roles
   note: [refreshing], [stale: code] or [changed]
   CI: ✓ passing, ✗ failing, … pending, - none, · loading, ! snapshot failed
@@ -115,6 +116,8 @@ class RowList(OptionList):
     """The list of rows. Left and right scroll the table sideways while it has focus; up and
     down still move the highlight. The table itself is drawn by ``BrowseApp``."""
 
+    # home and end are OptionList's row jumps and stay that way; the far ends of the table are
+    # reached by repeating left or right.
     BINDINGS = [
         Binding("left", "scroll_cols(-1)", "left", show=False),
         Binding("h", "scroll_cols(-1)", "left", show=False),
@@ -128,6 +131,10 @@ class RowList(OptionList):
     def on_resize(self, event: Any) -> None:
         self.app.relayout()  # type: ignore[attr-defined]
 
+    def watch_show_vertical_scrollbar(self, old: bool, new: bool) -> None:
+        # the scrollbar takes cells from the rows without changing this widget's size
+        self.app.relayout()  # type: ignore[attr-defined]
+
 
 class BrowseApp(App[None]):
     ENABLE_COMMAND_PALETTE = False  # its screenshot command would write forge text to a file
@@ -136,7 +143,7 @@ class BrowseApp(App[None]):
     #left { width: 3fr; }
     #detail { width: 2fr; display: none; border-left: solid $primary; padding: 0 1; }
     #filter { display: none; }
-    #header { height: 1; text-style: bold; }
+    #header { height: 1; text-style: bold; padding: 0 2; }  /* the list's border and padding */
     #list { text-wrap: nowrap; text-overflow: ellipsis; }
     #checks { height: auto; max-height: 12; }
     #footer { dock: bottom; height: 2; }
@@ -209,6 +216,8 @@ class BrowseApp(App[None]):
         self._snap_slots = asyncio.Semaphore(max(1, self.concurrency))
         self._row_by_pr: dict[str, Row] = {}
         self._pr_width = 0
+        self._cuts: list[columns.Cut] = []  # the cut cells of the visible rows, in the same order
+        self._painted_view = -1  # the view width the rows and the header were last drawn for
         self._hoffset = 0  # cells the scrolling columns are shifted left; kept across refreshes
         self._snap_done = 0
         self._snap_total = 0
@@ -435,15 +444,17 @@ class BrowseApp(App[None]):
             width = min(columns.PR_MAX_WIDTH, max((cell_len(p[0]) for p in parts), default=0))
             width = max(width, cell_len(columns.COLUMNS[0].header))
             self._pr_width = width
-            self._hoffset = columns.clamp_offset(self._hoffset, width, self._view_width())
+            self._painted_view = self._view_width()
+            self._hoffset = columns.clamp_offset(self._hoffset, width, self._painted_view)
             self._paint_header()
-            prompts = [self._prompt(p, self._state(r)) for p, r in zip(parts, visible, strict=True)]
+            cuts = [columns.cut_row(p, width) for p in parts]
+            prompts = [self._prompt(c, self._state(r)) for c, r in zip(cuts, visible, strict=True)]
         except Exception as exc:  # bad data reaches the status line, not a traceback
             self._list_note = self._internal(exc)
             self._status("")
             return
         self._visible = visible
-        self._pr_width = width
+        self._cuts = cuts
         olist = self.query_one("#list", OptionList)
         prs = [r.pr for r in visible]
         if prs == self._shown_prs and olist.option_count == len(prs):
@@ -620,33 +631,49 @@ class BrowseApp(App[None]):
         olist = self.query_one("#list", OptionList)
         index = self._shown_prs.index(pr)
         try:
-            parts = columns.cells(row, new, self.clock())
-            olist.replace_option_prompt_at_index(index, self._prompt(parts, new))
+            cut = columns.cut_row(columns.cells(row, new, self.clock()), self._pr_width)
+            self._cuts[index] = cut
+            olist.replace_option_prompt_at_index(index, self._prompt(cut, new))
         except Exception as exc:  # bad data reaches the status line, not a traceback
             self._list_note = self._internal(exc)
             self._status("")
         self._paint_bar()
 
-    def _prompt(self, parts: list[str], state: columns.RowState) -> Content:
+    def _prompt(self, cut: columns.Cut, state: columns.RowState) -> Content:
         """One row's text; a changed row is also bold."""
-        content = safe.plain(
-            columns.row_line(parts, self._pr_width, self._hoffset, self._view_width())
-        )
+        content = safe.plain(columns.view(cut, self._pr_width, self._hoffset, self._view_width()))
         return content.stylize("bold", 0, len(content)) if state.changed else content
 
     def _view_width(self) -> int:
-        """Cells the list can show; the whole table before the list has a size."""
-        width = self.query_one("#list", OptionList).size.width
-        return width if width > 0 else 10_000
+        """Cells the rows can use: the list's content without its scrollbar; the whole table
+        before the list has a size."""
+        olist = self.query_one("#list", OptionList)
+        return olist.scrollable_content_region.width if olist.size.width > 0 else 10_000
 
     def _paint_header(self) -> None:
         line = columns.header_line(self._pr_width, self._hoffset, self._view_width())
         self.query_one("#header", Static).update(safe.plain(line))
 
+    def _redraw(self) -> None:
+        """Draw the header and the rows again for the current offset and view width, from the
+        cells already built: no reorder, no refilter, the highlight and scroll stay."""
+        olist = self.query_one("#list", OptionList)
+        self._painted_view = self._view_width()
+        self._hoffset = columns.clamp_offset(self._hoffset, self._pr_width, self._painted_view)
+        self._paint_header()
+        if olist.option_count != len(self._cuts):
+            return  # the rows are being rebuilt; _apply_filter draws them
+        try:
+            for i, (cut, row) in enumerate(zip(self._cuts, self._visible, strict=True)):
+                olist.replace_option_prompt_at_index(i, self._prompt(cut, self._state(row)))
+        except Exception as exc:  # bad data reaches the status line, not a traceback
+            self._list_note = self._internal(exc)
+            self._status("")
+
     def relayout(self) -> None:
-        """The list was resized: clamp the offset and redraw the header and the rows."""
-        if self.is_running and self._loaded_once:
-            self._apply_filter()
+        """The list was resized or got a scrollbar: redraw only when its usable width changed."""
+        if self.is_running and self._loaded_once and self._view_width() != self._painted_view:
+            self._redraw()
 
     def scroll_columns(self, direction: int) -> None:
         """Left (-1) or right (+1) by one column; the highlight and the vertical scroll stay."""
@@ -654,7 +681,7 @@ class BrowseApp(App[None]):
         new = columns.step_offset(self._hoffset, direction, self._pr_width, view)
         if new != self._hoffset:
             self._hoffset = new
-            self._apply_filter()
+            self._redraw()
 
     def _highlighted_row(self) -> Row | None:
         index = self.query_one("#list", OptionList).highlighted
