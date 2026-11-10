@@ -50,6 +50,7 @@ HANDLER_MODULES: tuple[str, ...] = (
     "forgectl.exportcmd",
     "forgectl.reads",
     "forgectl.snapshot_reads",  # snapshot, comments, reviews, ci (#12)
+    "forgectl.browse",
 )
 
 _loaded = False
