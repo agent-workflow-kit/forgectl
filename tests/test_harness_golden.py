@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +23,7 @@ def golden_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     directory.mkdir()
     monkeypatch.setattr(golden, "GOLDEN_DIR", directory)
     monkeypatch.delenv(golden.UPDATE_ENV, raising=False)
+    monkeypatch.setattr(golden, "session_update", False)
     for name in golden.CI_VARS:
         monkeypatch.delenv(name, raising=False)
     return directory
@@ -41,7 +45,7 @@ def test_differing_output_fails_with_a_diff(golden_dir: Path) -> None:
 
 
 def test_missing_golden_fails_and_is_not_created(golden_dir: Path) -> None:
-    with pytest.raises(AssertionError, match=golden.UPDATE_ENV):
+    with pytest.raises(AssertionError, match="make golden"):
         golden.assert_golden("new", GOOD, schema_id=ENVELOPE_ID)
     assert not (golden_dir / "new.json").exists()
 
@@ -126,3 +130,76 @@ def test_a_real_cli_output_against_a_checked_in_golden(run_forgectl: Any) -> Non
     assert done.returncode == 2
     envelope = json.loads(done.stdout)
     golden.assert_golden("harness/usage-error", envelope, schema_id=ENVELOPE_ID)
+
+
+# End to end: a child pytest run with the real plugin, against a temporary golden directory.
+
+REPO = Path(__file__).resolve().parents[1]
+INNER_TEST = """
+import os
+from pathlib import Path
+
+from tests.harness import golden
+
+
+def test_value() -> None:
+    golden.GOLDEN_DIR = Path(os.environ["INNER_GOLDEN_DIR"])
+    golden.assert_golden("x", {"a": 2}, schema_id=None)
+"""
+
+
+def _inner(tmp_path: Path, *args: str, env: dict[str, str] | None = None) -> Any:
+    work = tmp_path / "inner"
+    work.mkdir(exist_ok=True)
+    (work / "conftest.py").write_text('pytest_plugins = ("tests.harness.fixtures",)\n')
+    (work / "test_inner.py").write_text(INNER_TEST)
+    home = tmp_path / "inner-home"
+    home.mkdir(exist_ok=True)
+    child_env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(home),
+        "PYTHONPATH": str(REPO),
+        "INNER_GOLDEN_DIR": str(tmp_path / "inner-golden"),
+        **(env or {}),
+    }
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q", *args],
+        cwd=work,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+
+def test_normal_run_never_rewrites_a_golden(tmp_path: Path) -> None:
+    target = tmp_path / "inner-golden" / "x.json"
+    target.parent.mkdir()
+    target.write_text(golden.render({"a": 1}), encoding="utf-8")
+    done = _inner(tmp_path)
+    assert done.returncode == 1, done.stdout
+    assert "golden x differs" in done.stdout
+    assert json.loads(target.read_text()) == {"a": 1}
+
+
+def test_update_golden_option_regenerates_end_to_end(tmp_path: Path) -> None:
+    target = tmp_path / "inner-golden" / "x.json"
+    done = _inner(tmp_path, "--update-golden")
+    assert done.returncode == 0, done.stdout
+    assert json.loads(target.read_text()) == {"a": 2}
+    assert _inner(tmp_path).returncode == 0  # a normal run now matches
+
+
+def test_env_var_survives_the_per_test_environment_scrub(tmp_path: Path) -> None:
+    # Regression for #84: the shared fixture clears FORGECTL_* before each test.
+    done = _inner(tmp_path, env={golden.UPDATE_ENV: "1"})
+    assert done.returncode == 0, done.stdout
+    assert (tmp_path / "inner-golden" / "x.json").exists()
+
+
+def test_update_golden_option_is_refused_in_ci(tmp_path: Path) -> None:
+    done = _inner(tmp_path, "--update-golden", env={"CI": "true"})
+    assert done.returncode == 1, done.stdout
+    assert "refused in CI" in done.stdout
+    assert not (tmp_path / "inner-golden" / "x.json").exists()
