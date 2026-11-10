@@ -170,6 +170,10 @@ def test_browse_refresh_interval_accepts_zero_to_disable(home: Path, value: str)
         "browse: {concurrency: 17}\n",
         "browse: {concurrency: true}\n",
         "browse: {interval: 5}\n",
+        "browse: {detail_collapsed: [diff]}\n",
+        "browse: {detail_collapsed: [Changes]}\n",
+        "browse: {detail_collapsed: changes}\n",
+        "browse: {detail_collapsed: [1]}\n",
     ],
 )
 def test_browse_refuses_bad_values(home: Path, text: str) -> None:
@@ -1431,7 +1435,12 @@ def test_hash_is_sha256_of_sorted_key_json_of_the_merged_config_after_defaults(
         "repos": {},
         "hidden_repos": [],
         "activity": {"ignore_authors": []},
-        "browse": {"refresh_interval": 120.0, "full_refresh_every": 5, "concurrency": 4},
+        "browse": {
+            "refresh_interval": 120.0,
+            "full_refresh_every": 5,
+            "concurrency": 4,
+            "detail_collapsed": ["changes"],
+        },
         "hooks": {"pre-merge": [], "post-merge": [], "pre-post": [], "post-post": []},
     }
     assert loaded.config_hash == hashlib.sha256(canonical(expected).encode()).hexdigest()
@@ -1529,3 +1538,13 @@ def test_loading_does_not_mutate_its_inputs(home: Path) -> None:
     write(default_file(home), "retries: 1\n")
     load_config(None, env=env)
     assert env == before
+
+
+def test_browse_detail_collapsed_defaults_to_the_changes_and_takes_section_names(
+    home: Path,
+) -> None:
+    assert load(home, "").config.browse.detail_collapsed == ("changes",)
+    text = "browse: {detail_collapsed: [ci, comments]}\n"
+    assert load(home, text).config.browse.detail_collapsed == ("ci", "comments")
+    assert load(home, "browse: {detail_collapsed: []}\n").config.browse.detail_collapsed == ()
+    assert load(home, "").config_hash != load(home, "browse: {detail_collapsed: []}\n").config_hash

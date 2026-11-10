@@ -38,6 +38,7 @@ def run_browse(
         tunables = {
             "full_refresh_every": browse.full_refresh_every,
             "concurrency": browse.concurrency,
+            "detail_collapsed": browse.detail_collapsed,
         }
     app = BrowseApp(
         source or LiveSource(config_path=config_path, timeout=timeout),
