@@ -1,0 +1,9 @@
+{
+  "access_level": 30,
+  "expires_at": null,
+  "id": 12,
+  "name": "User 2",
+  "state": "active",
+  "username": "user-2",
+  "web_url": "https://gitlab.com/user-2"
+}

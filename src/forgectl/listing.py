@@ -7,7 +7,15 @@ from typing import Any
 from . import registry
 from .backends import create_backend
 from .errors import ForgectlError
-from .fanout import PrsArgs, candidate_hosts, check_me_spelling, host_error, resolve_me, run_prs
+from .fanout import (
+    PrsArgs,
+    candidate_hosts,
+    check_me_spelling,
+    entry_error,
+    host_error,
+    resolve_me,
+    run_prs,
+)
 from .identifiers import RepoRef
 from .output import emit_warning
 from .reads import make_env
@@ -68,9 +76,7 @@ def whoami(inv: registry.Invocation) -> dict[str, Any]:
                 " prs uses me, posts and rules act as the authenticated account"
             )
         if identity.error is not None:
-            errors.append(
-                host_error(host, ForgectlError(identity.error["code"], identity.error["message"]))
-            )
+            errors.append(host_error(host, entry_error(identity.error)))
     output = {"hosts": entries, "errors": errors}
     if errors:
         shown = ", ".join(f"{e['host']} ({e['code']})" for e in errors)

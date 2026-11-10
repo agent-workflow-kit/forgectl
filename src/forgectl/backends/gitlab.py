@@ -909,6 +909,11 @@ class GitLabBackend:
         level = data.get("access_level")
         if isinstance(level, bool) or not isinstance(level, int) or level < 30:
             return False
+        return self._member_in_force(data)
+
+    def _member_in_force(self, data: Mapping[str, Any]) -> bool:
+        """Whether the membership counts at all: active user and seat, not expired. The level is
+        checked separately."""
         if data.get("state") != "active":
             return False
         if "membership_state" in data and data["membership_state"] != "active":
@@ -1148,7 +1153,9 @@ class GitLabBackend:
     # -- the rest of the protocol (other issues) ---------------------------------------------------
 
     def list_prs(self, query: m.PrQuery) -> m.PrPage:
-        raise _not_yet("prs", 19)  # TODO(#19): GitLab prs
+        from . import gitlab_lists  # lazy: gitlab_lists imports this module
+
+        return gitlab_lists.list_prs(self, query)
 
     def snapshot(self, ref: PrRef) -> m.Snapshot:
         from . import gitlab_snapshot  # (#16) lazy: that module imports this one
@@ -1186,10 +1193,14 @@ class GitLabBackend:
         return gitlab_ci.ci(ref, self.get_pr)
 
     def access(self, repo: RepoRef, user: str) -> m.AccessResult:
-        raise _not_yet("access", 19)  # TODO(#19): GitLab access; `_member_can_push` is the rule
+        from . import gitlab_lists
+
+        return gitlab_lists.access(self, repo, user)
 
     def whoami(self, host: str) -> m.Identity:
-        raise _not_yet("whoami", 19)  # TODO(#19): GitLab whoami
+        from . import gitlab_lists
+
+        return gitlab_lists.whoami(self, host)
 
     def merge(self, pr: m.PR, *, sha: str, method: str | None) -> m.MergeAnswer:
         raise _not_yet("merge", 22)  # TODO(#22): GitLab merge

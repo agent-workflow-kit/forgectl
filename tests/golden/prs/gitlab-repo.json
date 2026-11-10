@@ -1,0 +1,121 @@
+{
+  "complete": true,
+  "errors": [],
+  "hosts_queried": [
+    "gitlab.com"
+  ],
+  "items": [
+    {
+      "author": {
+        "id": "11",
+        "is_bot": false,
+        "login": "user-1"
+      },
+      "base": {
+        "ref": "main"
+      },
+      "draft": false,
+      "head": {
+        "is_fork": false,
+        "ref": "feature/c31",
+        "repo": "gitlab.com/user-9/proj",
+        "sha": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+      },
+      "labels": [
+        "needs review",
+        "type::feature"
+      ],
+      "number": 31,
+      "pr": "gitlab.com/user-9/proj#31",
+      "pr_id": "gid://gitlab/MergeRequest/90031",
+      "repo": "gitlab.com/user-9/proj",
+      "state": "open",
+      "title": "Change 31",
+      "updated_at": "2026-10-05T12:30:00.000Z",
+      "url": "https://gitlab.com/user-9/proj/-/merge_requests/31"
+    },
+    {
+      "author": {
+        "id": "13",
+        "is_bot": false,
+        "login": "user-3"
+      },
+      "base": {
+        "ref": "main"
+      },
+      "draft": true,
+      "head": {
+        "is_fork": true,
+        "ref": "patch-1",
+        "repo": "gitlab.com/user-8/proj",
+        "sha": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+      },
+      "labels": [],
+      "number": 29,
+      "pr": "gitlab.com/user-9/proj#29",
+      "pr_id": "gid://gitlab/MergeRequest/90029",
+      "repo": "gitlab.com/user-9/proj",
+      "state": "open",
+      "title": "Change 29",
+      "updated_at": "2026-10-04T08:00:00.000Z",
+      "url": "https://gitlab.com/user-9/proj/-/merge_requests/29"
+    },
+    {
+      "author": {
+        "id": "11",
+        "is_bot": false,
+        "login": "user-1"
+      },
+      "base": {
+        "ref": "main"
+      },
+      "draft": false,
+      "head": {
+        "is_fork": true,
+        "ref": "feature/c12",
+        "repo": null,
+        "sha": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+      },
+      "labels": [],
+      "number": 12,
+      "pr": "gitlab.com/user-9/proj#12",
+      "pr_id": "gid://gitlab/MergeRequest/90012",
+      "repo": "gitlab.com/user-9/proj",
+      "state": "open",
+      "title": "Change 12",
+      "updated_at": "2026-10-02T07:15:00.000Z",
+      "url": "https://gitlab.com/user-9/proj/-/merge_requests/12"
+    },
+    {
+      "author": {
+        "id": "11",
+        "is_bot": false,
+        "login": "user-1"
+      },
+      "base": {
+        "ref": "main"
+      },
+      "draft": false,
+      "head": {
+        "is_fork": null,
+        "ref": "feature/c5",
+        "repo": null,
+        "sha": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+      },
+      "labels": [],
+      "number": 5,
+      "pr": "gitlab.com/user-9/proj#5",
+      "pr_id": "gid://gitlab/MergeRequest/90005",
+      "repo": "gitlab.com/user-9/proj",
+      "state": "merged",
+      "title": "Change 5",
+      "updated_at": "2026-10-01T06:00:00.000Z",
+      "url": "https://gitlab.com/user-9/proj/-/merge_requests/5"
+    }
+  ],
+  "rate_limit": {
+    "host": "gitlab.com",
+    "remaining": null,
+    "reset_at": null
+  }
+}
