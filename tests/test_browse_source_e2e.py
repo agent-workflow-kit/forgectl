@@ -385,6 +385,11 @@ def test_the_first_load_reads_a_row_through_the_bulk_query_not_one_by_one(
     async def go() -> None:
         async with app.run_test(size=(140, 50)) as pilot:
             await _settle(app, pilot)
+            for _ in range(300):  # the rows after PR 7 are still read one by one: let them end
+                if not app._busy:
+                    break
+                await pilot.pause(0.1)
+            await _settle(app, pilot)
             assert app._states[PR].status == "loaded"
 
     asyncio.run(go())
