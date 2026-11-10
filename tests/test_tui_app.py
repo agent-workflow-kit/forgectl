@@ -450,6 +450,7 @@ def test_there_is_no_write_action() -> None:
         "v",
         "f",
         "n",
+        "H",
         *"123456",  # the detail sections: view only
     }
     assert not hasattr(app, "action_merge")
@@ -642,7 +643,7 @@ def test_control_and_bidi_characters_become_visible_markers() -> None:
         text = list_prompts(app)[0].plain
         assert "<U+202E>" in text and "<U+001B>" in text
 
-    drive(source, script)
+    drive(source, script, size=(160, 50))  # wide enough that the title is not clipped
 
 
 def test_huge_fields_are_bounded() -> None:
