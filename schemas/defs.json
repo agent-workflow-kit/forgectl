@@ -1114,7 +1114,7 @@
                 "commit_date",
                 null
               ],
-              "description": "snapshot only. push_event: a host push event for the head sha; commit_date: the head commit's date, which can precede the push. null exactly when pushed_at is null."
+              "description": "snapshot only. push_event: a host push event for the head sha; commit_date: a commit's committer date (the head commit's, or a PR commit's), which can precede the push. null exactly when pushed_at is null."
             }
           },
           "additionalProperties": false,
