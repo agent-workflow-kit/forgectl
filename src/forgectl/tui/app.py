@@ -870,6 +870,8 @@ class BrowseApp(App[None]):
             self._snapshot_arrived(pr, self._failed_state(self._states.get(pr), error))
 
     def _show_detail(self, pr: str, detail: render.Detail, diff_note: str | None) -> None:
+        if pr != self._detail_pr:  # another PR starts on its first check
+            self.query_one("#checks", OptionList).highlighted = None
         self._detail_pr = pr
         self._detail_url = detail.url
         self._detail_checks = detail.checks

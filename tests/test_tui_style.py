@@ -13,7 +13,7 @@ from textual.widgets import OptionList
 from forgectl.tui import render, safe, style
 from forgectl.tui.app import BrowseApp
 
-from .test_tui_app import PR1, as_content, content_of, drive, settle
+from .test_tui_app import PR1, PR2, as_content, content_of, drive, settle
 from .tui_fakes import (
     FakeSource,
     make_check,
@@ -608,6 +608,32 @@ def test_theme_change_keeps_the_selected_check() -> None:
         app.theme = "textual-light"
         await settle(app, pilot)
         assert checks.highlighted == 2
+
+    drive(source, script)
+
+
+def test_opening_another_pull_request_starts_on_its_first_check() -> None:
+    def checks() -> list:
+        return [make_check(f"c{i}", "passing", None) for i in range(4)]
+
+    source = FakeSource(
+        authored=[make_item(1), make_item(2)],
+        snapshots={PR1: make_snapshot(1, checks=checks()), PR2: make_snapshot(2, checks=checks())},
+        diffs={PR1: make_diff(PR1, DIFF), PR2: make_diff(PR2, DIFF)},
+    )
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("enter")
+        await settle(app, pilot)
+        await pilot.press("3")
+        await settle(app, pilot)
+        first = app._detail_pr
+        checks_list = app.query_one("#checks", OptionList)
+        checks_list.highlighted = 2
+        await pilot.press("escape", "down", "enter")
+        await settle(app, pilot)
+        assert app._detail_pr != first
+        assert checks_list.highlighted == 0
 
     drive(source, script)
 
