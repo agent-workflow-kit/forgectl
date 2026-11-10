@@ -228,7 +228,9 @@ def test_load_list_names_the_failed_host_once() -> None:
     assert [r.pr for r in got.rows] == [make_item(1)["pr"]]
 
 
-def test_run_browse_defaults_to_the_live_source(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_browse_defaults_to_the_live_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     from forgectl.tui import run as run_mod
 
     seen: dict[str, Any] = {}
@@ -236,7 +238,7 @@ def test_run_browse_defaults_to_the_live_source(monkeypatch: pytest.MonkeyPatch)
     class StubApp:
         return_code = 0
 
-        def __init__(self, source: Any, opener: Any, *, focus: str | None) -> None:
+        def __init__(self, source: Any, opener: Any, **kwargs: Any) -> None:
             seen["source"] = source
 
         def run(self) -> None:
@@ -246,7 +248,9 @@ def test_run_browse_defaults_to_the_live_source(monkeypatch: pytest.MonkeyPatch)
             return {"intent": "back", "selected": [], "merged": []}
 
     monkeypatch.setattr(run_mod, "BrowseApp", StubApp)
-    run_mod.run_browse(focus=None, config_path="/nonexistent.yaml")
+    config = tmp_path / "config.yaml"
+    config.write_text("", encoding="utf-8")
+    run_mod.run_browse(focus=None, config_path=str(config))
     assert isinstance(seen["source"], LiveSource)
 
 

@@ -85,6 +85,17 @@ def duration(value: str) -> float:
     return seconds
 
 
+def duration_or_off(value: str) -> float:
+    """A duration of at least 1 s, or a bare `0` for "off" (`browse --interval`); see interface
+    Config."""
+    if value == "0":
+        return 0.0
+    seconds = duration(value)
+    if seconds < 1:
+        _bad(f"an interval is at least 1s (or 0 for off): {value!r}")
+    return seconds
+
+
 def time_or_duration(value: str) -> str:
     """RFC 3339 with an offset, or a duration; returned as given."""
     if _RFC3339_RE.fullmatch(value):
@@ -448,7 +459,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("browse", "terminal browser (needs the tui extra)")
     # TODO(#5): the URL forms of --focus, through identifiers.py (see browse.parse_focus).
     _once(p, "--focus", type=nonempty, metavar="PR")
-    # TODO(#59): --interval D (a duration or 0) is not parsed yet.
+    _once(p, "--interval", type=duration_or_off, metavar="D")
     _once(p, "--result-file", dest="result_file", type=nonempty, metavar="PATH")
 
     p = add("export", "audit records as JSONL")

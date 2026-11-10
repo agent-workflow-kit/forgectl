@@ -191,7 +191,10 @@ def test_the_handler_writes_the_apps_result_to_the_result_file(
     seen: list[str | None] = []
 
     def fake_run(
-        focus: str | None, config_path: str | None = None, timeout: float | None = None
+        focus: str | None,
+        config_path: str | None = None,
+        timeout: float | None = None,
+        interval: float | None = None,
     ) -> dict[str, Any]:
         seen.append(focus)
         return _result(intent="open", selected=[PR])
@@ -354,7 +357,10 @@ def test_the_timeout_flag_reaches_the_app(monkeypatch: pytest.MonkeyPatch) -> No
     seen: list[float | None] = []
 
     def fake_run(
-        focus: str | None, config_path: str | None = None, timeout: float | None = None
+        focus: str | None,
+        config_path: str | None = None,
+        timeout: float | None = None,
+        interval: float | None = None,
     ) -> dict[str, Any]:
         seen.append(timeout)
         return _result()
@@ -362,3 +368,24 @@ def test_the_timeout_flag_reaches_the_app(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(browse, "_run_app", fake_run)
     assert main(["browse", "--timeout", "3s"]) == 0
     assert seen == [3.0]
+
+
+@pytest.mark.parametrize(("flag", "expected"), [("0", 0.0), ("90s", 90.0), ("2m", 120.0)])
+def test_the_interval_flag_reaches_the_app(
+    monkeypatch: pytest.MonkeyPatch, flag: str, expected: float
+) -> None:
+    seen: list[float | None] = []
+
+    def fake_run(
+        focus: str | None,
+        config_path: str | None = None,
+        timeout: float | None = None,
+        interval: float | None = None,
+    ) -> dict[str, Any]:
+        seen.append(interval)
+        return _result()
+
+    monkeypatch.setattr(browse, "_run_app", fake_run)
+    assert main(["browse", "--interval", flag]) == 0
+    assert main(["browse"]) == 0
+    assert seen == [expected, None]  # no flag: the config decides, in run_browse

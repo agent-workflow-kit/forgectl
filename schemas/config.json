@@ -281,6 +281,53 @@
       "required": [],
       "default": {}
     },
+    "browse": {
+      "type": "object",
+      "properties": {
+        "refresh_interval": {
+          "anyOf": [
+            {
+              "const": 0
+            },
+            {
+              "type": "number",
+              "minimum": 1
+            },
+            {
+              "type": "string",
+              "pattern": "^0*[1-9][0-9]*(?:\\.[0-9]+)?s?$"
+            },
+            {
+              "type": "string",
+              "pattern": "^0*[1-9][0-9]{3,}(?:\\.[0-9]+)?ms$"
+            },
+            {
+              "type": "string",
+              "pattern": "^(?=.*[1-9])[0-9]+(?:\\.[0-9]+)?(?:m|h|d)$"
+            }
+          ],
+          "default": "120s",
+          "description": "Seconds between the automatic refreshes of `browse`, at least 1 (a number, or a string such as '90s'); a value in minutes, hours or days under 1 second is refused by forgectl itself. The number 0 turns them off. The flag --interval wins."
+        },
+        "full_refresh_every": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 5,
+          "description": "Every Nth automatic refresh re-snapshots every PR; the others only the PRs that may have changed."
+        },
+        "concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16,
+          "default": 4,
+          "description": "Snapshot reads `browse` runs at once."
+        }
+      },
+      "additionalProperties": false,
+      "required": [],
+      "default": {}
+    },
     "hooks": {
       "type": "object",
       "properties": {

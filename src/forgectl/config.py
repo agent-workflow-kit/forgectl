@@ -181,7 +181,21 @@ def _empty_map() -> Mapping[str, Any]:
     return MappingProxyType({})
 
 
+MIN_REFRESH_INTERVAL = 1.0  # seconds: a shorter interval would hammer the forge
+
+
+def _interval_or_off(value: object) -> float:
+    """A duration of at least a second, or the number 0 (not a string, not a bool) for "off"."""
+    if isinstance(value, int | float) and not isinstance(value, bool) and value == 0:
+        return 0.0
+    seconds = parse_duration(value)
+    if seconds < MIN_REFRESH_INTERVAL:
+        raise ValueError("a refresh interval is at least 1s (or the number 0 for off)")
+    return seconds
+
+
 Duration = Annotated[float, BeforeValidator(parse_duration)]
+IntervalOrOff = Annotated[float, BeforeValidator(_interval_or_off)]
 Retries = Annotated[int, Field(strict=True, ge=0, le=10)]
 BinName = Annotated[str, AfterValidator(_bin_name)]
 Name = Annotated[str, _matches(_NAME_RE, "name: 1 to 64 of letters, digits and . _ @ -")]
@@ -235,6 +249,12 @@ class Activity(_Model):
     ignore_authors: ArgList0 = ()
 
 
+class Browse(_Model):
+    refresh_interval: IntervalOrOff = 120.0  # seconds between automatic refreshes; 0 is off
+    full_refresh_every: Annotated[int, Field(strict=True, ge=1, le=1000)] = 5
+    concurrency: Annotated[int, Field(strict=True, ge=1, le=16)] = 4  # snapshot reads at once
+
+
 class Hooks(_Model):
     pre_merge: PreHooks = Field(default=(), alias="pre-merge")
     post_merge: PostHooks = Field(default=(), alias="post-merge")
@@ -251,6 +271,7 @@ class Config(_Model):
     hosts: HostMap = Field(default_factory=_empty_map)
     repos: RepoMap = Field(default_factory=_empty_map)
     activity: Activity = Field(default_factory=Activity)
+    browse: Browse = Field(default_factory=Browse)
     hooks: Hooks = Field(default_factory=Hooks)
 
 

@@ -7,6 +7,8 @@ only through ``safe`` and ``render``, as ``Content`` that is never parsed as mar
 from __future__ import annotations
 
 import asyncio
+import inspect
+import math
 import threading
 from collections import deque
 from collections.abc import Callable
@@ -17,8 +19,10 @@ from rich.cells import cell_len
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.events import Key
+from textual.content import Content
+from textual.events import Event, Key
 from textual.screen import ModalScreen
+from textual.timer import Timer
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
@@ -26,10 +30,12 @@ from forgectl.errors import ForgectlError
 
 from . import columns, render, safe
 from .opener import Opener, OpenRefused, is_openable
+from .refresh import BACKOFF_FACTOR, RateLimits, host_of, needs_snapshot
 from .source import DataSource, Listing, Row, load_list
+from .source_live import Cancelled
 
-DEFAULT_CONCURRENCY = 4  # snapshots in flight at once; a small default
-# todo(#59): config key for snapshot concurrency (and its schema entry)
+DEFAULT_CONCURRENCY = 4  # snapshots in flight at once; `browse.concurrency` sets it
+DEFAULT_FULL_REFRESH_EVERY = 5  # `browse.full_refresh_every`
 
 HELP = """\
 q       quit
@@ -46,7 +52,10 @@ f       filter: CI failing
 n       filter: new comments from others
         (filters combine as an intersection; the status bar names them)
 r       refresh selected (the PR in the detail pane, else the highlighted PR)
-R       refresh all (both lists, then the PR in the detail pane)
+R       refresh all (both lists, every row, then the detail pane)
+        rows keep their last data meanwhile ([refreshing]); a failed refresh keeps it
+        and marks the row [stale: code]; [changed] marks a row whose data changed, until
+        the next refresh or a key; the timed refresh re-reads only what may have changed
 
 columns: PR  badge  CI  approvals  review  comments  age  title
   CI: ✓ passing, ✗ failing, … pending, - none, · loading, ! snapshot failed
@@ -137,8 +146,28 @@ class BrowseApp(App[None]):
         focus: str | None = None,
         concurrency: int = DEFAULT_CONCURRENCY,
         clock: Callable[[], datetime] = columns.utc_now,
+        refresh_interval: float = 0,
+        full_refresh_every: int = DEFAULT_FULL_REFRESH_EVERY,
     ) -> None:
         super().__init__()
+        # Seconds between automatic refreshes; 0, less, or not a number means off.
+        valid = isinstance(refresh_interval, int | float) and math.isfinite(refresh_interval)
+        self.refresh_interval = float(refresh_interval) if valid and refresh_interval > 0 else 0.0
+        self.full_refresh_every = max(1, full_refresh_every)
+        self.refresh_timer: Timer | None = None
+        self._cycle_listed = True  # the current refresh's `prs` calls gave at least one answer
+        self._busy = False  # a refresh (list, then the row snapshots) is in progress
+        self._loaded_once = False
+        self._last_refresh: datetime | None = None
+        self._auto_cycles = 0  # automatic cycles since start or the last manual refresh all
+        self._rates = RateLimits()
+        self._host_last: dict[str, datetime] = {}  # when a host's rows were last read, by cycle
+        self._deferred: set[str] = set()  # PRs that need a read the backoff put off
+        self._unlisted: set[str] = set()  # kept from an incomplete listing, shown stale
+        self._added: set[str] = set()  # PRs listed since the first load, not yet read
+        self._list_complete = True
+        self._list_errors = 0
+        self._source_cancels = _accepts_cancelled(source)
         self.concurrency = max(0, concurrency)  # 0: the rows' snapshots are not loaded
         self.clock = clock
         self.source = source
@@ -162,7 +191,6 @@ class BrowseApp(App[None]):
         self._snap_done = 0
         self._snap_total = 0
         self._filter = ""
-        self._loading = False
         self._opened = False  # an `o` succeeded: `selected` is the PR it acted on
         self._list_note: str | None = None  # a pending list error, kept on the status line
         self._detail_note: str | None = None  # how the last detail load ended
@@ -200,6 +228,29 @@ class BrowseApp(App[None]):
         self._start_list(refresh_detail=False)
         if self.focus_pr:
             self._start_detail(self.focus_pr)
+        if self.refresh_interval > 0:
+            self.refresh_timer = self.set_interval(self.refresh_interval, self._tick)
+
+    def _tick(self) -> None:
+        """The automatic refresh. A tick that finds a refresh, a detail load or a modal in the
+        way is skipped, not queued: the next tick tries again."""
+        if self._busy or self._detail_loading is not None or len(self.screen_stack) > 1:
+            return
+        self._auto_cycles += 1
+        self._start_list(refresh_detail=True, auto=True)
+
+    async def on_event(self, event: Event) -> None:
+        if isinstance(event, Key) and self._clear_changed():
+            self._apply_filter()
+        await super().on_event(event)
+
+    def _clear_changed(self) -> bool:
+        any_changed = False
+        for state in self._states.values():
+            if state.changed:
+                state.changed = False
+                any_changed = True
+        return any_changed
 
     # -- status ---------------------------------------------------------------------------
 
@@ -217,34 +268,125 @@ class BrowseApp(App[None]):
 
     # -- list -----------------------------------------------------------------------------
 
-    def _start_list(self, *, refresh_detail: bool) -> None:
-        self._loading = True
-        self.run_worker(self._load_list(refresh_detail), group="list")
+    def _start_list(self, *, refresh_detail: bool, auto: bool = False) -> None:
+        """Start a refresh: `prs`, then the row snapshots. ``auto`` is the timed kind, which
+        re-reads only what may have changed; the others re-read every row."""
+        self._busy = True
+        self._clear_changed()  # a highlight lasts until the next cycle
+        self.run_worker(self._load_list(refresh_detail, auto), group="list")
 
-    async def _load_list(self, refresh_detail: bool) -> None:
-        self._status("loading...")
+    async def _load_list(self, refresh_detail: bool, auto: bool) -> None:
+        self._status("refreshing..." if self._loaded_once else "loading...")
+        wanted: set[str] | None = None
+        started = False
+        listed = False
+        detail_pr: str | None = None
         try:
             try:
                 listing: Listing = await in_thread(load_list, self.source)
             except Exception as exc:  # a source bug must not take the UI down
-                self._list_note = self._internal(exc)
+                self._list_note = self._internal(exc)  # the rows on screen stay
                 self._paint(self._list_note, self._detail_note)
                 return
+            now = self.clock()
+            for rate_limit in listing.rate_limits:
+                self._rates.observe(rate_limit, now)
             notes = list(listing.errors)
             if not listing.complete:
                 notes.append("list incomplete")
             self._list_note = "; ".join(notes) if notes else None
-            self._rows = listing.rows
-            self._row_by_pr = {r.pr: r for r in self._rows}
-            # todo(#59): keep a row's last good data while it refreshes, and mark it stale.
-            self._states = {r.pr: columns.RowState() for r in self._rows}
+            listed = listing.answered > 0  # a refresh whose `prs` calls all failed is not one
+            self._cycle_listed = listed
+            self._list_complete = listing.complete
+            self._list_errors = len(listing.errors)
+            previous = {r.pr: r.item for r in self._rows}
+            rows = listing.rows
+            self._unlisted = set()
+            if self._loaded_once and not listing.complete:
+                # A failed `prs` call hides rows rather than closing them: keep the ones on a
+                # host it failed for (any host, when it names none), marked stale, until a
+                # complete listing says otherwise. A PR on a healthy host that is gone is closed.
+                seen = {r.pr for r in rows}
+                gone = [
+                    r for r in self._rows if r.pr not in seen and listing.may_hide(host_of(r.pr))
+                ]
+                for row in gone:
+                    old = self._states.get(row.pr)
+                    if old is not None and old.error is None:  # never hide an error code
+                        old.stale, old.error = True, "list incomplete"
+                rows = rows + gone
+                self._unlisted = {r.pr for r in gone}  # not read again until listed again
+            if self._loaded_once:
+                self._added |= {r.pr for r in rows if r.pr not in previous}
+            self._rows = rows
+            self._row_by_pr = {r.pr: r for r in rows}
+            # A row that is still listed keeps its last good data while it reloads.
+            self._states = {r.pr: self._states.get(r.pr) or columns.RowState() for r in rows}
+            self._deferred &= set(self._row_by_pr)
+            if auto:
+                wanted = self._plan_cycle(previous, now)
+            self._loaded_once = True
             self._apply_filter()
             self._paint(self._list_note or f"{len(self._rows)} PRs", self._detail_note)
-            self._start_snapshots()
+            detail_pr = self._detail_to_refresh(refresh_detail, wanted)
+            # The detail load reads the PR's snapshot, which also refreshes its row: the batch
+            # skips it, so one read serves both.
+            started = self._start_snapshots(wanted, skip=detail_pr)
         finally:
-            self._loading = False
-        if refresh_detail and self._detail_pr is not None and self._detail_shown():
-            self._start_detail(self._detail_pr)
+            if not started:
+                self._finish_refresh(listed=listed)
+        if detail_pr is not None:
+            self._start_detail(detail_pr)
+
+    def _detail_to_refresh(self, refresh_detail: bool, wanted: set[str] | None) -> str | None:
+        """The PR in the open detail pane when this refresh re-reads it, else None."""
+        pr = self._detail_pr
+        if not refresh_detail or pr is None or not self._detail_shown() or pr in self._unlisted:
+            return None
+        if pr not in self._row_by_pr:
+            return None
+        return pr if wanted is None or pr in wanted else None  # a timed cycle skips a settled PR
+
+    def _plan_cycle(self, previous: dict[str, dict[str, Any]], now: datetime) -> set[str]:
+        """The PRs a timed cycle reads: all every Nth cycle, else those that may have changed.
+
+        A host below its rate-limit threshold is read at most once per ``BACKOFF_FACTOR``
+        intervals, until its ``reset_at``; what it still needs stays deferred until then.
+        """
+        full = self._auto_cycles % self.full_refresh_every == 0
+        wanted = {
+            r.pr
+            for r in self._rows
+            if full
+            or r.pr in self._deferred
+            or needs_snapshot(r, previous.get(r.pr), self._state(r))
+        }
+        slow_after = self.refresh_interval * BACKOFF_FACTOR
+        allowed: set[str] = set()
+        for pr in wanted:
+            host = host_of(pr)
+            last = self._host_last.get(host)
+            if (
+                not self._rates.low(host, now)
+                or last is None
+                or (now - last).total_seconds() >= slow_after
+            ):
+                allowed.add(pr)
+        self._deferred = wanted - allowed
+        return allowed
+
+    def _finish_refresh(self, *, listed: bool | None = None) -> None:
+        self._busy = False
+        if self._cycle_listed if listed is None else listed:
+            self._last_refresh = self.clock()
+        flagged = any(state.refreshing for state in self._states.values())
+        for state in self._states.values():
+            state.refreshing = False
+        if self.is_running:
+            if flagged:
+                self._apply_filter()  # also paints the bar
+            else:
+                self._paint_bar()
 
     def _state(self, row: Row) -> columns.RowState:
         return self._states.get(row.pr) or columns.RowState()
@@ -268,7 +410,8 @@ class BrowseApp(App[None]):
             now = self.clock()
             parts = [columns.cells(r, self._state(r), now) for r in visible]
             width = min(60, max((cell_len(p[0]) for p in parts), default=0))
-            prompts = [safe.plain(columns.row_line(p, width)) for p in parts]
+            self._pr_width = width
+            prompts = [self._prompt(p, self._state(r)) for p, r in zip(parts, visible, strict=True)]
         except Exception as exc:  # bad data reaches the status line, not a traceback
             self._list_note = self._internal(exc)
             self._status("")
@@ -282,20 +425,38 @@ class BrowseApp(App[None]):
                 olist.replace_option_prompt_at_index(i, prompt)
         else:
             self._shown_prs = prs
+            scroll = olist.scroll_y
             olist.clear_options()
             olist.add_options([Option(p) for p in prompts])
             if visible:
-                olist.highlighted = prs.index(kept.pr) if kept and kept.pr in prs else 0
+                index = prs.index(kept.pr) if kept and kept.pr in prs else 0
+                olist.highlighted = index
+                if kept and kept.pr in prs and scroll <= index < scroll + olist.size.height:
+                    # the same PR is still highlighted: put the viewport back where it was
+                    self.call_after_refresh(olist.scroll_to, y=scroll, animate=False)
         self._paint_bar()
 
     def _paint_bar(self) -> None:
         parts = [f"{len(self._visible)}/{len(self._rows)} PRs", f"order: {self._order_mode}"]
+        rates = self._rates.text(self.clock())
+        if rates:  # early, so a narrow terminal clips the later parts first
+            parts.append(rates)
         if self._list_filters:
             parts.append(f"filters: {columns.filters_text(self._list_filters)}")
         if self._snap_total:
             failed = sum(1 for s in self._states.values() if s.status == columns.FAILED)
             progress = f"snapshots {self._snap_done}/{self._snap_total}"
             parts.append(progress + (f" ({failed} failed)" if failed else ""))
+        stale = sum(1 for st in self._states.values() if st.stale)
+        if stale:
+            parts.append(f"{stale} stale")
+        if not self._list_complete:
+            noun = "error" if self._list_errors == 1 else "errors"
+            parts.append(f"partial: {self._list_errors} {noun}")
+        if self._last_refresh is not None:
+            parts.append(f"refreshed {self._last_refresh.strftime('%H:%M:%S')}")
+        if self.refresh_interval:
+            parts.append(f"auto {self.refresh_interval:g}s")
         self.query_one("#bar", Static).update(safe.plain(safe.line(" | ".join(parts), 500)))
 
     # -- snapshots: one per row, loaded progressively -----------------------------------------
@@ -318,15 +479,51 @@ class BrowseApp(App[None]):
         hidden = [r.pr for r in columns.order(hidden_rows, self._states, self._order_mode)]
         return first + rest + hidden
 
-    def _start_snapshots(self) -> None:
+    def _start_snapshots(self, wanted: set[str] | None, skip: str | None = None) -> bool:
+        """Start a round of per-row snapshots (all rows, or those in ``wanted``, but not
+        ``skip``); False when there is nothing to load."""
         self._snap_token += 1
         self._snap_done = 0
-        self._snap_total = len(self._rows) if self.concurrency else 0
-        self._paint_bar()
-        if self._rows and self.concurrency:
-            self.run_worker(
-                self._load_snapshots(self._snap_token, self._snapshot_order()), group="snapshots"
-            )
+        order = [
+            p
+            for p in self._snapshot_order()
+            if p not in self._unlisted and p != skip and (wanted is None or p in wanted)
+        ]
+        self._snap_total = len(order) if self.concurrency else 0
+        self._busy = True
+        now = self.clock()
+        flagged = False
+        for pr in order:
+            self._host_last[host_of(pr)] = now
+            state = self._states.get(pr)
+            if self._snap_total and state is not None and state.status == columns.LOADED:
+                state.refreshing = flagged = True  # the last good data stays on screen meanwhile
+        if flagged:
+            self._apply_filter()
+        else:
+            self._paint_bar()
+        if order and self.concurrency:
+            self.run_worker(self._load_snapshots(self._snap_token, order), group="snapshots")
+            return True
+        return False
+
+    def _read_snapshot(self, pr: str, token: int) -> dict[str, Any]:
+        """Runs on a worker thread. The source is told when a newer round replaced this one,
+        so a read that has not started yet is skipped; one that has started runs to its end."""
+
+        def cancelled() -> bool:
+            return token != self._snap_token
+
+        if self._source_cancels:
+            return self.source.snapshot(pr, cancelled=cancelled)  # type: ignore[call-arg]
+        return self.source.snapshot(pr)
+
+    @staticmethod
+    def _failed_state(previous: columns.RowState | None, error: str) -> columns.RowState:
+        """A failed read keeps the last good data and marks it stale; with none, it is failed."""
+        if previous is not None and previous.status == columns.LOADED and previous.summary:
+            return columns.RowState(columns.LOADED, previous.summary, error=error, stale=True)
+        return columns.RowState(columns.FAILED, error=error)
 
     async def _load_snapshots(self, token: int, order: list[str]) -> None:
         """At most ``self.concurrency`` snapshot reads at once; a failure marks only its row."""
@@ -339,25 +536,47 @@ class BrowseApp(App[None]):
                     if token != self._snap_token:
                         return
                     try:
-                        snap = await in_thread(self.source.snapshot, pr)
+                        snap = await in_thread(self._read_snapshot, pr, token)
                         state = columns.RowState(columns.LOADED, columns.summarize(snap))
+                        self._rates.observe(snap.get("rate_limit"), self.clock())
+                    except Cancelled:
+                        return  # a newer round replaced this one before the read started
                     except ForgectlError as err:
-                        state = columns.RowState(columns.FAILED, error=safe.line(err.code, 60))
+                        state = self._failed_state(self._states.get(pr), safe.line(err.code, 60))
                     except Exception as exc:  # a source bug or bad data marks the row only
-                        state = columns.RowState(columns.FAILED, error=self._internal(exc))
-                if token != self._snap_token:  # a newer list replaced this one
+                        state = self._failed_state(self._states.get(pr), self._internal(exc))
+                if token != self._snap_token:  # a newer round replaced this one
                     return
+                self._snap_done += 1
                 self._snapshot_arrived(pr, state)
 
-        await asyncio.gather(*(lane() for _ in range(self.concurrency)))
+        try:
+            await asyncio.gather(*(lane() for _ in range(self.concurrency)))
+        finally:
+            if token == self._snap_token:
+                self._finish_refresh()
+                stale = sum(1 for st in self._states.values() if st.stale)
+                if stale:
+                    self._status(f"{stale} snapshot(s) not refreshed; showing the last good data")
 
     def _snapshot_arrived(self, pr: str, new: columns.RowState) -> None:
         """Store a row's new state. Only that row's text is redrawn unless the snapshot moves
         it: into or out of the filtered list, or to another place in the attention order."""
-        old = self._state(self._row_by_pr[pr]) if pr in self._row_by_pr else columns.RowState()
-        self._states[pr] = new
-        self._snap_done += 1
         row = self._row_by_pr.get(pr)
+        old = self._state(row) if row is not None else columns.RowState()
+        if pr in self._added and new.status == columns.LOADED:
+            self._added.discard(pr)
+            new.changed = True  # a PR that was not listed before
+        elif (
+            old.status == columns.LOADED
+            and new.status == columns.LOADED
+            and not new.stale
+            and old.summary != new.summary
+        ):
+            new.changed = True
+        if old.changed and not new.stale:
+            new.changed = True  # a second read of identical data must not lose the highlight
+        self._states[pr] = new
         if row is None:
             self._paint_bar()
             return
@@ -376,13 +595,16 @@ class BrowseApp(App[None]):
         index = self._shown_prs.index(pr)
         try:
             parts = columns.cells(row, new, self.clock())
-            olist.replace_option_prompt_at_index(
-                index, safe.plain(columns.row_line(parts, self._pr_width))
-            )
+            olist.replace_option_prompt_at_index(index, self._prompt(parts, new))
         except Exception as exc:  # bad data reaches the status line, not a traceback
             self._list_note = self._internal(exc)
             self._status("")
         self._paint_bar()
+
+    def _prompt(self, parts: list[str], state: columns.RowState) -> Content:
+        """One row's text; a changed row is also bold."""
+        content = safe.plain(columns.row_line(parts, self._pr_width))
+        return content.stylize("bold", 0, len(content)) if state.changed else content
 
     def _highlighted_row(self) -> Row | None:
         index = self.query_one("#list", OptionList).highlighted
@@ -426,6 +648,7 @@ class BrowseApp(App[None]):
         outcome = ""
         try:
             snap = await in_thread(self.source.snapshot, pr)
+            self._row_refreshed(pr, snap)
             try:
                 diff: dict[str, Any] | None = await in_thread(self.source.diff, pr)
             except ForgectlError as err:
@@ -435,8 +658,10 @@ class BrowseApp(App[None]):
             detail = await in_thread(render.detail_of, snap, diff)
         except ForgectlError as err:
             outcome = f"{err.code}: {err.message}"
+            self._row_failed(pr, safe.line(err.code, 60))
         except Exception as exc:  # a source bug or bad data must not take the UI down
             outcome = self._internal(exc)
+            self._row_failed(pr, outcome)
         finally:
             if token == self._detail_token:
                 self._detail_loading = None
@@ -450,6 +675,22 @@ class BrowseApp(App[None]):
                 outcome = self._internal(exc)
         self._detail_note = outcome
         self._status(outcome)
+
+    def _row_refreshed(self, pr: str, snap: dict[str, Any]) -> None:
+        """The detail's snapshot is also the row's fresh data."""
+        if pr not in self._row_by_pr:
+            return
+        try:
+            state = columns.RowState(columns.LOADED, columns.summarize(snap))
+            self._rates.observe(snap.get("rate_limit"), self.clock())
+        except Exception:  # noqa: BLE001 - the detail's own handling reports bad data
+            return
+        self._snapshot_arrived(pr, state)
+
+    def _row_failed(self, pr: str, error: str) -> None:
+        """A failed detail read marks its row: stale, or failed if it never loaded."""
+        if pr in self._row_by_pr:
+            self._snapshot_arrived(pr, self._failed_state(self._states.get(pr), error))
 
     def _show_detail(self, pr: str, detail: render.Detail, diff_note: str | None) -> None:
         self._detail_pr = pr
@@ -476,6 +717,10 @@ class BrowseApp(App[None]):
     # -- actions --------------------------------------------------------------------------
 
     def action_quit_app(self) -> None:
+        if self.refresh_timer is not None:
+            self.refresh_timer.stop()
+            self.refresh_timer = None
+        self._snap_token += 1  # reads that have not started yet are skipped
         self.exit()
 
     def action_sort(self) -> None:
@@ -513,7 +758,6 @@ class BrowseApp(App[None]):
 
     def action_refresh_selected(self) -> None:
         """The PR in the visible detail pane, else the highlighted row's PR (opening it)."""
-        # todo(#59): refresh only what may have changed, and the automatic refresh.
         if self._detail_pr is not None and self._detail_shown():
             self._start_detail(self._detail_pr)
             return
@@ -524,12 +768,13 @@ class BrowseApp(App[None]):
         self._start_detail(row.pr)
 
     def action_reload_list(self) -> None:
-        # todo(#59): R refreshes all: `prs`, then every row's snapshot; selection and scroll
-        # position survive any refresh. Until the rows carry snapshots, R reloads both `prs`
-        # calls and then the PR in the visible detail pane.
-        if self._loading:
+        """R: `prs`, then every row's snapshot, then the PR in the detail pane. Never started
+        twice: while one is in flight R is ignored. It reads every row, so the next timed
+        cycle counts from here, and it does not wait for a host's rate-limit backoff."""
+        if self._busy:
             self._status("a reload is already running")
             return
+        self._auto_cycles = 0
         self._start_list(refresh_detail=True)
 
     def action_open(self) -> None:
@@ -585,3 +830,11 @@ class BrowseApp(App[None]):
             self.call_from_thread(self._status, f"opener exited {status}")
         except Exception:  # noqa: BLE001 - the app may be shutting down; the note is dropped
             pass
+
+
+def _accepts_cancelled(source: object) -> bool:
+    """Whether ``source.snapshot`` takes the ``cancelled`` callable (``LiveSource`` does)."""
+    try:
+        return "cancelled" in inspect.signature(source.snapshot).parameters  # type: ignore[attr-defined]
+    except (TypeError, ValueError, AttributeError):
+        return False
