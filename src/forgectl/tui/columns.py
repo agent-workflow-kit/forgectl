@@ -346,16 +346,22 @@ def column_at(x: int, pr_width: int, offset: int, view_width: int) -> str | None
 def _slice_cells(text: str, start: int, width: int) -> str:
     """``width`` cells of ``text`` from cell ``start``; a wide char cut by an edge becomes a
     space."""
-    if cell_len(text) == len(text):  # no wide chars: cells are characters
+    if text.isascii():  # one cell per character (zero-width marks can offset wide chars)
         return set_cell_size(text[start : start + width], width)
     out: list[str] = []
     x = 0
     end = start + width
+    kept = False  # the previous character was copied whole; a zero-width mark follows its base
     for ch in text:
         w = cell_len(ch)
+        if w == 0:
+            if kept:
+                out.append(ch)
+            continue
         if x >= end:
             break
-        if x >= start and x + w <= end:
+        kept = x >= start and x + w <= end
+        if kept:
             out.append(ch)
         elif x + w > start and x < end:
             out.append(" " * (min(x + w, end) - max(x, start)))

@@ -432,6 +432,56 @@ def test_the_last_column_is_fully_readable_with_a_vertical_scrollbar(width: int)
     run_at(width, script, simple_source())
 
 
+def assert_rows_fill_the_view(app: BrowseApp) -> None:
+    olist = app.query_one("#list", OptionList)
+    view = app._view_width()
+    assert app._painted_view == view
+    for prompt in list_prompts(app):
+        assert cell_len(prompt.plain) == view, (cell_len(prompt.plain), view)
+    lines = screen_lines(app)[olist.content_region.y : olist.content_region.bottom]
+    assert any("authored+requested" in line for line in lines if line.strip()), lines
+
+
+def test_rows_and_header_keep_one_width_when_a_filter_drops_the_scrollbar() -> None:
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        olist = app.query_one("#list", OptionList)
+        assert olist.show_vertical_scrollbar
+        for _ in range(20):
+            await pilot.press("right")
+        await pilot.pause()
+        await pilot.press("slash", "1", "1")
+        for _ in range(4):
+            await pilot.pause()
+        assert len(list_prompts(app)) == 1
+        assert not olist.show_vertical_scrollbar
+        assert_rows_fill_the_view(app)
+
+    run_at(80, script, simple_source())
+
+
+def test_rows_and_header_keep_one_width_when_clearing_a_filter_brings_the_scrollbar() -> None:
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        olist = app.query_one("#list", OptionList)
+        await pilot.press("slash", "1", "1")
+        for _ in range(4):
+            await pilot.pause()
+        assert not olist.show_vertical_scrollbar
+        for _ in range(20):
+            await pilot.press("right")
+        await pilot.pause()
+        await pilot.press("escape")
+        for _ in range(4):
+            await pilot.pause()
+        assert olist.show_vertical_scrollbar
+        assert len(list_prompts(app)) == 40
+        for _ in range(20):
+            await pilot.press("right")
+        await pilot.pause()
+        assert_rows_fill_the_view(app)
+
+    run_at(80, script, simple_source())
+
+
 # -- scrolling redraws the rows; it does not refilter or reorder them -------------------------
 
 

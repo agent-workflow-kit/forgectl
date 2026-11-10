@@ -746,3 +746,13 @@ def test_the_help_lists_the_sort_and_filter_keys() -> None:
 
     for key in ("s ", "a ", "v ", "f ", "n ", "left ", "right "):
         assert any(line.startswith(key) for line in HELP.splitlines()), key
+
+
+def test_slice_cells_counts_cells_when_a_combining_mark_offsets_a_wide_char() -> None:
+    text = "中\u0301abc"  # cell_len equals len, yet the wide char is two cells
+    assert columns._slice_cells(text, 2, 3) == "abc"
+    assert columns._slice_cells(text, 1, 2) == " a"  # the cut lands inside the wide char
+    assert columns._slice_cells(text, 3, 2) == "bc"
+    for start in range(6):
+        for width in range(1, 6):
+            assert cell_len(columns._slice_cells(text, start, width)) == width

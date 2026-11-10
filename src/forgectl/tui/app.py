@@ -471,6 +471,8 @@ class BrowseApp(App[None]):
                 if kept and kept.pr in prs and scroll <= index < scroll + olist.size.height:
                     # the same PR is still highlighted: put the viewport back where it was
                     self.call_after_refresh(olist.scroll_to, y=scroll, animate=False)
+        # the scrollbar appears or goes away only after the rows were replaced
+        self.call_after_refresh(self.relayout)
         self._paint_bar()
 
     def _paint_bar(self) -> None:
@@ -658,11 +660,14 @@ class BrowseApp(App[None]):
         """Draw the header and the rows again for the current offset and view width, from the
         cells already built: no reorder, no refilter, the highlight and scroll stay."""
         olist = self.query_one("#list", OptionList)
-        self._painted_view = self._view_width()
-        self._hoffset = columns.clamp_offset(self._hoffset, self._pr_width, self._painted_view)
+        view = self._view_width()
+        self._hoffset = columns.clamp_offset(self._hoffset, self._pr_width, view)
         self._paint_header()
         if olist.option_count != len(self._cuts):
-            return  # the rows are being rebuilt; _apply_filter draws them
+            # the rows are being rebuilt; _apply_filter draws them. _painted_view stays as it
+            # was, so the next relayout still sees the rows as out of date.
+            return
+        self._painted_view = view
         try:
             for i, (cut, row) in enumerate(zip(self._cuts, self._visible, strict=True)):
                 olist.replace_option_prompt_at_index(i, self._prompt(cut, self._state(row)))
