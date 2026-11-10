@@ -129,9 +129,21 @@ def run(
             if wait:
                 await settle(app, pilot)
             await script(app, pilot)
+            await quiesce(app, source)
 
     asyncio.run(go())
     return app
+
+
+async def quiesce(app: BrowseApp, source: FakeSource) -> None:
+    """Leave no refresh behind: a timer tick that starts a worker just as the test app closes
+    would paint onto a torn-down screen (`quit` stops the timer first; leaving the test context
+    does not). Stop the timer, release any held snapshot, and wait the workers out."""
+    if app.refresh_timer is not None:
+        app.refresh_timer.stop()
+    if isinstance(source, RefreshSource):
+        source.gate.set()
+    await app.workers.wait_for_complete()
 
 
 async def until(pilot: Pilot[None], cond: Callable[[], bool], tries: int = 200) -> None:
