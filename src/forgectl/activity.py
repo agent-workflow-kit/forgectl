@@ -12,7 +12,7 @@ is not is an error (a silent miss would hide a comment from the answer).
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fractions import Fraction
@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 from . import model as m
 
 if TYPE_CHECKING:
+    from .hosts import Hosts, User
     from .reads import ReadEnv
 
 _RFC3339 = re.compile(
@@ -151,13 +152,35 @@ def for_snapshot(
     approvals: Sequence[m.LatestByReviewer],
     head_push: m.PushTime | None,
 ) -> m.Activity:
-    """What a backend calls: ``derive`` with me (resolved once per run, see ``Hosts.viewer``)
-    and the configured ignore list."""
+    """What a backend built on a ``ReadEnv`` calls: ``for_hosts`` with the env's own retries."""
+    return for_hosts(
+        env.hosts,
+        host,
+        call=env.call,
+        threads=threads,
+        reviews=reviews,
+        approvals=approvals,
+        head_push=head_push,
+    )
+
+
+def for_hosts(
+    hosts: Hosts,
+    host: str,
+    *,
+    call: Callable[[Callable[[], User]], User] | None,
+    threads: Sequence[m.Thread],
+    reviews: Sequence[m.Review],
+    approvals: Sequence[m.LatestByReviewer],
+    head_push: m.PushTime | None,
+) -> m.Activity:
+    """``derive`` with me (resolved once per run, see ``Hosts.viewer``; ``call`` retries that one
+    read) and the configured ignore list."""
     return derive(
         threads=threads,
         reviews=reviews,
         approvals=approvals,
         pushed_at=head_push.at if head_push is not None else None,
-        me=env.hosts.viewer(host, call=env.call),
-        ignore_authors=env.hosts.ignore_authors(),
+        me=hosts.viewer(host, call=call),
+        ignore_authors=hosts.ignore_authors(),
     )

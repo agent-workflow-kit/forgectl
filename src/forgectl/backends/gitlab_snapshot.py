@@ -30,6 +30,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
 from .. import model as m
+from ..activity import for_hosts as derive_activity
 from ..errors import ForgectlError
 from ..gateway import Response, Target, path_int
 from ..identifiers import PrRef
@@ -735,7 +736,16 @@ def snapshot(backend: GitLabBackend, ref: PrRef, now: Now | None = None) -> m.Sn
             incomplete.append("review_requests")
         if not threads.complete:
             incomplete.append("threads")
-        # TODO(#57): the derived `activity` block (others' comments since the last push).
+        # comments from `threads`; GitLab has no `reviews`, so its approvals count from the table
+        activity = derive_activity(
+            backend._hosts,
+            ref.host,
+            call=backend._viewer_call,
+            threads=threads.threads,
+            reviews=(),
+            approvals=read.latest_by_reviewer,
+            head_push=head_push,
+        )
         return m.Snapshot(
             pr=read.pr,
             review_requests=requests.requests,
@@ -748,6 +758,7 @@ def snapshot(backend: GitLabBackend, ref: PrRef, now: Now | None = None) -> m.Sn
             fetched_at=_stamp(clock()),
             incomplete=tuple(incomplete),
             head_push=head_push,
+            activity=activity,
         )
 
     return _twice(backend, once)
