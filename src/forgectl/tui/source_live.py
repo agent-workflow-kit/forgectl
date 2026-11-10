@@ -36,7 +36,7 @@ from __future__ import annotations
 import os
 import threading
 from argparse import Namespace
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from forgectl import cli, registry
@@ -61,7 +61,7 @@ class Cancelled(Exception):
     """
 
 
-READ_COMMANDS = frozenset({"prs", "snapshot", "diff"})
+READ_COMMANDS = frozenset({"prs", "snapshot", "snapshots", "diff"})
 
 # ``registry._loaded`` is process-wide and set before the handlers are imported, so the race is
 # between every runner in the process, not within one. One lock for all of them.
@@ -192,10 +192,29 @@ class LiveSource:
         """The ``diff`` output of one PR. Thread-safe."""
         return self._one("diff", pr, cancelled)
 
+    def snapshots(
+        self, prs: Sequence[str], *, cancelled: Callable[[], bool] | None = None
+    ) -> dict[str, Any]:
+        """The ``snapshots --bulk-only`` output of ``prs``: what the bulk reader read whole as
+        ``items``, the rest in ``failed`` (the caller reads those with ``snapshot``). Thread-safe;
+        ``cancelled`` is checked once before the call, as for ``snapshot``."""
+        for pr in prs:
+            if not is_pr(pr):  # also keeps an option-looking value out of the argument list
+                raise ForgectlError("invalid_pr", "snapshots: not a PR in the form host/path#N")
+        if not prs:
+            return {"items": [], "failed": [], "complete": True, "errors": []}
+        self._check_cancelled(prs[0], cancelled)
+        return self._run(["snapshots", "--bulk-only", *prs])
+
     def _one(self, command: str, pr: str, cancelled: Callable[[], bool] | None) -> dict[str, Any]:
         # `cancelled` is checked here only, before the call: see TODO(#93) in the module docstring.
         if not is_pr(pr):  # also keeps an option-looking value out of the argument list
             raise ForgectlError("invalid_pr", f"{command}: not a PR in the form host/path#N")
+        self._check_cancelled(pr, cancelled)
+        return self._run([command, pr])
+
+    @staticmethod
+    def _check_cancelled(pr: str, cancelled: Callable[[], bool] | None) -> None:
         if cancelled is not None:
             try:
                 stop = cancelled()
@@ -203,4 +222,3 @@ class LiveSource:
                 raise ForgectlError("internal", f"cancelled: {type(exc).__name__}") from exc
             if stop:
                 raise Cancelled(pr)
-        return self._run([command, pr])

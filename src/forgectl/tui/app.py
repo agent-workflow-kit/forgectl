@@ -29,7 +29,7 @@ from textual.widgets.option_list import Option
 
 from forgectl.errors import ForgectlError
 
-from . import columns, render, safe, sections, style
+from . import bulk_load, columns, render, safe, sections, style
 from .opener import Opener, OpenRefused, is_openable
 from .refresh import BACKOFF_FACTOR, RateLimits, host_of, needs_snapshot
 from .source import DataSource, Listing, Row, load_list
@@ -350,6 +350,7 @@ class BrowseApp(App[None]):
         self._list_filters: set[str] = set()
         self._shown_prs: list[str] = []  # the PRs in the option list, in order
         self._snap_token = 0  # a newer list load stops the snapshot pool of an older one
+        self._bulk_next = True  # the first full round of snapshots goes through `snapshots`
         # One limiter for every round: reads of an older round still in flight keep their slots,
         # so a reload cannot put more than ``concurrency`` snapshot reads on the wire.
         self._snap_slots = asyncio.Semaphore(max(1, self.concurrency))
@@ -681,6 +682,8 @@ class BrowseApp(App[None]):
             if p not in self._unlisted and p != skip and (wanted is None or p in wanted)
         ]
         self._snap_total = len(order) if self.concurrency else 0
+        bulk = self._bulk_next and wanted is None and bool(order) and self.concurrency > 0
+        self._bulk_next = self._bulk_next and not bulk
         self._busy = True
         now = self.clock()
         flagged = False
@@ -695,7 +698,7 @@ class BrowseApp(App[None]):
             self._paint_bar()
         if order and self.concurrency:
             self.run_worker(
-                self._load_snapshots(self._snap_token, order, listed), group="snapshots"
+                self._load_snapshots(self._snap_token, order, listed, bulk), group="snapshots"
             )
             return True
         return False
@@ -719,9 +722,11 @@ class BrowseApp(App[None]):
         return columns.RowState(columns.FAILED, error=error)
 
     async def _load_snapshots(
-        self, token: int, order: list[str], listed: bool | None = None
+        self, token: int, order: list[str], listed: bool | None = None, bulk: bool = False
     ) -> None:
-        """At most ``self.concurrency`` snapshot reads at once; a failure marks only its row."""
+        """At most ``self.concurrency`` snapshot reads at once; a failure marks only its row.
+        With ``bulk`` (the first round) the rows come first in batches through ``snapshots``,
+        and only what that does not settle is read one by one."""
         queue = deque(order)
 
         async def lane() -> None:
@@ -746,6 +751,10 @@ class BrowseApp(App[None]):
                 self._snapshot_arrived(pr, state)
 
         try:
+            if bulk:
+                rest = await bulk_load.run(self, token, order)
+                queue.clear()
+                queue.extend(rest)
             await asyncio.gather(*(lane() for _ in range(self.concurrency)))
         finally:
             if token == self._snap_token:

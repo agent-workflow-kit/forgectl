@@ -412,3 +412,42 @@ def test_a_cancelled_check_that_raises_is_an_internal_error() -> None:
     assert caught.value.code == "internal"
     assert caught.value.message == "cancelled: ValueError"
     assert run.calls == []
+
+
+# -- snapshots (#116) ------------------------------------------------------------------------
+
+
+def test_snapshots_runs_the_bulk_only_command_for_the_given_prs() -> None:
+    run = Recorder(lambda argv: {"items": [], "failed": [], "complete": True, "errors": []})
+    LiveSource(run).snapshots([PR1, "github.com/acme/other#3"])
+    assert run.calls == [["snapshots", "--bulk-only", PR1, "github.com/acme/other#3"]]
+
+
+def test_snapshots_of_nothing_makes_no_call() -> None:
+    run = Recorder()
+    assert LiveSource(run).snapshots([])["items"] == []
+    assert run.calls == []
+
+
+@pytest.mark.parametrize("bad", ["--help", "-", "not a pr", "github.com/a/b#0", "github.com/a/b"])
+def test_snapshots_refuses_anything_that_is_not_a_pr_before_any_call(bad: str) -> None:
+    run = Recorder()
+    with pytest.raises(ForgectlError) as caught:
+        LiveSource(run).snapshots([PR1, bad])
+    assert caught.value.code == "invalid_pr" and run.calls == []
+
+
+def test_a_cancelled_batch_raises_cancelled_without_a_call() -> None:
+    run = Recorder()
+    with pytest.raises(Cancelled):
+        LiveSource(run).snapshots([PR1], cancelled=lambda: True)
+    assert run.calls == []
+
+
+def test_snapshots_errors_are_forgectl_errors() -> None:
+    def boom(argv: list[str]) -> dict[str, Any]:
+        raise RuntimeError("handler bug")
+
+    with pytest.raises(ForgectlError) as caught:
+        LiveSource(boom).snapshots([PR1])
+    assert caught.value.code == "internal"
