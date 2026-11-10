@@ -511,6 +511,7 @@ Lists PRs, default `--state open`, `--limit 100` (maximum 1000).
 - **People.** `--review-requested-from` means requested **directly** by name. On GitLab this also lists requests the reviewer has finished; `snapshot`'s `review_requests[].state` decides. `me` resolves per host from `hosts.<host>.me`, then `me.github` or `me.gitlab`, then the authenticated user.
 - **Scope** without `--repo` or `--host`: a host with an entry in `hosts`, or a configured credential, is always in scope and a failure goes to `errors`. An undeclared built-in with no binary, or whose `GET /user` gives `auth_required` with no configured credential, is skipped. `hosts_queried` lists the hosts asked. With no host in scope the result is exit 0, empty `items`, `complete: true`, `hosts_queried: []` and null `rate_limit` fields, so a caller checks `hosts_queried`.
 - **Limit and order.** `--limit` is a total. Order is `updated_at` descending, then `pr`; forgectl fetches `limit + 1` to set `complete`. `complete: false` means older items were cut, including by GitHub's 1000-result search limit; a caller narrows with `--updated-since`. At `--limit 1000` GitHub cannot fetch `limit + 1` past that cap, so `complete` there comes from the host's match count (`issueCount`). `complete` is false whenever a host asked failed.
+- **Hidden repos.** A PR whose repo matches an entry of top-level `hidden_repos` ([Config](#config)) is never listed: it is dropped from every host's answer before the limit counts, so hidden PRs neither fill `--limit` nor make `complete` false, and the output carries no count and no flag for them (an item cannot be told from one that was never there). The host's reader skips hidden PRs while it fills `limit + 1` visible items (at most 1000), before any further read for them, so hidden PRs neither consume the limit nor make `complete` false, and a hidden PR past the limit does not either; there is never a second ask. At the 1000 cap `complete` is false as for any cap, and on GitHub it can also be false there because hidden PRs past the 1000th visible one that were never read still count in the host's total. `prs --repo <hidden repo>` makes no host call at all. `browse` lists through this code path, so it never shows them either; it has no toggle to reveal them. Only listings hide: a command that names one PR or repo (`show`, `snapshot`, `diff`, `files`, `ci`, `comments`, `reviews`, `access`, `merge` and the other writes) is unaffected. `prs --repo <hidden repo>` is a listing, so it is empty and complete.
 - **Live filters.** GitHub's search runs on an index, while `state` and `draft` are read live, so a PR merged, closed, reopened or marked ready seconds earlier can be returned for a filter it no longer matches. Such an item is dropped and that host's list is `complete: false`, as for a result hidden from the account. An item older than the `--updated-since` time is not the documented behavior and fails the read (`upstream_error`).
 - **Implementation.** GitHub: GraphQL search, with the qualifier string built from validated parts; `--updated-since` is sent as `updated:>=YYYY-MM-DDTHH:MM:SS+00:00`, the form GitHub documents. A time that falls outside the years 1 to 9999 once in UTC exits 2. GitLab: `/merge_requests` (every host) or `/projects/:path/merge_requests` (`--repo`) with `scope=all`, `state`, `author_username`, `reviewer_username`, the draft filter (`draft` from 19.0, else `wip`; forgectl also filters on the returned `draft` field), `updated_after`, `order_by=updated_at` and `sort=desc`, 100 per page and at most 20 pages. The next page is `x-next-page` when it is exactly the next number or empty, else `upstream_error`. A state, draft flag, author or reviewer list that does not match the filter drops the item and the list is `complete: false`; `--state open` asks for `opened`, so a `locked` MR (briefly, while it merges) is not listed. A list that is not newest first, or holds an item older than `--updated-since`, is `upstream_error`. With `--repo` and at least one item, forgectl reads `GET /projects/:path` once for the requested repository: its `id` must be every item's `project_id`, and the path of its verified `web_url` every item's path (case-insensitive, so a renamed project is followed), else `upstream_error`. A bad login or project path exits 2 before any call.
 
@@ -786,12 +787,15 @@ Reads fire none.
 | `hosts.<host>.me` | null | login on this host, under its backend's login grammar |
 | `hosts.<host>.api_prefix` | null | GitLab under a path, such as `/gitlab` |
 | `repos.<id>.merge_method` | null | `squash`, `merge` or `rebase` |
+| `hidden_repos` | `[]` | repo ids (`host/path`) whose PRs no listing shows, [`prs`](#prs) and [`browse`](#tui) alike; entries are matched as globs (below); replaces on merge like any list |
 | `activity.ignore_authors` | `[]` | logins whose comments and reviews [`activity`](#activity) ignores; glob patterns allowed; replaces on merge like any list |
 | `browse.refresh_interval` | `120s` | seconds between automatic refreshes in [`browse`](#tui), at least `1s`; `0` disables them; the flag `browse --interval` wins |
 | `browse.full_refresh_every` | `5` | every Nth automatic refresh of [`browse`](#tui) re-snapshots every PR (1 to 1000) |
 | `browse.concurrency` | `4` | snapshot reads `browse` runs at once (1 to 16) |
 | `browse.detail_collapsed` | `[changes]` | the [`browse`](#tui) detail pane sections that start collapsed (`facts`, `description`, `changes`, `ci`, `comments`, `reviews`); the rest start open; an unknown name exits 2 (`config_invalid`); a list replaces on merge |
 | `hooks.<name>` | `[]` | [Hooks](#hooks) |
+
+**`hidden_repos` entries** are repo ids of at most 255 characters: a host part, then one or more path segments of `A-Za-z0-9._-` (none `.` or `..`, none empty), each of which may also hold `*` and `?`. The host part is a loose glob over `A-Za-z0-9.:-` plus the wildcards; it is not checked as a hostname (so `:/b` and `-/b` are accepted), and a typo in it hides nothing. The same glob rule as `activity.ignore_authors` applies (one matcher, of linear-bounded cost whatever the pattern): `*` matches any run of characters (empty included) and `?` one character, every other character is literal, the pattern matches the whole repo id, and the match is ASCII case-insensitive. `*` and `?` also match `/`, so `gitlab.example.test/group/*` hides the project `group/proj` and the nested `group/sub/deep/proj` alike, while `?` stands for one character only. An entry that is empty, not a string, has no `/`, or is outside this grammar exits 2 (`config_invalid`) naming `hidden_repos`. A hidden entry only affects listings (see [`prs`](#prs)); the config is never echoed beyond the key name.
 
 Per-repo overrides hold only `merge_method` in v1: no setting lowers a safety rule, so none can be relaxed per repo. A duration is a positive number or a numeric string, in seconds, or `<number><unit>` with unit `ms`, `s`, `m`, `h` or `d`; `browse.refresh_interval` alone also accepts `0`, which disables the refresh, and refuses anything under 1 second (for example `1ms` or `0.5`). `api_prefix` is only for declared hosts and null for GitHub; it has 1 to 8 segments of 1 to 64 characters from `A-Za-z0-9._-`, none of them `.` or `..`, and no trailing slash. A host key has labels of at most 63 characters and a name of at most 253, and a GitHub host's key has no port (`gh` refuses one); either failure exits 2 (`config_invalid`) naming the key. A built-in host's `backend` must match. A hook's `cmd` is not empty.
 
@@ -843,15 +847,21 @@ forgectl stores no long-lived objects, so it has no labels of its own. Conventio
 
 The default list is the union of requested-from-you and authored-by-you, as two `prs` calls. Columns:
 
-| Column | Source |
-|---|---|
-| repo and number, title | the `prs` item |
-| badge | state, draft and the first blocker |
-| CI glyph | `ci.state` |
-| approvals | the bare `approvals` count on both hosts; the `1/2` form over the required count (on GitLab `approvals` plus the `approvals_left` of the approval rule) arrives with #86, because the snapshot does not expose the required count yet |
-| comments | `activity`: `comments_total`, `unresolved_threads`, `others_since_push` (new since push) and `awaiting_my_reply` |
-| age | since `head.pushed_at` (blank when it is null) and since `updated_at` |
+| Column | Header | Width | Source |
+|---|---|---|---|
+| repo and number | `PR` | at most 28, set per list | the `prs` item; a longer value is cut from the left, so the number stays visible |
+| note | `note` | 12 | `[refreshing]`, `[stale: code]` or `[changed]`; the cell is cut to 12 cells, and the detail pane does not repeat a stale reason |
+| badge | `badge` | 26 | state, draft and the first blocker |
+| CI glyph | `CI` | 2 | `ci.state` |
+| approvals | `appr` | 5 | the bare `approvals` count on both hosts; the `1/2` form over the required count (on GitLab `approvals` plus the `approvals_left` of the approval rule) arrives with #86, because the snapshot does not expose the required count yet |
+| review | `rev` | 3 | `review_decision` |
+| comments | `comments` | 20 | `activity`: `comments_total`, `unresolved_threads`, `others_since_push` (new since push) and `awaiting_my_reply` |
+| age | `age` | 9 | since `head.pushed_at` (blank when it is null) and since `updated_at` |
+| title | `title` | 40 | the `prs` item |
+| author | `author` | 20 | `@` and the author's login |
+| roles | `roles` | 18 | `authored`, `requested` or both joined with `+` |
 
+- **Layout.** A header line above the rows names the columns (`PR`, `note`, `badge`, `CI`, `appr`, `rev`, `comments`, `age`, `title`, `author`, `roles`); it is constant text and stays on the first line of the list while the rows scroll. Every cell is cut to its column width, by terminal cell width, with a trailing `…` (the PR column keeps its end, so the number stays visible, and is at most 28 cells wide), so a long value never moves the next column; an empty value stays as padding. The `note` column holds `[refreshing]`, `[stale: code]` or `[changed]`, cut to 12 cells. When the table is wider than the terminal, `left` and `right` (or `h` and `l`) scroll the columns after `note` by one column while the list has focus; `PR` and `note` stay in place, the header scrolls with the rows, the highlighted row is unchanged, and the offset is kept across refreshes and clamped to the table's width. Nothing scrolls when the table fits. `home` and `end` stay the list's row jumps; the far ends of the table are reached by repeating `left` or `right` (or `h` or `l`).
 - **Grouping and order.** Rows group by repo. A "needs attention first" order puts rows with failing CI, new comments from others since the push, a thread awaiting my reply or changes requested first, then the rest; a key switches between it and the default order. Authors in `activity.ignore_authors` never move a row.
 - **Filters.** Authored by me or review-requested from me; CI failing; has new comments. Filters combine as an intersection, and the status bar names the active ones. `/` filters by text.
 - **Loading.** One `prs` call per query builds the rows, then `snapshot` runs per PR with bounded concurrency (`browse.concurrency`, default 4), visible rows first. Rows render as each snapshot arrives, with a per-row loading state and a progress count in the status bar. The tunables are `browse.concurrency` and `browse.full_refresh_every` ([Config](#config)); the rate-limit threshold is fixed. A failed snapshot marks its row with the error and does not block the others.
@@ -868,7 +878,7 @@ The default list is the union of requested-from-you and authored-by-you, as two 
 
 ### Result file
 
-`--result-file` writes `{"intent": "open"|"back", "selected": [...], "merged": [...]}` on exit (`schemas/cli/browse-result.json`). `selected` holds zero or one `pr`; `merged` lists the PRs merged from `browse`, and stays empty until the merge follow-up. `enter` opens the detail pane and `intent` stays `back` on exit; `intent: open` means `o` was used. `o` opens only the built `url`; a check's `url` is shown, opened only when `http` or `https`. Keys: `q` quit, `?` help, `/` filter, `enter` open, `1` to `6` toggle a detail section, `r` refresh selected, `R` refresh all, `o` open in a browser; the keys for sort order and filters are listed in `?`. The result file is written only when `browse` exits 0; on any other exit an existing file is left unchanged and must be ignored by callers.
+`--result-file` writes `{"intent": "open"|"back", "selected": [...], "merged": [...]}` on exit (`schemas/cli/browse-result.json`). `selected` holds zero or one `pr`; `merged` lists the PRs merged from `browse`, and stays empty until the merge follow-up. `enter` opens the detail pane and `intent` stays `back` on exit; `intent: open` means `o` was used. `o` opens only the built `url`; a check's `url` is shown, opened only when `http` or `https`. Keys: `q` quit, `?` help, `/` filter, `enter` open, `1` to `6` toggle a detail section, `r` refresh selected, `R` refresh all, `o` open in a browser, `left`/`right` (`h`/`l`) scroll the list sideways; the keys for sort order and filters are listed in `?`. The result file is written only when `browse` exits 0; on any other exit an existing file is left unchanged and must be ignored by callers.
 
 ### Merge from `browse` (follow-up)
 
@@ -899,7 +909,7 @@ Either file may contain empty lines: forgectl adds a newline first when an appen
 
 ## Upgrades
 
-There is no database to migrate. `audit.jsonl` and `log.jsonl` change additively. `--json` shapes follow semver (architecture section 18.3).
+There is no database to migrate. `audit.jsonl` and `log.jsonl` change additively. `--json` shapes follow semver (architecture section 18.3). `config_hash` values are not comparable across versions that add config keys, since the canonical form lists every key with its default (a release that adds `hidden_repos` changes the hash of every config): a consumer of audit records must not compare hashes across an upgrade. Old records are not misread, because nothing recomputes the hash of a record already written.
 
 ## Residual risks
 

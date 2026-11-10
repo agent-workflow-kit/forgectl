@@ -96,6 +96,12 @@ _HOST_PATTERN = (
 _HOST_RE = re.compile(_HOST_PATTERN, re.ASCII)
 _REPO_RE = re.compile(rf"{_HOST_PATTERN}(?:/(?!\.\.?(?:/|$))[A-Za-z0-9._-]+)+", re.ASCII)
 # Aligned with gateway._API_PREFIX: 1 to 8 segments of 1 to 64 characters.
+# A hidden-repos entry: a repo id (host, then one or more path segments) in which `*` and `?` are
+# wildcards; `*` and `?` also match `/`, so one entry can span nested groups. At most 255
+# characters, so a pathological entry stays cheap to match.
+_HIDDEN_REPO_RE = re.compile(
+    r"(?=[\s\S]{1,255}\Z)[A-Za-z0-9.:*?-]+(?:/(?!\.\.?(?:/|$))[A-Za-z0-9._*?-]+)+", re.ASCII
+)
 _API_PREFIX_RE = re.compile(r"(?:/(?!\.\.?(?:/|$))[A-Za-z0-9._-]{1,64}){1,8}", re.ASCII)
 _ENV_RETRIES_RE = re.compile(r"0|[1-9][0-9]?", re.ASCII)
 
@@ -204,6 +210,10 @@ EnvName = Annotated[str, _matches(_ENV_NAME_RE, "variable name")]
 ApiPrefix = Annotated[str, _matches(_API_PREFIX_RE, "path prefix such as /gitlab")]
 Command = Annotated[str, AfterValidator(_command)]
 Arg = Annotated[str, Field(min_length=1), AfterValidator(_no_control_characters)]
+HiddenRepo = Annotated[
+    str, _matches(_HIDDEN_REPO_RE, "repo id pattern: host/path, with * and ? as wildcards")
+]
+HiddenRepos = Annotated[tuple[HiddenRepo, ...], BeforeValidator(_as_tuple)]
 ArgList0 = Annotated[tuple[Arg, ...], BeforeValidator(_as_tuple)]  # may be empty
 ArgList = Annotated[tuple[Arg, ...], BeforeValidator(_as_tuple), Field(min_length=1)]
 PreHooks = Annotated[tuple["PreHook", ...], BeforeValidator(_as_tuple)]
@@ -275,6 +285,7 @@ class Config(_Model):
     retries: Retries = 3
     hosts: HostMap = Field(default_factory=_empty_map)
     repos: RepoMap = Field(default_factory=_empty_map)
+    hidden_repos: HiddenRepos = ()
     activity: Activity = Field(default_factory=Activity)
     browse: Browse = Field(default_factory=Browse)
     hooks: Hooks = Field(default_factory=Hooks)

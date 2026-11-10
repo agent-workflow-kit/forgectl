@@ -57,6 +57,7 @@ def drive(
     focus: str | None = None,
     wait: bool = True,
     concurrency: int = 0,  # 0: no per-row snapshots, so these tests count only their own reads
+    size: tuple[int, int] = (140, 50),
     **app_args: Any,
 ) -> BrowseApp:
     app = BrowseApp(
@@ -64,7 +65,7 @@ def drive(
     )
 
     async def go() -> None:
-        async with app.run_test(size=(140, 50)) as pilot:
+        async with app.run_test(size=size) as pilot:
             if wait:
                 await settle(app, pilot)
             else:
@@ -132,7 +133,7 @@ def test_list_is_the_union_of_two_prs_calls_newest_first() -> None:
         assert PR2 in prompts[0] and "Theirs" in prompts[0]  # updated_at descending
         assert PR1 in prompts[1] and "authored+requested" in prompts[1]
 
-    drive(source, script)
+    drive(source, script, size=(220, 50))
     assert source.calls[:2] == [
         ("prs", {"author": None, "review_requested_from": "me"}),
         ("prs", {"author": "me", "review_requested_from": None}),
@@ -234,8 +235,9 @@ def test_every_binding_is_in_the_help() -> None:
         if isinstance(b, Binding)
         for key in b.key.split(",")
     }
-    # `enter` is handled by the list widget, not a BrowseApp binding.
-    assert documented - {"enter"} == bound, (documented - {"enter"}) ^ bound
+    # `enter`, `left` and `right` are handled by the list widget (RowList), not a BrowseApp binding.
+    on_list = {"enter", "left", "right"}
+    assert documented - on_list == bound, (documented - on_list) ^ bound
 
 
 def test_help_source_has_no_hard_line_breaks() -> None:
@@ -630,7 +632,7 @@ def test_the_markup_title_is_shown_literally() -> None:
         await pilot.pause()
         assert app.is_running
 
-    drive(source, script)
+    drive(source, script, size=(220, 50))
 
 
 def test_control_and_bidi_characters_become_visible_markers() -> None:
@@ -1134,7 +1136,8 @@ def test_a_failed_row_refresh_marks_the_row_stale_and_does_not_open_the_pane() -
         source.fail = True
         await pilot.press("r")
         await settle(app, pilot)
-        assert any("[stale: upstream_error]" in p.plain for p in list_prompts(app))
+        # the note column is 12 cells wide, so the code is cut; the row still shows it is stale
+        assert any("[stale: up" in p.plain for p in list_prompts(app))
         assert app.query_one("#detail").display is False
         assert app.focused is not None and app.focused.id == "list"
 

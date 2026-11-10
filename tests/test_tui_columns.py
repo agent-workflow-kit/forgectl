@@ -226,7 +226,10 @@ def test_fixed_cells_never_overflow_so_the_later_columns_stay_aligned() -> None:
 def test_the_pr_column_is_cut_by_terminal_cell_width() -> None:
     wide = "github.com/" + "日" * 40 + "/x#1"
     parts = loaded(make_item(1, repo=wide), snap(1, repo=wide))
-    assert cell_len(columns.row_line(parts, 20).split("  ")[0]) == 20
+    line = columns.row_line(parts, 20)
+    first = columns._slice_cells(line, 0, 20)
+    assert columns._slice_cells(line, 20, 2) == "  "  # the next column starts at cell 22
+    assert first.startswith("…") and first.rstrip().endswith("#1")  # the number stays visible
     assert columns.fit("日本語", 5) == "日本…"  # cells, not characters: 2 + 2 + the marker
     assert columns.fit("日本語", 4) == "日 …"  # a wide char that does not fit is padded
     assert columns.fit("abcdef", 4) == "abc…"
@@ -741,5 +744,15 @@ def test_forge_text_in_titles_and_blockers_cannot_act_as_markup() -> None:
 def test_the_help_lists_the_sort_and_filter_keys() -> None:
     from forgectl.tui.app import HELP_KEYS
 
-    for key in ("s", "a", "v", "f", "n"):
+    for key in ("s", "a", "v", "f", "n", "left", "right"):
         assert key in [k for k, _ in HELP_KEYS], key
+
+
+def test_slice_cells_counts_cells_when_a_combining_mark_offsets_a_wide_char() -> None:
+    text = "中\u0301abc"  # cell_len equals len, yet the wide char is two cells
+    assert columns._slice_cells(text, 2, 3) == "abc"
+    assert columns._slice_cells(text, 1, 2) == " a"  # the cut lands inside the wide char
+    assert columns._slice_cells(text, 3, 2) == "bc"
+    for start in range(6):
+        for width in range(1, 6):
+            assert cell_len(columns._slice_cells(text, start, width)) == width

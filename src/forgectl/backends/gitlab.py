@@ -1152,10 +1152,10 @@ class GitLabBackend:
 
     # -- the rest of the protocol (other issues) ---------------------------------------------------
 
-    def list_prs(self, query: m.PrQuery) -> m.PrPage:
+    def list_prs(self, query: m.PrQuery, skip: Callable[[str], bool] | None = None) -> m.PrPage:
         from . import gitlab_lists  # lazy: gitlab_lists imports this module
 
-        return gitlab_lists.list_prs(self, query)
+        return gitlab_lists.list_prs(self, query, skip)
 
     def snapshot(self, ref: PrRef) -> m.Snapshot:
         from . import gitlab_snapshot  # (#16) lazy: that module imports this one
