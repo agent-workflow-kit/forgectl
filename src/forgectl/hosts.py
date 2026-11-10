@@ -25,6 +25,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from .activity import Viewer
 from .errors import ForgectlError, refused
 from .gateway import (
     MAX_TOKEN,
@@ -218,6 +219,8 @@ class Hosts:
     def __init__(self, gateway: Gateway) -> None:
         self.gateway = gateway
         self._credentials: dict[str, Credential | _Failure] = {}
+        self._viewers: dict[str, Viewer] = {}
+        self._viewer_locks: dict[str, threading.Lock] = {}
         self._lock = threading.Lock()  # select-and-store: a token_command runs once per host
 
     @property
@@ -353,6 +356,38 @@ class Hosts:
                 f"{key}: not a valid {backend} login",
                 details={"key": key},
             ) from None
+
+    def ignore_authors(self) -> tuple[str, ...]:
+        """``activity.ignore_authors``: the config list alone decides who is ignored."""
+        return tuple(self._config.activity.ignore_authors)
+
+    def viewer(
+        self, host: str, *, call: Callable[[Callable[[], User]], User] | None = None
+    ) -> Viewer:
+        """Me on ``host`` for ``activity``. A configured ``me`` is used as it is, by login with no
+        id, and makes no request. Otherwise it is the authenticated account, read once per
+        ``Hosts`` (one command run) however many snapshots, on however many threads, follow. A
+        failed read raises and is not remembered, so the next snapshot tries again."""
+        host = _ascii_host(host)
+        with self._lock:
+            known = self._viewers.get(host)
+            gate = self._viewer_locks.setdefault(host, threading.Lock())
+        if known is not None:
+            return known
+        with gate:  # one read per host: the others wait for it, then find it stored
+            with self._lock:
+                known = self._viewers.get(host)
+            if known is None:
+                configured = self.me(host)
+                if configured is not None:
+                    known = Viewer(login=configured, id=None)
+                else:
+                    target = self.target(host)
+                    user = (call or _once)(lambda: self.authenticated_user(target))
+                    known = Viewer(login=user.login, id=user.id)
+                with self._lock:
+                    self._viewers[host] = known
+        return known
 
     # identity ---------------------------------------------------------------------------
 

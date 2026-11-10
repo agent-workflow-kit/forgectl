@@ -27,6 +27,7 @@ from forgectl.backends.github_snapshot import (
     REQUESTS_QUERY,
     REQUESTS_QUERY_NO_TEAMS,
 )
+from forgectl.config import Activity as ConfigActivity
 from forgectl.config import Host, LoadedConfig
 from forgectl.errors import ForgectlError
 from forgectl.gateway import Gateway, ProcessResult
@@ -103,6 +104,8 @@ class Router:
         request = json.loads(stdin) if stdin else {}
         self.requests.append(request)
         op = operation(request) if request else "rest"
+        if op == "rest" and argv[-1] == "user":
+            op = "user"
         self.ops.append(op)
         assert op in self.answers, f"no answer scripted for {op}"
         queue = self.answers[op]
@@ -147,6 +150,9 @@ def rest_answer(doc: Any = None, **headers: str) -> bytes:
     )
 
 
+ME_USER = {"login": "user-1", "id": 1001, "html_url": "https://github.com/user-1"}
+
+
 def standard(**overrides: Any) -> dict[str, Any]:
     answers: dict[str, Any] = {
         "ForgectlShow": show_recording(),
@@ -155,17 +161,28 @@ def standard(**overrides: Any) -> dict[str, Any]:
         "ForgectlPush": rec("push"),
         "ForgectlReviewsPage": {"data": {"node": {"reviews": pr_of(rec("parts"))["reviews"]}}},
         "rest": rest_answer(),
+        "user": http(200, ME_USER, headers=SCOPES),
     }
     answers.update(overrides)
     return answers
 
 
 class Rig:
-    def __init__(self, forges: FakeForges, router: Router, *, retries: int = 0) -> None:
+    def __init__(
+        self,
+        forges: FakeForges,
+        router: Router,
+        *,
+        retries: int = 0,
+        ignore: tuple[str, ...] = (),
+    ) -> None:
         config = LoadedConfig.defaults()
         config = LoadedConfig(
             config=config.config.model_copy(
-                update={"hosts": {"github.com": Host(backend="github", token_env="SNAP_TOKEN")}}
+                update={
+                    "hosts": {"github.com": Host(backend="github", token_env="SNAP_TOKEN")},
+                    "activity": ConfigActivity(ignore_authors=ignore),
+                }
             ),
             config_hash="x",
             config_path=None,
@@ -242,6 +259,7 @@ def test_every_query_is_a_constant_text_and_values_travel_as_variables(
         "ForgectlRequests",
         "rest",
         "ForgectlPush",
+        "user",  # me, for the `activity` block
     ]
     texts = {r["query"] for r in rig.router.requests if r}
     assert PARTS_QUERY in texts and REQUESTS_QUERY in texts and PUSH_QUERY in texts
@@ -2002,3 +2020,68 @@ def test_r1_12_an_enterprise_team_request_is_incomplete_without_extra_event_page
     assert out["incomplete"] == ["review_requests"]
     assert rig.router.ops.count("ForgectlRequestEvents") == 0
     assert any("EnterpriseTeam" in w for w in rig.warnings)
+
+
+# -- the derived `activity` block (#57) -------------------------------------------------------
+
+
+def test_activity_counts_the_recorded_snapshot(make: Callable[..., Rig]) -> None:
+    out = make().snapshot()
+    # me is user-1: of the 6 comments and 2 reviews, those after the push (08:30:00Z) by someone
+    # else are the 08:45 comment of a deleted account, user-3's at 09:31 and 11:00, and both
+    # reviews (the 08:30:00 comment is not after the push). Of the 4 unresolved threads, the one
+    # that ends with my reply does not wait on me.
+    assert out["activity"] == {
+        "comments_total": 6,
+        "unresolved_threads": 4,
+        "others_since_push": 5,
+        "awaiting_my_reply": 3,
+    }
+    schemas.validate_cli_output("snapshot", out)
+
+
+def test_activity_agrees_with_the_threads_of_the_same_snapshot(make: Callable[..., Rig]) -> None:
+    out = make().snapshot()
+    assert out["activity"]["comments_total"] == sum(len(t["comments"]) for t in out["threads"])
+    assert out["activity"]["unresolved_threads"] == sum(not t["resolved"] for t in out["threads"])
+
+
+def test_others_since_push_is_null_without_a_push_time(make: Callable[..., Rig]) -> None:
+    out = snap(make, ForgectlPush=push_doc(commit("2026-10-01T09:00:00Z", OTHER), commit_date=None))
+    assert out["head"]["pushed_at"] is None
+    assert out["activity"]["others_since_push"] is None
+    assert out["activity"]["awaiting_my_reply"] == 3
+    schemas.validate_cli_output("snapshot", out)
+
+
+def test_ignore_authors_from_the_config_drives_the_counts(make: Callable[..., Rig]) -> None:
+    rig = make(ignore=("user-3", "USER-4*"))
+    out = rig.snapshot()
+    # user-3 (threads, one review) and user-4 are ignored: left are the ghost comment and
+    # user-2's review after the push; the ghost thread alone awaits me
+    assert out["activity"] == {
+        "comments_total": 6,
+        "unresolved_threads": 4,
+        "others_since_push": 2,
+        "awaiting_my_reply": 1,
+    }
+    users = {c["author"]["login"] for t in out["threads"] for c in t["comments"]}
+    assert "user-3" in users  # the output still shows everything
+
+
+def test_me_is_read_once_per_run_not_per_snapshot(make: Callable[..., Rig]) -> None:
+    rig = make()
+    rig.snapshot()
+    rig.snapshot()
+    user_calls = [a for a in rig.router.argvs if a[-1] == "user"]
+    assert len(user_calls) == 1
+
+
+def test_a_failed_identity_read_fails_the_snapshot_and_is_tried_again(
+    make: Callable[..., Rig],
+) -> None:
+    denied = http(401, {"message": "Bad credentials"})
+    rig = make(standard(user=[denied, http(200, ME_USER, headers=SCOPES)]))
+    with pytest.raises(ForgectlError):
+        rig.snapshot()
+    assert rig.snapshot()["activity"]["comments_total"] == 6

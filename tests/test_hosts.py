@@ -1074,3 +1074,85 @@ def test_a_non_ascii_host_is_refused_before_lowercasing(fake_forges: FakeForges,
         getattr(hosts, call)(kelvin)
     assert raised.value.code == "refused" and raised.value.reason == "unknown_host"
     assert secret_values() == frozenset() and fake_forges.calls() == []
+
+
+# -- viewer (me for `activity`, #57) ---------------------------------------------------------
+
+
+def test_viewer_is_the_authenticated_account_and_is_read_once(fake_forges: FakeForges) -> None:
+    login("gh", "github.com")
+    hosts = make_hosts(fake_forges)
+    user_answer(fake_forges, "gh", "github.com", "octo")
+    first = hosts.viewer("github.com")
+    assert (first.login, first.id) == ("octo", "12")
+    assert hosts.viewer("GitHub.com") is first
+    assert len([c for c in fake_forges.calls("gh") if c.argv[-1] == "user"]) == 1
+
+
+def test_a_configured_me_for_another_login_wins_and_has_no_id(fake_forges: FakeForges) -> None:
+    login("gh", "github.com")
+    hosts = make_hosts(fake_forges, config_of({"github.com": Host(me="someone-else")}))
+    user_answer(fake_forges, "gh", "github.com", "octo")
+    me = hosts.viewer("github.com")
+    assert (me.login, me.id) == ("someone-else", None)
+
+
+def test_a_configured_me_makes_no_user_call_and_has_no_id(fake_forges: FakeForges) -> None:
+    login("gh", "github.com")
+    hosts = make_hosts(fake_forges, config_of({"github.com": Host(me="OCTO")}))
+    fake_forges.answer("gh", "user", status=401, body={"message": "Bad credentials"})
+    me = hosts.viewer("github.com")
+    assert (me.login, me.id) == ("OCTO", None)
+    assert [c for c in fake_forges.calls("gh") if c.argv[-1] == "user"] == []
+
+
+def test_concurrent_first_viewer_calls_make_one_user_read(
+    fake_forges: FakeForges, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    login("gh", "github.com")
+    hosts = make_hosts(fake_forges)
+    reads: list[int] = []
+    gate = threading.Barrier(8)
+
+    def slow(target: Any) -> hosts_module.User:
+        reads.append(1)
+        threading.Event().wait(0.1)
+        return hosts_module.User(login="octo", id="12", scopes=None)
+
+    monkeypatch.setattr(hosts, "authenticated_user", slow)
+    seen: list[Any] = []
+
+    def worker() -> None:
+        gate.wait()
+        seen.append(hosts.viewer("github.com"))
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert len(reads) == 1
+    assert len(seen) == 8 and all(v is seen[0] for v in seen)
+
+
+def test_a_failed_viewer_read_is_not_remembered(fake_forges: FakeForges) -> None:
+    login("gh", "github.com")
+    hosts = make_hosts(fake_forges)
+    fake_forges.answer("gh", "user", status=401, body={"message": "Bad credentials"}, times=1)
+    with pytest.raises(ForgectlError):
+        hosts.viewer("github.com")
+    user_answer(fake_forges, "gh", "github.com", "octo")
+    assert hosts.viewer("github.com").login == "octo"
+
+
+def test_ignore_authors_comes_from_the_config(fake_forges: FakeForges) -> None:
+    from forgectl.config import Activity
+
+    base = config_of()
+    cfg = LoadedConfig(
+        config=base.config.model_copy(update={"activity": Activity(ignore_authors=("a*", "b"))}),
+        config_hash="x",
+        config_path=None,
+    )
+    assert make_hosts(fake_forges, cfg).ignore_authors() == ("a*", "b")
+    assert make_hosts(fake_forges).ignore_authors() == ()

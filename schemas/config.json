@@ -264,6 +264,23 @@
       },
       "additionalProperties": false
     },
+    "activity": {
+      "type": "object",
+      "properties": {
+        "ignore_authors": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "default": [],
+          "description": "Logins whose comments and reviews `activity` ignores; * and ? are wildcards, everything else is literal. Replaces on merge like any list."
+        }
+      },
+      "additionalProperties": false,
+      "required": [],
+      "default": {}
+    },
     "hooks": {
       "type": "object",
       "properties": {
