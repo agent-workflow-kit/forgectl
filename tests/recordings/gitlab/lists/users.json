@@ -1,0 +1,11 @@
+[
+  {
+    "avatar_url": "https://avatars.example.test/user-2",
+    "bot": false,
+    "id": 12,
+    "name": "User 12",
+    "state": "active",
+    "username": "user-2",
+    "web_url": "https://gitlab.com/user-2"
+  }
+]
