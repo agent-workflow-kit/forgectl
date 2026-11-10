@@ -17,7 +17,7 @@ from .harness.safety import assert_call_safe
 from .test_github_show import HEAD, TOKEN, recording
 from .test_github_snapshot import SCOPES, pr_of, rec, with_identity
 
-PR = "github.com/example-org/example-repo#7"
+PR = "github.com/user-7/example-repo#7"
 
 
 @pytest.fixture

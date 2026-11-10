@@ -21,6 +21,7 @@ from __future__ import annotations
 import re
 import threading
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -383,9 +384,12 @@ class Hosts:
         scopes = _scopes(response.headers.get("x-oauth-scopes")) if github else None
         return User(login=login, id=str(account), scopes=scopes)
 
-    def identity(self, host: str) -> Identity:
+    def identity(
+        self, host: str, *, call: Callable[[Callable[[], User]], User] | None = None
+    ) -> Identity:
         """The ``whoami`` entry for ``host``. An unknown host raises; a failed credential or read
-        is returned in ``error`` (``{host, code, message}``)."""
+        is returned in ``error`` (``{host, code, message}``). ``call`` wraps the ``GET /user``
+        read (a command passes ``ReadEnv.call``, so the read is retried like any other)."""
         host = _ascii_host(host)
         backend = self.backend(host)
         try:
@@ -394,7 +398,8 @@ class Hosts:
             return self._failed(host, backend, "none", error)
         source: TokenSource = credential.source
         try:
-            user = self.authenticated_user(self.target(host))
+            target = self.target(host)
+            user = (call or _once)(lambda: self.authenticated_user(target))
         except ForgectlError as error:
             if credential.source == "stored_login":
                 if error.code in ("auth_required", "tool_missing"):
@@ -419,6 +424,10 @@ class Hosts:
         return Identity(
             host, backend, source, error={"host": host, "code": error.code, "message": message}
         )
+
+
+def _once(read: Callable[[], User]) -> User:
+    return read()
 
 
 def _command_token(result: ProcessResult) -> tuple[str | None, str | None]:
