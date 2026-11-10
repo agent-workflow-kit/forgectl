@@ -123,7 +123,9 @@ def test_broken_pipe_keeps_exit_2(env: dict[str, str]) -> None:
 
 
 def test_unimplemented_command_with_full_stdout_keeps_exit_1(env: dict[str, str]) -> None:
-    result = run(CLI, ["--json", "browse"], env, ">/dev/full")
+    result = run(
+        CLI, ["--json", "resolve", "github.com/o/r#1", "--thread", "gh:rt:abc"], env, ">/dev/full"
+    )
     assert result.returncode == 1
 
 

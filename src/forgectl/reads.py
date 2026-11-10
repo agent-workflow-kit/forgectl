@@ -34,7 +34,7 @@ from .errors import ForgectlError
 from .gateway import Gateway
 from .hosts import Hosts
 from .identifiers import PrRef
-from .model import Warn
+from .model import Readiness, Warn
 
 T = TypeVar("T")
 
@@ -52,18 +52,6 @@ RETRYABLE_CODES = frozenset({"rate_limited", "upstream_error", "network_error"})
 def _ignore(_message: str) -> None:
     # TODO(#9): write a `warn` line to the log (jsonlog.py)
     return None
-
-
-@dataclass(frozen=True)
-class Readiness:
-    """How long a read may be repeated while a value is still being computed."""
-
-    tries: int
-    window: float  # seconds, from the first try
-
-    @property
-    def pause(self) -> float:
-        return self.window / self.tries
 
 
 SHOW_READINESS = Readiness(tries=3, window=4.0)  # `show` and `snapshot`
@@ -90,6 +78,10 @@ class ReadEnv:
         # the wait is part of the command's budget, so retrying never overruns it
         with self.gateway.budget.spending():
             self.sleep(seconds)
+
+    def wait(self, seconds: float) -> None:
+        """Wait inside the command's budget, as a retry does (a caller polling a verification)."""
+        self._wait(seconds)
 
     def backoff(self, attempt: int) -> float:
         """The wait before retry number ``attempt`` (0 is the first): the table value plus up to
@@ -163,3 +155,29 @@ def show(inv: registry.Invocation) -> dict[str, Any]:
         raise ForgectlError("internal", "show: the pull request was not bound to a host")
     read = backend_for(ref, make_env(inv)).get_pr(ref)
     return read.pr.to_dict()
+
+
+def _bound(inv: registry.Invocation, command: str) -> PrRef:
+    ref = inv.args.pr
+    if not isinstance(ref, PrRef):  # bind_args binds it before any handler runs
+        raise ForgectlError("internal", f"{command}: the pull request was not bound to a host")
+    return ref
+
+
+@registry.register("files")
+def files(inv: registry.Invocation) -> dict[str, Any]:
+    ref = _bound(inv, "files")
+    return backend_for(ref, make_env(inv)).files(ref).to_dict()
+
+
+@registry.register("diff")
+def diff(inv: registry.Invocation) -> dict[str, Any]:
+    ref = _bound(inv, "diff")
+    return backend_for(ref, make_env(inv)).diff(ref).to_dict()
+
+
+@registry.register("compare")
+def compare(inv: registry.Invocation) -> dict[str, Any]:
+    ref = _bound(inv, "compare")
+    result = backend_for(ref, make_env(inv)).compare(ref, inv.args.from_sha, inv.args.to_sha)
+    return result.to_dict()

@@ -35,7 +35,7 @@ from ..gateway import Target, verify_identity
 from ..identifiers import PrRef, RepoRef, bind_login
 from ..reads import SHOW_READINESS, ReadEnv
 from ..sanitize import sanitize_line, sanitize_text
-from .base import not_implemented
+from . import github_merge
 
 T = TypeVar("T")
 
@@ -476,7 +476,7 @@ def latest_by_reviewer(reviews: Sequence[Any]) -> ReviewTable:
 
 def _check_name(raw: object) -> str:
     name = sanitize_line(raw) if isinstance(raw, str) else ""
-    return name or "(unnamed check)"
+    return name or m.UNNAMED_CHECK
 
 
 def _check_url(raw: object) -> str | None:
@@ -597,13 +597,15 @@ class GitHubBackend:
 
     # -- show ----------------------------------------------------------------------------------
 
-    def get_pr(self, ref: PrRef) -> m.PrRead:
+    def get_pr(self, ref: PrRef, readiness: m.Readiness | None = None) -> m.PrRead:
         owner, name = _split(ref)
         if ref.number > MAX_PR_NUMBER:
             raise ForgectlError("not_found", "no such pull request")
         target = self._env.hosts.target(ref.host)
         shown, still_unknown = self._env.until_known(
-            lambda: self._read_show(target, ref, owner, name), _is_unknown, SHOW_READINESS
+            lambda: self._read_show(target, ref, owner, name),
+            _is_unknown,
+            SHOW_READINESS if readiness is None else readiness,
         )
         try:
             return self._normalize(target, ref, owner, name, shown, still_unknown)
@@ -984,6 +986,17 @@ class GitHubBackend:
 
     # -- the reads other issues add ------------------------------------------------------------
 
+    # -- merge (the write; `github_merge.py` owns the call) ------------------------------------
+
+    def merge(self, pr: m.PR, *, sha: str, method: str | None) -> m.MergeAnswer:
+        return github_merge.put_merge(
+            self._env.gateway,
+            self._env.hosts.target(pr.repo.partition("/")[0]),
+            pr,
+            sha=sha,
+            method=method,
+        )
+
     def list_prs(self, query: m.PrQuery) -> m.PrPage:
         from . import github_lists  # lazy: github_lists imports this module
 
@@ -995,13 +1008,19 @@ class GitHubBackend:
         return github_snapshot.snapshot(self._env, ref, self.get_pr)
 
     def diff(self, ref: PrRef) -> m.DiffResult:
-        raise not_implemented("diff")  # TODO(#13)
+        from . import github_diff  # a late import: github_diff reads this module's helpers
+
+        return github_diff.diff_result(self._env, ref)
 
     def compare(self, ref: PrRef, from_sha: str, to_sha: str) -> m.CompareResult:
-        raise not_implemented("compare")  # TODO(#13)
+        from . import github_diff
+
+        return github_diff.compare_result(self._env, ref, from_sha, to_sha)
 
     def files(self, ref: PrRef) -> m.FilesResult:
-        raise not_implemented("files")  # TODO(#13)
+        from . import github_diff
+
+        return github_diff.files_result(self._env, ref)
 
     def comments(self, ref: PrRef) -> m.CommentsResult:
         from . import github_snapshot  # (#12)

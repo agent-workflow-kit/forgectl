@@ -59,12 +59,17 @@ _PIPELINE_UNFINISHED = frozenset(
 )
 #: `pipeline_id` on `/repository/commits/:sha/statuses` (docs.gitlab.com/api/commits, 17.9).
 _STATUSES_PIPELINE_FILTER = (17, 9)
+#: `GET /pipelines/:id/trigger_jobs` replaces the deprecated `/bridges` (docs.gitlab.com/api/jobs,
+#: 19.2); the rows have the same shape.
+_TRIGGER_JOBS = (19, 2)
 #: Errors no degraded read swallows: they say the call itself is unsafe or impossible.
 _NEVER_DEGRADED = frozenset({"auth_required", "wrong_host_response", "tool_missing"})
 #: Not project segments in an MR's `web_url` (the same set as identifiers.py:77, whose constant is
 #: private to that module).
 _BAD_PROJECT_SEGMENTS_IN_URL = frozenset({"-", "merge_requests"})
-_SEVERITY: dict[str, int] = {"skipped": 0, "passing": 1, "pending": 2, "failing": 3}
+#: Pipeline statuses that add nothing only while the jobs are listed: with the job list unreadable
+#: they are the only evidence that work is waiting.
+_PIPELINE_WAITS_ON_JOBS = frozenset({"manual"})
 _MAX_NUMBER = 9_999_999_999
 _SHA = re.compile(r"^[0-9a-f]{40}\Z")
 _RFC3339 = re.compile(
@@ -86,7 +91,15 @@ _SUB_FAILURES = frozenset({"not_found", "permission_denied"})
 
 def _bad(what: str) -> ForgectlError:
     """A host answer that is not the documented shape (the value is never echoed)."""
-    return ForgectlError("upstream_error", f"gitlab: the answer has an unusable {what}")
+    return _Malformed(f"gitlab: the answer has an unusable {what}")
+
+
+class _Malformed(ForgectlError):
+    """An answer forgectl read but whose shape is not the documented one, as `upstream_error`. A
+    degraded read swallows a failed call, never this."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__("upstream_error", message)
 
 
 class _PartMissing(ForgectlError):
@@ -249,6 +262,15 @@ def _part_missing(error: ForgectlError) -> bool:
     return isinstance(error, _PartMissing)
 
 
+def _effect(check: m.Check) -> int:
+    """How much a status row can hold the aggregate back, for equal ids: a counted failure, then a
+    counted pending, then a row that is not counted (skipped, `allow_failure`), then a counted
+    pass. A row that is not counted ranks above a pass so that it never lets the pass stand."""
+    if not check.counted:
+        return 1
+    return {"failing": 3, "pending": 2}.get(check.state, 0)
+
+
 def _not_yet(command: str, issue: int) -> ForgectlError:
     return ForgectlError("internal", f"gitlab {command} is not implemented yet (#{issue})")
 
@@ -315,10 +337,17 @@ class GitLabBackend:
             raise
 
     def _pages(
-        self, target: Target, segments: list[str], query: tuple[tuple[str, str], ...] = ()
+        self,
+        target: Target,
+        segments: list[str],
+        query: tuple[tuple[str, str], ...] = (),
+        *,
+        shape: Any = "list",
     ) -> tuple[list[dict[str, Any]], bool]:
         """Every item of a paginated list, and whether the end was reached. A failed page fails
-        the read. The next page comes from `x-next-page` (UNVERIFIED), else from a full page."""
+        the read. The next page comes from `x-next-page` (UNVERIFIED), else from a full page.
+        With ``shape="any"`` a body that is not a list is checked here, so it raises as malformed
+        rather than as a failed call."""
         items: list[dict[str, Any]] = []
         page = 1
         for _ in range(MAX_PAGES):
@@ -326,7 +355,7 @@ class GitLabBackend:
                 target,
                 segments,
                 query=(*query, ("per_page", PER_PAGE), ("page", str(page))),
-                shape="list",
+                shape=shape,
             )
             batch = _list(response.data, "list")
             for item in batch:
@@ -371,7 +400,9 @@ class GitLabBackend:
 
     # -- show ----------------------------------------------------------------------------------
 
-    def get_pr(self, ref: PrRef) -> m.PrRead:
+    def get_pr(self, ref: PrRef, readiness: m.Readiness | None = None) -> m.PrRead:
+        # ``readiness`` is taken for the protocol and not used yet: the readiness loop is the
+        # injected ``until_known`` (show's). TODO(#22): GitLab merge passes its own readiness.
         raw_number: Any = ref.number
         if (
             isinstance(raw_number, bool)
@@ -927,8 +958,12 @@ class GitLabBackend:
 
     def _ci(self, target: Target, mr: Mapping[str, Any], head_sha: str, project_id: int) -> m.CI:
         """Checks from `head_pipeline`'s statuses (a fork's pipeline from its own project), its
-        own status, and its child pipelines (one check per bridge)."""
-        pipeline = mr.get("head_pipeline")
+        own status, and its child pipelines (one check per bridge). A null `head_pipeline` is no
+        pipeline; a missing key is one the token cannot see, so CI is incomplete."""
+        if "head_pipeline" not in mr:
+            self._warn("the token cannot see the head pipeline; CI is incomplete")
+            return m.aggregate_ci((), pr_head_sha=head_sha, checks_sha=None, complete=False)
+        pipeline = mr["head_pipeline"]
         if pipeline is None:
             return m.aggregate_ci((), pr_head_sha=head_sha, checks_sha=None)
         data = _obj(pipeline, "head_pipeline")
@@ -942,6 +977,7 @@ class GitLabBackend:
         if pipeline_project not in allowed:
             raise _bad("pipeline project")
         fork = pipeline_project != project_id
+        jobs_listed = True
         try:
             status_rows, complete = self._pages(
                 target,
@@ -960,7 +996,7 @@ class GitLabBackend:
             if not (fork and _part_missing(error)):
                 raise
             self._warn("the fork's pipeline could not be read; CI is incomplete")
-            status_rows, complete = [], False
+            status_rows, complete, jobs_listed = [], False, False
         checks = self._checks(status_rows)
         version = self.host_version(target.host)
         if version is None or version < _STATUSES_PIPELINE_FILTER:
@@ -970,13 +1006,14 @@ class GitLabBackend:
                 " statuses may mix pipelines; CI is incomplete"
             )
             complete = False
-        own = self._pipeline_check(data)
+        own = self._pipeline_check(data, jobs_listed=jobs_listed)
         if own is not None:
             checks.append(own)
-        children, children_complete = self._children(target, pipeline_project, pipeline_id)
+        children, children_complete = self._children(target, pipeline_project, pipeline_id, version)
         checks.extend(children)
-        # TODO(#31): a merged-results or merge-train pipeline runs on the merge ref, so its sha
-        # differs from the head and `for_current_head` is false (pending) until a spec decision.
+        # Merged-results and merge-train pipelines run on the merge ref, so their sha differs from
+        # the head: `for_current_head` is false and CI stays pending (fail closed; see
+        # gitlab_ci.py, TODO(#31) for the pending decision).
         return m.aggregate_ci(
             checks,
             pr_head_sha=head_sha,
@@ -984,14 +1021,18 @@ class GitLabBackend:
             complete=complete and children_complete,
         )
 
-    def _pipeline_check(self, data: Mapping[str, Any]) -> m.Check | None:
-        """The head pipeline's own status as a `(pipeline)` check, per its table."""
+    def _pipeline_check(self, data: Mapping[str, Any], *, jobs_listed: bool) -> m.Check | None:
+        """The head pipeline's own status as a `(pipeline)` check, per its table. With the job
+        list unreadable, `manual` is a pending check: no listed job says what waits."""
         raw = data.get("status")
-        if isinstance(raw, str) and raw in _PIPELINE_QUIET:
+        waits = not jobs_listed and isinstance(raw, str) and raw in _PIPELINE_WAITS_ON_JOBS
+        if isinstance(raw, str) and raw in _PIPELINE_QUIET and not waits:
             return None
         state: m.CheckState
         if isinstance(raw, str) and raw in _PIPELINE_FAILED:
             state = "failing"
+        elif waits:
+            state = "pending"
         else:
             state = "pending"
             if not (isinstance(raw, str) and raw in _PIPELINE_UNFINISHED):
@@ -1007,16 +1048,19 @@ class GitLabBackend:
         )
 
     def _children(
-        self, target: Target, project: int, pipeline_id: int
+        self, target: Target, project: int, pipeline_id: int, version: tuple[int, int] | None
     ) -> tuple[list[m.Check], bool]:
         """One `(child) <bridge name>` check per bridge of the head pipeline, from its downstream
-        pipeline's status. A list that cannot be read or is cut is incomplete; a malformed row is
-        `upstream_error`, like a malformed commit-status row."""
-        segments = ["projects", path_int(project), "pipelines", path_int(pipeline_id), "bridges"]
+        pipeline's status: `/trigger_jobs` from GitLab 19.2, `/bridges` (deprecated there) below
+        or on an unreadable version. A list that cannot be read or is cut is incomplete; an answer
+        that is not a list, or a malformed row, is `upstream_error`, like a malformed
+        commit-status row."""
+        route = "trigger_jobs" if version is not None and version >= _TRIGGER_JOBS else "bridges"
+        segments = ["projects", path_int(project), "pipelines", path_int(pipeline_id), route]
         try:
-            rows, done = self._pages(target, segments)
+            rows, done = self._pages(target, segments, shape="any")
         except ForgectlError as error:
-            if error.code in _NEVER_DEGRADED:
+            if error.code in _NEVER_DEGRADED or isinstance(error, _Malformed):
                 raise
             self._warn("the child pipelines could not be read; CI is incomplete")
             return [], False
@@ -1062,7 +1106,8 @@ class GitLabBackend:
         return "pending"
 
     def _checks(self, rows: list[dict[str, Any]]) -> list[m.Check]:
-        """The latest status per name: the highest id, and on equal ids the worse state."""
+        """The latest status per name: the highest id, and on equal ids the row worst for the
+        aggregate (`_effect`)."""
         latest: dict[str, tuple[int, int, m.Check]] = {}
         for row in rows:
             name = row.get("name")
@@ -1077,14 +1122,14 @@ class GitLabBackend:
             allow = _opt_flag(row.get("allow_failure"))
             state = m.normalize_check_state("gitlab", shown, allow_failure=allow, warn=self._warn)
             check = m.Check(
-                name=_line(name) or "(unnamed)",
+                name=_line(name) or m.UNNAMED_CHECK,
                 state=state,
                 required=m.gitlab_required(allow),
                 counted=m.is_counted(state, allow_failure=allow),
                 url=self._check_url(row.get("target_url")),
                 finished_at=_rfc3339(row.get("finished_at")),
             )
-            rank = (identifier, _SEVERITY[state])
+            rank = (identifier, _effect(check))
             if name not in latest or rank > latest[name][:2]:
                 latest[name] = (*rank, check)
         return [check for _, _, check in latest.values()]
@@ -1104,7 +1149,9 @@ class GitLabBackend:
         return gitlab_lists.list_prs(self, query)
 
     def snapshot(self, ref: PrRef) -> m.Snapshot:
-        raise _not_yet("snapshot", 16)  # TODO(#16): GitLab snapshot
+        from . import gitlab_snapshot  # (#16) lazy: that module imports this one
+
+        return gitlab_snapshot.snapshot(self, ref)
 
     def diff(self, ref: PrRef) -> m.DiffResult:
         raise _not_yet("diff", 18)  # TODO(#18): GitLab diff
@@ -1116,13 +1163,19 @@ class GitLabBackend:
         raise _not_yet("files", 18)  # TODO(#18): GitLab files
 
     def comments(self, ref: PrRef) -> m.CommentsResult:
-        raise _not_yet("comments", 16)  # TODO(#16): GitLab comments
+        from . import gitlab_snapshot  # (#16)
+
+        return gitlab_snapshot.comments(self, ref)
 
     def reviews(self, ref: PrRef) -> m.ReviewsResult:
-        raise _not_yet("reviews", 16)  # TODO(#16): GitLab reviews
+        from . import gitlab_snapshot  # (#16)
+
+        return gitlab_snapshot.reviews(self, ref)
 
     def ci(self, ref: PrRef) -> m.CiResult:
-        raise _not_yet("ci", 17)  # TODO(#17): GitLab ci; `_ci` above is the shared read
+        from . import gitlab_ci  # (#17)
+
+        return gitlab_ci.ci(ref, self.get_pr)
 
     def access(self, repo: RepoRef, user: str) -> m.AccessResult:
         from . import gitlab_lists
@@ -1134,8 +1187,8 @@ class GitLabBackend:
 
         return gitlab_lists.whoami(self, host)
 
+    def merge(self, pr: m.PR, *, sha: str, method: str | None) -> m.MergeAnswer:
+        raise _not_yet("merge", 22)  # TODO(#22): GitLab merge
 
-#: The one-line registration seam for the backend factory table.
-BACKEND = GitLabBackend
 
-__all__ = ["BACKEND", "MAX_PAGES", "READINESS_UNKNOWN", "GitLabBackend", "UntilKnown"]
+__all__ = ["MAX_PAGES", "READINESS_UNKNOWN", "GitLabBackend", "UntilKnown"]

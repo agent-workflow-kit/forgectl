@@ -10,10 +10,11 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
+from forgectl import model as m
 from forgectl.backends import gitlab as gl
 from forgectl.backends.base import Backend
 from forgectl.backends.gitlab import GitLabBackend
@@ -68,7 +69,6 @@ def test_the_backend_satisfies_the_protocol_and_names_itself(
     backend = make_backend(fake, tmp_path)
     assert isinstance(backend, Backend)
     assert backend.name == "gitlab"
-    assert gl.BACKEND is GitLabBackend
 
 
 def test_an_open_ready_mr_is_normalized(fake: FakeGitLab, tmp_path: Path) -> None:
@@ -103,6 +103,16 @@ def test_an_open_ready_mr_is_normalized(fake: FakeGitLab, tmp_path: Path) -> Non
         None,
     )
     assert read.ci.state == "passing"
+
+
+def test_the_read_carries_the_reviewer_table_the_review_fields_came_from(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    read = show(fake, tmp_path)
+    approved = [e.login for e in read.latest_by_reviewer if e.state == "approved"]
+    assert approved == ["user-2"]
+    assert len(approved) == read.pr.approvals
+    assert read.pr.review_decision == "approved"
 
 
 def test_show_output_matches_the_schema_and_golden(fake: FakeGitLab, tmp_path: Path) -> None:
@@ -463,13 +473,10 @@ def test_every_other_protocol_method_is_a_typed_not_yet_error(
 ) -> None:
     backend = make_backend(fake, tmp_path)
     for call in (
-        lambda: backend.snapshot(ref()),
-        lambda: backend.comments(ref()),
-        lambda: backend.reviews(ref()),
-        lambda: backend.ci(ref()),
         lambda: backend.files(ref()),
         lambda: backend.diff(ref()),
         lambda: backend.compare(ref(), HEAD, BASE),
+        lambda: backend.merge(cast(m.PR, None), sha=HEAD, method=None),
     ):
         with pytest.raises(ForgectlError) as raised:
             call()

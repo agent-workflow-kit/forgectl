@@ -1,0 +1,233 @@
+[
+  {
+    "id": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+    "individual_note": true,
+    "notes": [
+      {
+        "id": 901,
+        "type": null,
+        "body": "Looks good overall.",
+        "author": {
+          "avatar_url": "https://avatars.example.test/user-3",
+          "id": 13,
+          "name": "User 3",
+          "state": "active",
+          "username": "user-3",
+          "web_url": "https://gitlab.com/user-3"
+        },
+        "created_at": "2026-10-02T11:00:00.000Z",
+        "updated_at": "2026-10-02T11:00:00.000Z",
+        "system": false,
+        "noteable_id": 90001,
+        "noteable_type": "MergeRequest",
+        "noteable_iid": 7,
+        "resolvable": false,
+        "confidential": false,
+        "internal": false
+      }
+    ]
+  },
+  {
+    "id": "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2",
+    "individual_note": false,
+    "notes": [
+      {
+        "id": 902,
+        "type": "DiffNote",
+        "body": "Why this name?",
+        "author": {
+          "avatar_url": "https://avatars.example.test/user-2",
+          "id": 12,
+          "name": "User 2",
+          "state": "active",
+          "username": "user-2",
+          "web_url": "https://gitlab.com/user-2"
+        },
+        "created_at": "2026-10-02T11:05:00.000Z",
+        "updated_at": "2026-10-02T11:05:00.000Z",
+        "system": false,
+        "noteable_id": 90001,
+        "noteable_type": "MergeRequest",
+        "noteable_iid": 7,
+        "resolvable": true,
+        "confidential": false,
+        "internal": false,
+        "resolved": false,
+        "position": {
+          "base_sha": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+          "start_sha": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+          "head_sha": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "old_path": "src/widget.py",
+          "new_path": "src/widget.py",
+          "position_type": "text",
+          "old_line": null,
+          "new_line": 12,
+          "line_range": {
+            "start": {
+              "line_code": "x",
+              "type": "new",
+              "old_line": null,
+              "new_line": 10
+            },
+            "end": {
+              "line_code": "y",
+              "type": "new",
+              "old_line": null,
+              "new_line": 12
+            }
+          }
+        }
+      },
+      {
+        "id": 903,
+        "type": "DiffNote",
+        "body": "Renamed.",
+        "author": {
+          "avatar_url": "https://avatars.example.test/user-1",
+          "id": 11,
+          "name": "User 1",
+          "state": "active",
+          "username": "user-1",
+          "web_url": "https://gitlab.com/user-1"
+        },
+        "created_at": "2026-10-02T11:10:00.000Z",
+        "updated_at": "2026-10-02T11:10:00.000Z",
+        "system": false,
+        "noteable_id": 90001,
+        "noteable_type": "MergeRequest",
+        "noteable_iid": 7,
+        "resolvable": true,
+        "confidential": false,
+        "internal": false,
+        "resolved": false,
+        "position": {
+          "base_sha": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+          "start_sha": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+          "head_sha": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "old_path": "src/widget.py",
+          "new_path": "src/widget.py",
+          "position_type": "text",
+          "old_line": null,
+          "new_line": 12,
+          "line_range": null
+        }
+      }
+    ]
+  },
+  {
+    "id": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3",
+    "individual_note": false,
+    "notes": [
+      {
+        "id": 904,
+        "type": "DiffNote",
+        "body": "Old line nit.",
+        "author": {
+          "avatar_url": "https://avatars.example.test/user-3",
+          "id": 13,
+          "name": "User 3",
+          "state": "active",
+          "username": "user-3",
+          "web_url": "https://gitlab.com/user-3"
+        },
+        "created_at": "2026-10-02T11:20:00.000Z",
+        "updated_at": "2026-10-02T11:20:00.000Z",
+        "system": false,
+        "noteable_id": 90001,
+        "noteable_type": "MergeRequest",
+        "noteable_iid": 7,
+        "resolvable": true,
+        "confidential": false,
+        "internal": false,
+        "resolved": true,
+        "resolved_by": {
+          "avatar_url": "https://avatars.example.test/user-2",
+          "id": 12,
+          "name": "User 2",
+          "state": "active",
+          "username": "user-2",
+          "web_url": "https://gitlab.com/user-2"
+        },
+        "position": {
+          "base_sha": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+          "start_sha": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+          "head_sha": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "old_path": "src/widget.py",
+          "new_path": "src/widget.py",
+          "position_type": "text",
+          "old_line": 4,
+          "new_line": null,
+          "line_range": null
+        }
+      }
+    ]
+  },
+  {
+    "id": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+    "individual_note": false,
+    "notes": [
+      {
+        "id": 905,
+        "type": "DiffNote",
+        "body": "File level remark.",
+        "author": {
+          "avatar_url": "https://avatars.example.test/user-2",
+          "id": 12,
+          "name": "User 2",
+          "state": "active",
+          "username": "user-2",
+          "web_url": "https://gitlab.com/user-2"
+        },
+        "created_at": "2026-10-02T11:30:00.000Z",
+        "updated_at": "2026-10-02T11:30:00.000Z",
+        "system": false,
+        "noteable_id": 90001,
+        "noteable_type": "MergeRequest",
+        "noteable_iid": 7,
+        "resolvable": true,
+        "confidential": false,
+        "internal": false,
+        "resolved": false,
+        "position": {
+          "base_sha": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+          "start_sha": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+          "head_sha": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "old_path": "src/widget.py",
+          "new_path": "src/widget.py",
+          "position_type": "file",
+          "old_line": null,
+          "new_line": null,
+          "line_range": null
+        }
+      }
+    ]
+  },
+  {
+    "id": "d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+    "individual_note": true,
+    "notes": [
+      {
+        "id": 906,
+        "type": null,
+        "body": "added 1 commit",
+        "author": {
+          "avatar_url": "https://avatars.example.test/user-1",
+          "id": 11,
+          "name": "User 1",
+          "state": "active",
+          "username": "user-1",
+          "web_url": "https://gitlab.com/user-1"
+        },
+        "created_at": "2026-10-02T11:40:00.000Z",
+        "updated_at": "2026-10-02T11:40:00.000Z",
+        "system": true,
+        "noteable_id": 90001,
+        "noteable_type": "MergeRequest",
+        "noteable_iid": 7,
+        "resolvable": false,
+        "confidential": false,
+        "internal": false
+      }
+    ]
+  }
+]
