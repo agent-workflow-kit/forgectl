@@ -46,7 +46,7 @@ HELP_KEYS: list[tuple[str, str]] = [
     ("?", "this help"),
     ("/", "filter the list (enter keeps it, escape clears it)"),
     ("enter", "open the detail pane for the highlighted PR"),
-    ("esc", "close the detail pane or the filter"),
+    ("esc", "close the detail pane or the filter, or leave the column header"),
     (
         "1-6",
         "toggle a detail section while the detail pane has focus: 1 facts, 2 description, "
@@ -62,7 +62,8 @@ HELP_KEYS: list[tuple[str, str]] = [
     ("right", "scroll the list sideways by one column the other way (or l)"),
     (
         "H",
-        "move to the column header: left and right pick a column, enter or space sorts by it "
+        "move to the column header: left and right (h and l also move) pick a column, "
+        "enter or space sorts by it "
         "(again reverses), escape returns to the list; a click on a header cell sorts too",
     ),
     (
@@ -190,7 +191,8 @@ class HelpScreen(ModalScreen[None]):
 class HeaderBar(Static, can_focus=True):
     """The column header. It takes focus with ``H``: left and right move the column cursor,
     enter or space sorts by that column, escape gives the focus back to the list. A click on a
-    cell sorts by it. The text is drawn by ``BrowseApp``."""
+    cell sorts by it. The text is drawn by ``BrowseApp``: constant column names, and the sort
+    arrow, which takes a cell beside the sorted column's name."""
 
     BINDINGS = [
         Binding("left", "cursor(-1)", "left", show=False),
@@ -201,6 +203,9 @@ class HeaderBar(Static, can_focus=True):
         Binding("space", "sort", "sort", show=False),
         Binding("escape", "leave", "list", show=False),
     ]
+
+    def focus_on_click(self) -> bool:
+        return False  # a click sorts and leaves the focus on the list; it never moves the cursor
 
     def action_cursor(self, direction: int) -> None:
         self.app.header_move(direction)  # type: ignore[attr-defined]
@@ -218,7 +223,7 @@ class HeaderBar(Static, can_focus=True):
             self.app.header_click(offset.x)  # type: ignore[attr-defined]
 
     def on_focus(self) -> None:
-        self.app.call_after_refresh(self.app._paint_header)  # type: ignore[attr-defined]
+        self.app.call_after_refresh(self.app.header_focused)  # type: ignore[attr-defined]
 
     def on_blur(self) -> None:
         self.app.call_after_refresh(self.app._paint_header)  # type: ignore[attr-defined]
@@ -255,7 +260,8 @@ class BrowseApp(App[None]):
     #left { width: 3fr; }
     #detail { width: 2fr; display: none; border-left: solid $primary; padding: 0 1; }
     #filter { display: none; }
-    #header { height: 1; text-style: bold; padding: 0 2; }  /* the list's border and padding */
+    #header { height: 1; text-style: bold; padding: 0 2; }  /* the list's border and padding;
+       constant column names, the sort arrow and the cursor */
     #list { text-wrap: nowrap; text-overflow: ellipsis; }
     #checks { height: auto; max-height: 12; }
     .section-head { text-style: bold; margin-top: 1; }
@@ -340,6 +346,7 @@ class BrowseApp(App[None]):
         # ``set_sort``. todo(#105): the query line's ORDER BY sets this same tuple.
         self._sort: columns.SortState = ()
         self._cursor = "pr"  # the header cursor's column
+        self._rebuild_pending = False  # a rebuild after snapshot arrivals is queued
         self._list_filters: set[str] = set()
         self._shown_prs: list[str] = []  # the PRs in the option list, in order
         self._snap_token = 0  # a newer list load stops the snapshot pool of an older one
@@ -778,7 +785,10 @@ class BrowseApp(App[None]):
         elif self._order_mode == columns.SORT_ATTENTION:
             moves = moves or columns.attention_rank(old) != columns.attention_rank(new)
         if moves:
-            self._apply_filter()
+            # a burst of arrivals rebuilds the list once, after they were all stored
+            if not self._rebuild_pending:
+                self._rebuild_pending = True
+                self.call_after_refresh(self._rebuild)
             return
         if pr not in self._shown_prs:  # hidden before and after: nothing to draw
             self._paint_bar()
@@ -793,6 +803,10 @@ class BrowseApp(App[None]):
             self._list_note = self._internal(exc)
             self._status("")
         self._paint_bar()
+
+    def _rebuild(self) -> None:
+        self._rebuild_pending = False
+        self._apply_filter()
 
     def _prompt(self, cut: columns.Cut, state: columns.RowState) -> Content:
         """One row's text; a changed row is also bold."""
@@ -833,19 +847,28 @@ class BrowseApp(App[None]):
 
     def action_header_focus(self) -> None:
         self._cursor = self._sort[0].column if self._sort else self._sortable_cursor()
+        header = self.query_one("#header", HeaderBar)
+        if header.has_focus:
+            self.header_focused()
+        else:
+            header.focus()  # on_focus reveals the cursor and draws
+
+    def _reveal_cursor(self) -> None:
         self._hoffset = columns.reveal_offset(
             self._cursor, self._pr_width, self._hoffset, self._view_width()
         )
-        self.query_one("#header", HeaderBar).focus()
+
+    def header_focused(self) -> None:
+        """The header took focus, by ``H`` or by tab: bring the cursor's column into view."""
+        self._cursor = self._sortable_cursor()
+        self._reveal_cursor()
         self._redraw()
 
     def header_move(self, direction: int) -> None:
         ids = columns.SORTABLE
         index = ids.index(self._sortable_cursor()) + direction
         self._cursor = ids[max(0, min(index, len(ids) - 1))]
-        self._hoffset = columns.reveal_offset(
-            self._cursor, self._pr_width, self._hoffset, self._view_width()
-        )
+        self._reveal_cursor()
         self._redraw()
 
     def header_sort(self) -> None:
@@ -862,8 +885,7 @@ class BrowseApp(App[None]):
         if column is None:
             return
         if column not in columns.SORTABLE:
-            self._status(f"{column} cannot be sorted")
-            return
+            return  # the note is a status: a click on it does nothing
         self._cursor = column
         self.set_sort(columns.toggle_sort(self._sort, column))
 

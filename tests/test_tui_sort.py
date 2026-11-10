@@ -172,6 +172,19 @@ def test_age_uses_the_snapshots_fresher_update_and_breaks_ties_on_the_push() -> 
     assert ascending == [rows[1].pr, rows[2].pr, rows[0].pr]
 
 
+def test_an_unknown_push_time_stays_after_known_ones_in_both_directions() -> None:
+    rows = [make_row(1), make_row(2), make_row(3)]
+    same = "2026-11-03T11:00:00Z"
+    states = {
+        rows[0].pr: loaded(updated_at=same, pushed_at="2026-11-03T10:00:00Z"),
+        rows[1].pr: loaded(updated_at=same, pushed_at=None),
+        rows[2].pr: loaded(updated_at=same, pushed_at="2026-11-03T08:00:00Z"),
+    }
+    ascending, descending = both_ways(rows, states, "age")
+    assert ascending == [rows[0].pr, rows[2].pr, rows[1].pr]
+    assert descending == [rows[2].pr, rows[0].pr, rows[1].pr]
+
+
 def test_text_columns_compare_case_folded() -> None:
     rows = [
         make_row(1, title="banana", login="Zed"),
@@ -194,8 +207,13 @@ def test_badge_and_roles_sort_as_text() -> None:
     assert sorted_prs(rows, {}, ASC("roles")) == [rows[n - 1].pr for n in (1, 2, 3)]
 
 
-@pytest.mark.parametrize("column", ["ci", "approvals", "review", "comments"])
-def test_rows_without_a_snapshot_sort_last_in_both_directions(column: str) -> None:
+@pytest.mark.parametrize(
+    ("column", "known_ascending"),
+    [("ci", (0, 1)), ("approvals", (1, 0)), ("review", (0, 1)), ("comments", (1, 0))],
+)
+def test_rows_without_a_snapshot_sort_last_in_both_directions(
+    column: str, known_ascending: tuple[int, int]
+) -> None:
     rows = [make_row(n) for n in range(1, 6)]
     states = {
         rows[0].pr: loaded(
@@ -208,11 +226,40 @@ def test_rows_without_a_snapshot_sort_last_in_both_directions(column: str) -> No
         rows[3].pr: columns.RowState(columns.FAILED, error="upstream_error"),
         # rows[4] has no state at all
     }
-    for descending in (False, True):
-        result = sorted_prs(rows, states, ASC(column, descending=descending))
-        assert set(result[:2]) == {rows[0].pr, rows[1].pr}
-        # the unknown rows end on pr, ascending in both directions
-        assert result[2:] == [rows[2].pr, rows[3].pr, rows[4].pr]
+    first, second = (rows[i].pr for i in known_ascending)
+    unknown = [rows[2].pr, rows[3].pr, rows[4].pr]  # end on pr, ascending in both directions
+    ascending, descending = both_ways(rows, states, column)
+    assert ascending == [first, second, *unknown]
+    assert descending == [second, first, *unknown]
+
+
+def test_age_sorts_rows_with_null_times_last_in_both_directions() -> None:
+    rows = [
+        make_row(1, updated_at="2026-11-03T09:00:00Z"),
+        make_row(2, updated_at=""),
+        make_row(3, updated_at="2026-11-01T09:00:00Z"),
+        make_row(4, updated_at="not a time"),
+    ]
+    ascending, descending = both_ways(rows, {}, "age")
+    assert ascending == [rows[n - 1].pr for n in (1, 3, 2, 4)]
+    assert descending == [rows[n - 1].pr for n in (3, 1, 2, 4)]
+
+
+def test_a_loading_row_sorts_by_its_list_data_in_item_columns_and_last_in_snapshot_columns() -> (
+    None
+):
+    rows = [make_row(1, title="bravo"), make_row(2, title="alpha"), make_row(3, title="charlie")]
+    states = {
+        rows[0].pr: loaded(ci_state="passing"),
+        rows[1].pr: columns.RowState(),  # loading
+        rows[2].pr: loaded(ci_state="failing"),
+    }
+    ascending, descending = both_ways(rows, states, "title")
+    assert ascending == [rows[n - 1].pr for n in (2, 1, 3)]  # the loading row, by its title
+    assert descending == [rows[n - 1].pr for n in (3, 1, 2)]
+    ascending, descending = both_ways(rows, states, "ci")
+    assert ascending == [rows[2].pr, rows[0].pr, rows[1].pr]  # failing, passing, then loading
+    assert descending == [rows[0].pr, rows[2].pr, rows[1].pr]
 
 
 def test_ties_end_on_the_pr_and_the_sort_is_deterministic() -> None:
@@ -295,6 +342,14 @@ def test_reveal_offset_scrolls_a_hidden_column_into_view() -> None:
             assert offset == columns.clamp_offset(offset, PR_W, view)
     # a pinned column never moves the scroll
     assert columns.reveal_offset("pr", PR_W, 33, view) == 33
+
+
+@pytest.mark.parametrize("width", [8, 14, 20])
+def test_reveal_offset_does_not_move_when_no_scrolling_column_fits(width: int) -> None:
+    assert columns._scroll_room(PR_W, width) == 0
+    for column in columns.COLUMNS[columns.PINNED :]:
+        for start in (0, 7):
+            assert columns.reveal_offset(column.id, PR_W, start, width) == start
 
 
 # -- pilot -------------------------------------------------------------------------------------
@@ -516,11 +571,13 @@ def test_clicking_a_separator_or_the_note_column_does_not_sort() -> None:
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         note = columns.column_span("note", app._pr_width, 0, app._view_width())
         assert note is not None
+        status = content_of(app, "#status").plain
         await pilot.click("#header", offset=(note[0] + 2, 0))
         pinned = columns.pinned_width(app._pr_width)
         await pilot.click("#header", offset=(pinned + 2, 0))  # the separator after note
         await pilot.pause()
         assert app._sort == ()
+        assert content_of(app, "#status").plain == status  # nothing is said either
         assert "▲" not in header_text(app)
 
     run(script)
@@ -633,3 +690,49 @@ def test_the_help_lists_the_header_key_and_the_arrows() -> None:
     keys = dict(HELP_KEYS)
     assert "H" in keys and "sort" in keys["H"]
     assert any("▲" in key for key, _ in HELP_LEGEND)
+
+
+def test_reaching_the_header_by_focus_scrolls_the_cursor_column_into_view() -> None:
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("H")
+        for _ in range(8):
+            await pilot.press("right")
+        assert app._cursor == "author"
+        await pilot.press("escape")
+        app._hoffset = 0  # scrolled back by the list's own keys
+        app._redraw()
+        await pilot.pause()
+        assert columns.column_span("author", app._pr_width, 0, app._view_width()) is None
+        app.query_one("#header").focus()  # what tab does
+        await pilot.pause()
+        span = columns.column_span("author", app._pr_width, app._hoffset, app._view_width())
+        assert span is not None and span[0] < span[1]
+
+    run(script, width=70)
+
+
+def test_many_arrivals_in_one_tick_rebuild_the_list_once_and_keep_the_selection() -> None:
+    items = [make_item(n, login="u") for n in range(1, 41)]
+    states = ["failing", "pending", "passing", "none"]
+    snaps = {i["pr"]: snap(i["number"], ci=states[i["number"] % 4]) for i in items}
+    source = FakeSource(authored=items, snapshots=snaps)
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        app.set_sort((ASC("ci"),))
+        await pilot.pause()
+        olist = app.query_one("#list", OptionList)
+        olist.highlighted = 20
+        await pilot.pause()
+        kept = shown(app)[20]
+        rebuilds: list[int] = []
+        original = app._apply_filter
+        app._apply_filter = lambda: (rebuilds.append(1), original())[1]  # type: ignore[method-assign]
+        for pr, data in snaps.items():
+            app._snapshot_arrived(pr, columns.RowState(columns.LOADED, columns.summarize(data)))
+        await pilot.pause()
+        await pilot.pause()
+        assert len(rebuilds) == 1
+        highlighted = olist.highlighted
+        assert highlighted is not None and shown(app)[highlighted] == kept
+
+    run(script, source, concurrency=0)

@@ -451,6 +451,8 @@ def reveal_offset(column_id: str, pr_width: int, offset: int, view_width: int) -
     _, start, width = rows[index]
     left = start - rows[PINNED][1]
     room = _scroll_room(pr_width, view_width)
+    if room == 0:
+        return current  # nothing of the scrolling columns fits: do not move blindly
     if left < current or width > room:
         return clamp_offset(left, pr_width, view_width)
     if left + width > current + room:
@@ -533,8 +535,9 @@ def _value(column: str, row: Row, state: RowState) -> Any:
         if updated is None:
             return None
         pushed = _instant(s.pushed_at) if s else None
-        # youngest first when ascending: the key is minus the instant
-        return (-updated, float("inf") if pushed is None else -pushed)
+        # youngest first when ascending: the key is minus the instant; each part is its own
+        # component, so an unknown push stays after the known ones in both directions
+        return (-updated, None if pushed is None else -pushed)
     if s is None:
         return None
     if column == "ci":
@@ -580,9 +583,18 @@ def sort_key(sort: SortState, row: Row, state: RowState) -> tuple[Any, ...]:
     key: list[Any] = []
     for k, value in zip(sort, sort_values(sort, row, state), strict=True):
         if value is None:
-            key.append((1, 0))
-        else:
-            key.append((0, _Reversed(value) if k.descending else value))
+            key.append((1, ()))
+            continue
+        # a compound value is compared part by part, each part unknown-last in its own right
+        parts = value if isinstance(value, tuple) else (value,)
+        key.append(
+            (
+                0,
+                tuple(
+                    (1, 0) if p is None else (0, _Reversed(p) if k.descending else p) for p in parts
+                ),
+            )
+        )
     key.append((repo_of(row).casefold(), _number(row), row.pr))
     return tuple(key)
 
