@@ -91,7 +91,7 @@ def test_a_github_ref_never_reaches_the_gitlab_backend(
     run_forgectl: Run, fake_forges: FakeForges, tmp_path: Path
 ) -> None:
     fake_forges.answer("gh", "graphql", method="POST", body=gh_recording())
-    done = run_show(run_forgectl, tmp_path, "github.com/example-org/example-repo#7")
+    done = run_show(run_forgectl, tmp_path, "github.com/user-7/example-repo#7")
     assert done.returncode == 0, done.stderr
     assert fake_forges.calls("glab") == []
     calls = fake_forges.calls("gh")
@@ -193,7 +193,7 @@ def test_show_of_a_checking_mr_runs_the_readiness_loop_once(
 
     monkeypatch.setattr(GitLabBackend, "get_pr", spy)
     out = reads.show(Invocation("show", Namespace(pr=ref()), True, None))
-    assert isinstance(out, dict)  # the registered handler type also allows a RecordStream
+    assert isinstance(out, dict)  # the registered handler type also allows a record stream
     assert [b["code"] for b in out["blocked_by"]] == ["mergeability_unknown"]
     assert asked == [ref()]  # the handler asks once: the loop is the backend's
     assert fake.count(mr_path()) == SHOW_READINESS.tries
