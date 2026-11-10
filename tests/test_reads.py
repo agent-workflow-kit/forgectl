@@ -352,8 +352,10 @@ def test_create_backend_builds_the_class_of_the_table(monkeypatch: pytest.Monkey
     class Fake:
         name = "github"
 
-        def __init__(self, given: ReadEnv) -> None:
+        @classmethod
+        def from_env(cls, given: ReadEnv) -> Any:
             built.append(given)
+            return cls()
 
     import forgectl.backends.github as module
 
