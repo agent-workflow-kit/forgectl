@@ -369,3 +369,25 @@ def test_show_is_registered_by_reads() -> None:
 
     assert "forgectl.reads" in registry.HANDLER_MODULES
     assert callable(reads.show)
+
+
+def test_a_cancel_during_a_backoff_ends_the_wait_early() -> None:
+    from forgectl.errors import Cancelled
+    from forgectl.gateway import CALL_SCOPE, CallScope
+
+    stop = {"now": False}
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        stop["now"] = True  # the cancel arrives during the first slice
+
+    token = CALL_SCOPE.set(CallScope(cancelled=lambda: stop["now"]))
+    try:
+        env, _clock = make_env()
+        env.sleep = sleep
+        with pytest.raises(Cancelled):
+            env.call(failing("network_error", 1))
+    finally:
+        CALL_SCOPE.reset(token)
+    assert len(slept) == 1 and slept[0] < 1.0  # a slice, not the whole backoff

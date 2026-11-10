@@ -58,8 +58,9 @@ def run_browse(
             "query": browse.query,
             "store": _store(config_path),
         }
+    source = source or LiveSource(config_path=config_path, timeout=timeout)
     app = BrowseApp(
-        source or LiveSource(config_path=config_path, timeout=timeout),
+        source,
         opener or BrowserOpener(),
         focus=focus,
         refresh_interval=refresh or 0,
@@ -67,7 +68,12 @@ def run_browse(
     )
     # TODO(#2): SIGHUP has no handler in cli.py; on a hangup the terminal state (alternate
     # screen, modes) is not restored.
-    app.run()
+    try:
+        app.run()
+    finally:  # reads still running end with the app: no child process group or temp dir stays
+        close = getattr(source, "close", None)
+        if callable(close):
+            close()
     if app.return_code != 0 or getattr(app, "_exception", None) is not None:
         raise ForgectlError("internal", "browse stopped on an internal error")
     return app.result()

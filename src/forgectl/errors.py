@@ -223,6 +223,15 @@ def reset_write_attempted() -> None:
     _write_attempted = False
 
 
+class Cancelled(Exception):
+    """A read was cancelled before its next host call; nothing more was sent to any host.
+
+    It is a plain ``Exception``, not a ``ForgectlError``, and not an error to display: the
+    caller that asked for the cancel (``tui.source_live``) catches it. Code between the gateway
+    and that caller must let it through (``except ForgectlError`` does).
+    """
+
+
 class SignalExit(BaseException):
     """A SIGINT, SIGTERM or SIGHUP arrived: exit 128+N with no envelope, unless a write was
     attempted (``write_attempted``): then exit 12 ``outcome_unknown``.
