@@ -19,9 +19,6 @@ starts; if it is true the call raises ``Cancelled`` without any host traffic. A 
 whose answer is no longer wanted is dropped by the caller's own token, as in ``tui.app``.
 """
 
-# pyright: reportMissingImports=false, reportCallIssue=false
-# The read stack (config, identifiers, the extended Invocation) is not on this branch yet; the
-# imports are lazy and the marker can go once it is merged in.
 from __future__ import annotations
 
 import os
@@ -29,8 +26,13 @@ import threading
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from forgectl import registry
 from forgectl.browse import is_pr
+from forgectl.config import load_config
 from forgectl.errors import ForgectlError
+from forgectl.identifiers import bind_args
+from forgectl.registry import Invocation
+from forgectl.surface import parse
 
 Runner = Callable[[list[str]], dict[str, Any]]
 """Run one read command (``["snapshot", pr]``) and return its ``to_dict`` output; raise a
@@ -46,8 +48,8 @@ def in_process_runner(
 ) -> Runner:
     """A runner over the registered handlers (see the module docstring).
 
-    ``config_path`` is the command line's ``--config`` (else the default lookup). The imports are
-    inside, so the module loads on a branch that has no read stack.
+    ``config_path`` is the command line's ``--config`` (else the default lookup). It mirrors
+    ``cli._run`` between parsing and the handler call: keep the two in step.
     """
     lock = threading.Lock()
     loaded: list[Any] = []  # the LoadedConfig, once
@@ -59,9 +61,6 @@ def in_process_runner(
         thread calling it meanwhile finds no handler. Every call comes through this lock first, so
         the first caller finishes the imports before another one looks.
         """
-        from forgectl import registry
-        from forgectl.config import load_config
-
         with lock:
             if not loaded:  # a failure is not cached: fixing the config and refreshing works
                 registry.load_handlers()
@@ -71,11 +70,6 @@ def in_process_runner(
             return loaded[0]
 
     def run(argv: list[str]) -> dict[str, Any]:
-        from forgectl import registry
-        from forgectl.identifiers import bind_args
-        from forgectl.registry import Invocation
-        from forgectl.surface import parse
-
         args = parse(argv)
         cfg = config()
         bind_args(args, cfg.config)

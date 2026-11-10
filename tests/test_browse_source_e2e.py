@@ -1,11 +1,8 @@
 """`browse` over the real handlers, the real gateway and the fake gh/glab (#73).
 
-Needs the read stack (config, prs, snapshot, diff handlers); until it is on this branch the
-whole module is skipped.
+Needs textual; the module is skipped without it.
 """
 
-# pyright: reportMissingImports=false
-# The read stack's tests and harness are not on this branch yet; the module skips itself.
 from __future__ import annotations
 
 import asyncio
@@ -17,7 +14,6 @@ from typing import Any
 
 import pytest
 
-pytest.importorskip("forgectl.config")
 pytest.importorskip("textual")
 
 from textual.pilot import Pilot  # noqa: E402
