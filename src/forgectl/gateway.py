@@ -1875,3 +1875,26 @@ def _graphql_error(
     if "FORBIDDEN" in types:
         return _error("permission_denied", f"GraphQL: forbidden: {text}")
     return _error("host_rejected", f"GraphQL: {text}", details={"status": status})
+
+
+def start(
+    argv: list[str], *, env: dict[str, str], cwd: str | None = None
+) -> subprocess.Popen[bytes]:
+    """Start ``argv`` detached from the terminal and return at once, without a shell.
+
+    This is the browser opener's entry point: the opener may stay alive as the browser, so it
+    runs in its own session, outside the process-group kill ``run_external`` applies at its
+    deadline, and is never killed. ``env`` is the caller's explicit allowlist (no token variable
+    is ever built into it here). The caller owns the returned process: it records ``pid`` and
+    signals only that exact process, never by name or pattern.
+    """
+    return subprocess.Popen(
+        argv,
+        env=env,
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
