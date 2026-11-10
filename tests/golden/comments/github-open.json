@@ -1,0 +1,156 @@
+{
+  "complete": true,
+  "head_sha": "3f8a1c0d5e7b9a2c4d6e8f0a1b3c5d7e9f0a1b2c",
+  "pr": "github.com/user-7/example-repo#7",
+  "threads": [
+    {
+      "comments": [
+        {
+          "author": {
+            "id": "1003",
+            "is_bot": false,
+            "login": "user-3"
+          },
+          "body": "Gone now.",
+          "created_at": "2026-10-01T12:00:00Z",
+          "id": "gh:rc:PRRC_kwDOexample0003",
+          "minimized": true,
+          "reply_to": null,
+          "review_id": "gh:r:PRR_kwDOexample0001",
+          "updated_at": "2026-10-01T12:00:00Z"
+        }
+      ],
+      "commit_sha": "1111111111111111111111111111111111111111",
+      "id": "gh:rt:PRRT_kwDOexample0002",
+      "line": null,
+      "outdated": true,
+      "path": "src/old.py",
+      "resolvable": true,
+      "resolved": true,
+      "side": "left",
+      "start_line": null
+    },
+    {
+      "comments": [
+        {
+          "author": {
+            "id": "1004",
+            "is_bot": false,
+            "login": "user-4"
+          },
+          "body": "Please add a test.",
+          "created_at": "2026-10-02T08:30:00Z",
+          "id": "gh:ic:IC_kwDOexample0001",
+          "minimized": false,
+          "reply_to": null,
+          "review_id": null,
+          "updated_at": "2026-10-02T08:30:00Z"
+        }
+      ],
+      "commit_sha": null,
+      "id": "gh:ic:IC_kwDOexample0001",
+      "line": null,
+      "outdated": false,
+      "path": null,
+      "resolvable": false,
+      "resolved": false,
+      "side": null,
+      "start_line": null
+    },
+    {
+      "comments": [
+        {
+          "author": {
+            "id": null,
+            "is_bot": null,
+            "login": null
+          },
+          "body": "Spam removed.",
+          "created_at": "2026-10-02T08:45:00Z",
+          "id": "gh:ic:IC_kwDOexample0002",
+          "minimized": true,
+          "reply_to": null,
+          "review_id": null,
+          "updated_at": "2026-10-02T08:45:00Z"
+        }
+      ],
+      "commit_sha": null,
+      "id": "gh:ic:IC_kwDOexample0002",
+      "line": null,
+      "outdated": false,
+      "path": null,
+      "resolvable": false,
+      "resolved": false,
+      "side": null,
+      "start_line": null
+    },
+    {
+      "comments": [
+        {
+          "author": {
+            "id": "1003",
+            "is_bot": false,
+            "login": "user-3"
+          },
+          "body": "Rename this.",
+          "created_at": "2026-10-02T09:31:00Z",
+          "id": "gh:rc:PRRC_kwDOexample0001",
+          "minimized": false,
+          "reply_to": null,
+          "review_id": "gh:r:PRR_kwDOexample0002",
+          "updated_at": "2026-10-02T09:31:00Z"
+        },
+        {
+          "author": {
+            "id": "1001",
+            "is_bot": false,
+            "login": "user-1"
+          },
+          "body": "Done.",
+          "created_at": "2026-10-02T10:00:00Z",
+          "id": "gh:rc:PRRC_kwDOexample0002",
+          "minimized": false,
+          "reply_to": "gh:rc:PRRC_kwDOexample0001",
+          "review_id": null,
+          "updated_at": "2026-10-02T10:05:00Z"
+        }
+      ],
+      "commit_sha": "3f8a1c0d5e7b9a2c4d6e8f0a1b3c5d7e9f0a1b2c",
+      "id": "gh:rt:PRRT_kwDOexample0001",
+      "line": 42,
+      "outdated": false,
+      "path": "src/parser.py",
+      "resolvable": true,
+      "resolved": false,
+      "side": "right",
+      "start_line": 40
+    },
+    {
+      "comments": [
+        {
+          "author": {
+            "id": "1003",
+            "is_bot": false,
+            "login": "user-3"
+          },
+          "body": "Document this file.",
+          "created_at": "2026-10-02T11:00:00Z",
+          "id": "gh:rc:PRRC_kwDOexample0004",
+          "minimized": false,
+          "reply_to": null,
+          "review_id": null,
+          "updated_at": "2026-10-02T11:00:00Z"
+        }
+      ],
+      "commit_sha": "3f8a1c0d5e7b9a2c4d6e8f0a1b3c5d7e9f0a1b2c",
+      "id": "gh:rt:PRRT_kwDOexample0003",
+      "line": null,
+      "outdated": false,
+      "path": "README.md",
+      "resolvable": true,
+      "resolved": false,
+      "side": "right",
+      "start_line": null
+    }
+  ]
+}

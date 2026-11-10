@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import os
 import signal
 import sys
 from argparse import Namespace
 from collections.abc import Iterator
 from contextlib import contextmanager
 from types import FrameType
+from typing import Any
 
-from . import registry
+from . import gateway, jsonlog, registry
+from .config import load_config
 from .errors import ForgectlError
 from .humanactions import Tty, build_context, default_me_name
-from .output import emit_error, emit_success
+from .identifiers import bind_args
+from .output import RecordStream, emit_error, emit_success, warn
 from .registry import Invocation
 from .surface import WRITE_COMMANDS, build_parser, parse
 
@@ -20,10 +24,11 @@ __all__ = ["build_parser", "main"]
 
 
 class SignalExit(BaseException):
-    """A SIGINT or SIGTERM arrived: exit 128+N with no envelope.
+    """A SIGINT, SIGTERM or SIGHUP arrived: exit 128+N with no envelope.
 
-    TODO(#7): once a write is in flight the gateway turns a signal into `outcome_unknown`
-    instead (the audit record and exit 12), and this applies only before any write.
+    The gateway ends the child's group, removes its private directories and lets this propagate.
+    TODO(#21): once a write was attempted, map this to audit `outcome_unknown` and exit 12
+    instead, so 128+N applies only before any write.
     """
 
     def __init__(self, signum: int) -> None:
@@ -39,7 +44,7 @@ def _raise_signal_exit(signum: int, frame: FrameType | None) -> None:
 def _signals() -> Iterator[None]:
     previous: dict[int, object] = {}
     try:
-        for sig in (signal.SIGINT, signal.SIGTERM):
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):  # SIGHUP as SIGTERM
             previous[sig] = signal.signal(sig, _raise_signal_exit)
     except ValueError:  # not the main thread: leave the host's handlers alone
         pass
@@ -60,16 +65,67 @@ def _tty() -> Tty:
     return Tty(stdin=isatty(sys.stdin), stderr=isatty(sys.stderr))
 
 
-def _run(args: Namespace, tty: Tty) -> dict[str, object]:
+def _run(args: Namespace, tty: Tty) -> dict[str, Any] | RecordStream:
     command: str = args.command
+    # Config first: a bad config or FORGECTL_* value ends the run before any command logic.
+    loaded = load_config(getattr(args, "config", None), env=os.environ)
+    # The closed host list: an undeclared host exits 20 here, before any handler or process.
+    bind_args(args, loaded.config)
+    timeout = loaded.timeout_for(getattr(args, "timeout", None))
     human = (
-        build_context(args, tty, me_name=default_me_name()) if command in WRITE_COMMANDS else None
+        build_context(args, tty, me_name=loaded.config.me.name or default_me_name())
+        if command in WRITE_COMMANDS
+        else None
     )
     registry.load_handlers()
     handler = registry.HANDLERS.get(command)
     if handler is None:
         raise ForgectlError("internal", f"{command}: not implemented yet")
-    return handler(Invocation(command=command, args=args, json=args.json, human=human))
+    return handler(
+        Invocation(
+            command=command,
+            args=args,
+            json=args.json,
+            human=human,
+            config=loaded,
+            timeout=timeout,
+        )
+    )
+
+
+def _failure_level(err: ForgectlError) -> str:
+    """Interface Audit and log: error for exit 1; warn for refusals, vetoes, escalations and
+    exit 12; info otherwise."""
+    if err.exit_code == 1:
+        return "error"
+    if err.exit_code in (11, 12, 20) or err.code == "escalated":
+        return "warn"
+    return "info"
+
+
+def _success_level(command: str, *, verbose: bool) -> str | None:
+    """Interface Audit and log: a write's success is ``info``; a read logs only at
+    ``--verbose`` (as ``debug``), so polling does not grow the file."""
+    if command in WRITE_COMMANDS:
+        return "info"
+    return "debug" if verbose else None
+
+
+def _log(level: str, event: str, args: Namespace | None, details: dict[str, Any]) -> None:
+    """One ``log.jsonl`` line. A failure only warns: it never changes the result."""
+    try:
+        text = jsonlog.log_event(
+            jsonlog.state_dir(os.environ),
+            level,
+            event,
+            pr=getattr(args, "pr", None),  # TODO(#5): the normalized id; raw text logs as null
+            host=getattr(args, "host", None),
+            details=details,
+        )
+    except Exception as exc:
+        text = f"log not written: {type(exc).__name__}"
+    if text:
+        warn(text)
 
 
 def _wants_json(argv: list[str]) -> bool:
@@ -88,20 +144,41 @@ def _dispatch(argv: list[str], tty: Tty | None) -> int:
     try:
         args = parse(argv)
         json_mode = args.json
-        emit_success(_run(args, tty or _tty()), json_mode=json_mode)
+        emit_success(_run(args, tty or _tty()), json_mode=json_mode, command=args.command)
+        level = _success_level(args.command, verbose=args.verbose)
+        if level is not None:
+            _log(level, "command_done", args, {"command": args.command})
         return 0
     except ForgectlError as err:
-        return emit_error(
+        code = emit_error(
             err, command=getattr(args, "command", None), args=args, json_mode=json_mode
         )
+        details = {
+            "command": getattr(args, "command", None),
+            "exit_code": code,
+            "reason": err.reason,
+            "message": err.message,
+        }
+        _log(_failure_level(err), err.code, args, details)
+        return code
     except Exception as exc:  # last line of defense: never a traceback
         internal = ForgectlError("internal", f"internal error: {type(exc).__name__}")
-        return emit_error(
+        code = emit_error(
             internal, command=getattr(args, "command", None), args=args, json_mode=json_mode
         )
+        # The exception's text may hold anything; only its type name is logged.
+        details = {
+            "command": getattr(args, "command", None),
+            "exit_code": code,
+            "exception": type(exc).__name__,
+        }
+        _log("error", "internal", args, details)
+        return code
 
 
 def main(argv: list[str] | None = None, *, tty: Tty | None = None) -> int:
+    if argv is None:
+        gateway.harden_process()  # a real invocation only: a token lives in this process's memory
     argv = list(sys.argv[1:] if argv is None else argv)
     # The signal handlers stay installed while an error is printed, so a signal then still ends
     # the run as 128+N rather than a default-handler death in the middle of the output.
@@ -109,4 +186,5 @@ def main(argv: list[str] | None = None, *, tty: Tty | None = None) -> int:
         try:
             return _dispatch(argv, tty)
         except SignalExit as signalled:
+            # TODO(#21): map a signal after Attempt.begin() to exit 12 outcome_unknown.
             return 128 + signalled.signum

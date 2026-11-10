@@ -1,0 +1,21 @@
+{
+  "teams": [
+    {
+      "id": 77,
+      "name": "user-8",
+      "slug": "user-8"
+    }
+  ],
+  "users": [
+    {
+      "id": 1005,
+      "login": "user-5",
+      "type": "User"
+    },
+    {
+      "id": 1007,
+      "login": "user-7",
+      "type": "User"
+    }
+  ]
+}

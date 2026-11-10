@@ -1,0 +1,8 @@
+[
+  {"sha": "a1", "filename": "docs/new.md", "status": "added", "additions": 10, "deletions": 0, "changes": 10, "patch": "@@ -0,0 +1,10 @@\n+x"},
+  {"sha": "a2", "filename": "src/app.py", "status": "modified", "additions": 3, "deletions": 1, "changes": 4, "patch": "@@ -1,2 +1,4 @@\n a\n-b\n+c"},
+  {"sha": "a3", "filename": "src/old.py", "status": "removed", "additions": 0, "deletions": 8, "changes": 8, "patch": "@@ -1,8 +0,0 @@\n-x"},
+  {"sha": "a4", "filename": "src/moved.py", "previous_filename": "src/orig.py", "status": "renamed", "additions": 0, "deletions": 0, "changes": 0},
+  {"sha": "a5", "filename": "src/copy.py", "previous_filename": "src/app.py", "status": "copied", "additions": 0, "deletions": 0, "changes": 0},
+  {"sha": "a6", "filename": "assets/logo.png", "status": "modified", "additions": 0, "deletions": 0, "changes": 0}
+]
