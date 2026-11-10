@@ -541,14 +541,63 @@ def test_mergeability_not_known_gives_the_mr_up(tmp_path: Path, status: str | No
 
 
 @pytest.mark.parametrize(
-    "missing", ["diffHeadSha", "author", "headPipeline", "discussions", "reviewers"]
+    "missing",
+    [
+        "diffHeadSha",
+        "author",
+        "headPipeline",
+        "discussions",
+        "reviewers",
+        "sourceProjectId",
+        "diffRefs",
+        "approvalsLeft",
+        "mergeUser",
+        "mergeWhenPipelineSucceeds",
+        "autoMergeEnabled",
+    ],
 )
 def test_a_missing_field_gives_the_mr_up_never_a_crash(tmp_path: Path, missing: str) -> None:
+    # an absent key is not a null: a null `headPipeline` is a fact (no pipeline), an absent one
+    # is an answer that is not the one asked for
     got = read_with(tmp_path, lambda mr: mr.pop(missing))
-    if missing == "headPipeline":  # no pipeline is a fact, not a missing field
-        assert ref() in got.snapshots
-    else:
-        assert got.snapshots == {} and got.unresolved[ref()].code == BULK_UNAVAILABLE
+    assert got.snapshots == {} and got.unresolved[ref()].code == BULK_UNAVAILABLE
+
+
+@pytest.mark.parametrize("value", [None, 0, "true", "", 1])
+def test_a_system_flag_that_is_not_a_boolean_gives_the_mr_up(tmp_path: Path, value: Any) -> None:
+    def odd(mr: dict[str, Any]) -> None:
+        mr["discussions"]["nodes"][0]["notes"]["nodes"][0]["system"] = value
+
+    got = read_with(tmp_path, odd)
+    assert got.snapshots == {} and got.unresolved[ref()].code == BULK_UNAVAILABLE
+
+
+@pytest.mark.parametrize("iid", ["\u00b2", "\u0663", "9" * 5000, ""])
+def test_an_iid_that_is_not_ascii_digits_never_crashes(tmp_path: Path, iid: str) -> None:
+    odd = mr_node(8)
+    odd["iid"] = iid
+    fake = GraphFake([odd, mr_node(7)])
+    got = read(fake, tmp_path, [ref(number=7), ref(number=8)])
+    assert set(got.snapshots) == {ref(number=7), ref(number=8)}  # the lookup read both
+
+
+def test_a_rest_read_that_hits_a_rate_limit_ends_the_run(tmp_path: Path) -> None:
+    fake = GraphFake([mr_node(n) for n in range(1, 7)])
+    routed(fake)
+    fake.on(
+        "projects/101",
+        {"message": "429"},
+        status=429,
+        headers={"retry-after": "3600"},
+    )
+    refs = [ref(number=n) for n in range(1, 7)]
+    got = read_bulk(env_of(fake, tmp_path / "x"), HOST, refs, now=lambda: NOW)
+    assert got.stopped is not None and got.stopped.code == "rate_limited"
+    assert {u.code for u in got.unresolved.values()} == {"rate_limited"} and len(
+        got.unresolved
+    ) == 6
+    assert fake.count("projects/101") == 1  # nothing asked after the limit
+    assert fake.kinds() == ["probe", "list"]
 
 
 def test_a_node_that_names_no_project_is_not_wanted_and_is_looked_up(tmp_path: Path) -> None:

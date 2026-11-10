@@ -198,6 +198,8 @@ class LiveSource:
         if not prs:
             return {"items": [], "failed": [], "complete": True, "errors": []}
         self._check_cancelled(prs[0], cancelled)
+        # todo(#93): route through self._tracked(["snapshots", "--bulk-only", *prs], cancelled,
+        # prs[0]) once live-read cancellation lands
         return self._run(["snapshots", "--bulk-only", *prs])
 
     def _one(self, command: str, pr: str, cancelled: Callable[[], bool] | None) -> dict[str, Any]:

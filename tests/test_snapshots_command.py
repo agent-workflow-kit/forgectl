@@ -14,6 +14,7 @@ import pytest
 from forgectl import bulk
 from forgectl.backends.bulk_common import BULK_UNAVAILABLE
 from forgectl.errors import ForgectlError
+from forgectl.identifiers import PrRef
 
 from .bulk_support import BulkRouter, bulk_answer, numbers_of, ref
 from .harness import golden, schemas
@@ -149,6 +150,17 @@ def test_duplicate_refs_are_read_once() -> None:
     assert bulk.refs_of(Inv()) == [REF, ref(8)]  # type: ignore[arg-type]
 
 
+def test_one_pr_in_two_spellings_is_read_once() -> None:
+    class Args:
+        refs = [ref(7, "User-7/Example-Repo"), REF, ref(8)]
+
+    class Inv:
+        args = Args()
+
+    got = bulk.refs_of(Inv())  # type: ignore[arg-type]
+    assert got == [ref(7, "User-7/Example-Repo"), ref(8)]
+
+
 def test_too_many_refs_and_none_are_usage_errors() -> None:
     class Inv:
         def __init__(self, refs: list[Any]) -> None:
@@ -159,6 +171,71 @@ def test_too_many_refs_and_none_are_usage_errors() -> None:
     assert caught.value.code == "usage"
     with pytest.raises(ForgectlError):
         bulk.refs_of(Inv(["-", REF]))  # type: ignore[arg-type]
+
+
+def test_a_stop_in_the_per_pr_fallback_reports_every_unread_pr_with_its_code(
+    fake_forges: FakeForges,
+) -> None:
+    limited = http(429, {"message": "API rate limit exceeded"}, headers={"retry-after": "3600"})
+    router = BulkRouter(lambda r: http(502, b"x"), {"ForgectlShow": limited})
+    out = bulk.run_snapshots(make(fake_forges, router).env, [ref(7), ref(8)])
+    assert [f["error"]["code"] for f in out["failed"]] == ["rate_limited", "rate_limited"]
+    assert [e["code"] for e in out["errors"]] == ["rate_limited"]
+    assert router.ops.count("ForgectlShow") == 1  # nothing asked after the limit
+    schemas.validate_cli_output("snapshots", out)
+
+
+def down() -> Any:
+    from forgectl.gateway import ProcessResult
+
+    return ProcessResult(pid=1, pgid=1, returncode=1, stdout=b"", stderr=b"connection reset")
+
+
+def test_network_errors_in_the_fallback_end_the_host_only_after_three_in_a_row(
+    fake_forges: FakeForges,
+) -> None:
+    router = BulkRouter(lambda r: http(502, b"x"), {"ForgectlShow": down()})
+    refs = [ref(n) for n in range(1, 6)]
+    out = bulk.run_snapshots(make(fake_forges, router, retries=0).env, refs)
+    assert router.ops.count("ForgectlShow") == 3
+    assert [f["error"]["code"] for f in out["failed"]] == ["network_error"] * 5
+    assert [e["code"] for e in out["errors"]] == ["network_error"]
+
+
+def test_one_network_error_in_the_fallback_costs_that_pr_only(fake_forges: FakeForges) -> None:
+    answers = [down(), None]
+
+    def show(_request: dict[str, Any]) -> Any:
+        first = answers.pop(0)
+        return first if first is not None else show_recording()
+
+    router = BulkRouter(lambda r: http(502, b"x"), {**per_pr_answers(), "ForgectlShow": show})
+    out = bulk.run_snapshots(make(fake_forges, router, retries=0).env, [REF, ref(8)])
+    assert out["failed"][0]["error"]["code"] == "network_error"
+    assert router.ops.count("ForgectlShow") == 2  # the host was not stopped by the first
+    assert out["errors"] == []
+
+
+def test_a_crashing_bulk_reader_costs_its_host_only(
+    fake_forges: FakeForges, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import types
+
+    def boom(env: Any, host: str, refs: Any) -> Any:
+        raise ValueError("bad digits")
+
+    monkeypatch.setitem(bulk.BULK_READERS, "gitlab", "forgectl.test_stub_reader")
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "forgectl.test_stub_reader",
+        types.SimpleNamespace(read_bulk=boom),
+    )
+    other = PrRef(host="gitlab.example.test", backend="gitlab", project="a/b", number=3)
+    router = BulkRouter()
+    out = bulk.run_snapshots(make(fake_forges, router).env, [ref(7), other], bulk_only=True)
+    assert [i["number"] for i in out["items"]] == [7]
+    assert [f["pr"] for f in out["failed"]] == [str(other)]
+    assert out["failed"][0]["error"]["code"] == BULK_UNAVAILABLE
 
 
 # -- end to end ---------------------------------------------------------------------------------

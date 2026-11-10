@@ -3,20 +3,28 @@
 The PRs are grouped by host and each host's bulk reader (``backends/github_bulk.py``,
 ``backends/gitlab_bulk.py``) reads as many as it can whole. A PR it cannot read whole is read by
 the per-PR ``snapshot`` (the source of truth), unless ``--bulk-only`` asks to be told instead.
-Once a host's run has ended on a rate limit or a credential failure no further request is made
-to it: its remaining PRs are reported with that code (interface: ``snapshots``).
+Once a host's run has ended on a rate limit, a credential failure or the spent time budget no
+further request is made to it: every PR of it not yet read is reported with that code, with or
+without ``--bulk-only`` (interface: ``snapshots``). A ``network_error`` alone is one failed
+request: it ends the run only with the budget spent or after ``MAX_NETWORK_FAILURES`` in a row.
 """
 
 from __future__ import annotations
 
 import importlib
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 
 from . import registry
 from .backends import create_backend
-from .backends.bulk_common import BULK_UNAVAILABLE, HOST_STOPS, BulkRead, Unresolved
+from .backends.bulk_common import (
+    BULK_UNAVAILABLE,
+    MAX_NETWORK_FAILURES,
+    BulkRead,
+    Unresolved,
+    ends_run,
+)
 from .errors import ForgectlError, usage
 from .fanout import host_error, lowest_rate_limit
 from .hosts import redact_secrets
@@ -68,7 +76,13 @@ def refs_of(inv: registry.Invocation) -> list[PrRef]:
         found = given
     if not all(isinstance(r, PrRef) for r in found):
         raise ForgectlError("internal", "snapshots: a pull request was not bound to a host")
-    unique = list(dict.fromkeys(found))
+    # one PR in two spellings (the host and the path are not case sensitive) is read once
+    seen: dict[tuple[str, str, int], PrRef] = {}
+    for found_ref in found:
+        seen.setdefault(
+            (found_ref.host.lower(), found_ref.project.lower(), found_ref.number), found_ref
+        )
+    unique = list(seen.values())
     if not unique:
         raise usage("snapshots: no pull request given")
     if len(unique) > MAX_REFS:
@@ -84,18 +98,27 @@ def _reader(backend: str) -> BulkReader:
     return reader
 
 
+def _exhausted(env: ReadEnv) -> Callable[[], bool]:
+    return lambda: env.gateway.budget.remaining() <= 0
+
+
 def _bulk_host(env: ReadEnv, host: str, refs: list[PrRef]) -> BulkRead:
-    """One host's bulk run. A failure of the whole run is every PR unresolved, never a crash."""
+    """One host's bulk run. A failure of the whole run, whatever it is, is every PR of the host
+    unresolved and never a crash: the other hosts' results are kept."""
     try:
         return _reader(refs[0].backend).read_bulk(env, host, refs)
     except ForgectlError as error:
-        result = BulkRead(reason=_line(error.message))
+        stop = ends_run(error, _exhausted(env))
+        code = error.code if stop else BULK_UNAVAILABLE
+        result = BulkRead(reason=_line(error.message), stopped=error if stop else None)
         for ref in refs:
-            result.unresolved[ref] = Unresolved(
-                error.code if error.code in HOST_STOPS else BULK_UNAVAILABLE, _line(error.message)
-            )
-        if error.code in HOST_STOPS:
-            result.stopped = error
+            result.unresolved[ref] = Unresolved(code, _line(error.message))
+        return result
+    except Exception as error:  # a reader bug must not lose the other hosts' results
+        text = f"unusable answer ({type(error).__name__})"
+        result = BulkRead(reason=text)
+        for ref in refs:
+            result.unresolved[ref] = Unresolved(BULK_UNAVAILABLE, text)
         return result
 
 
@@ -117,10 +140,14 @@ def run_snapshots(
             found[ref] = snap.to_dict()
         if read.stopped is not None:
             stopped[host] = read.stopped
+        network_failures = 0
         for ref in host_refs:
             if ref in found:
                 continue
             why = read.unresolved.get(ref) or Unresolved(BULK_UNAVAILABLE, "not read")
+            if host in stopped and why.code == BULK_UNAVAILABLE:
+                # a PR the host's run ended before it was read: the code of the stop
+                why = Unresolved(stopped[host].code, stopped[host].message)
             if bulk_only or host in stopped:
                 failed[ref] = {"code": why.code, "message": _line(why.message)}
                 continue
@@ -128,10 +155,17 @@ def run_snapshots(
             fallback.append(ref)
             try:
                 found[ref] = create_backend(ref.backend, env).snapshot(ref).to_dict()
+                network_failures = 0
             except ForgectlError as error:
                 failed[ref] = {"code": error.code, "message": _line(error.message)}
-                if error.code in HOST_STOPS:
+                network_failures = network_failures + 1 if error.code == "network_error" else 0
+                if ends_run(error, _exhausted(env)) or network_failures >= MAX_NETWORK_FAILURES:
                     stopped[host] = error
+            except Exception as error:  # a bug of the per-PR path costs this PR, not the command
+                failed[ref] = {
+                    "code": "internal",
+                    "message": f"unusable answer ({type(error).__name__})",
+                }
     items = [found[r] for r in refs if r in found]
     complete = not failed and not stopped and all(i.get("complete") is True for i in items)
     return {

@@ -17,7 +17,7 @@ from forgectl.backends.bulk_common import BULK_UNAVAILABLE
 from forgectl.backends.github_bulk import bulk_query, read_bulk
 from forgectl.model import comparable
 
-from .bulk_support import BulkRouter, bulk_answer, operation, ref
+from .bulk_support import BulkRouter, answer_for, bulk_answer, operation, ref
 from .harness.forges import FakeForges
 from .test_github_show import http
 from .test_github_show import recording as show_recording
@@ -408,14 +408,151 @@ def test_the_operation_is_named_for_the_router() -> None:
     assert github_bulk.PAGE_SIZE == 25 and UTC and datetime
 
 
-def test_a_network_failure_ends_the_host_run_without_halving(fake_forges: FakeForges) -> None:
+def down_result() -> Any:
     from forgectl.gateway import ProcessResult
 
-    down = ProcessResult(pid=1, pgid=1, returncode=1, stdout=b"", stderr=b"dial tcp: no such host")
-    router = BulkRouter(lambda _r: down)
+    return ProcessResult(pid=1, pgid=1, returncode=1, stdout=b"", stderr=b"dial tcp: no such host")
+
+
+def test_one_transient_network_failure_halves_the_page_and_every_pr_is_read(
+    fake_forges: FakeForges,
+) -> None:
+    failed: list[int] = []
+
+    def answer(request: dict[str, Any]) -> Any:
+        if not failed:
+            failed.append(1)
+            return down_result()
+        return answer_for(request)
+
+    router = BulkRouter(answer)
     r = rig(fake_forges, router, retries=0)
     refs = [ref(n) for n in range(1, 61)]
     got = read_bulk(r.env, "github.com", refs, now=lambda: NOW)
-    assert router.bulk_sizes == [25]
+    assert got.stopped is None and got.unresolved == {}
+    assert len(got.snapshots) == 60
+    assert router.bulk_sizes[:3] == [25, 13, 12]
+
+
+def test_repeated_network_failures_end_the_host_run_after_three_in_a_row(
+    fake_forges: FakeForges,
+) -> None:
+    router = BulkRouter(lambda _r: down_result())
+    r = rig(fake_forges, router, retries=0)
+    refs = [ref(n) for n in range(1, 61)]
+    got = read_bulk(r.env, "github.com", refs, now=lambda: NOW)
+    assert router.bulk_sizes == [25, 13, 12]
     assert got.stopped is not None and got.stopped.code == "network_error"
     assert len(got.unresolved) == 60 and got.snapshots == {}
+    assert {u.code for u in got.unresolved.values()} == {"network_error", BULK_UNAVAILABLE}
+
+
+def test_a_network_failure_with_the_budget_spent_ends_the_host_run_at_once(
+    fake_forges: FakeForges,
+) -> None:
+    holder: list[Rig] = []
+
+    def answer(_r: dict[str, Any]) -> Any:
+        holder[0].env.gateway.budget.spent = holder[0].env.gateway.budget.total
+        return down_result()
+
+    router = BulkRouter(answer)
+    r = rig(fake_forges, router, retries=0)
+    holder.append(r)
+    got = read_bulk(r.env, "github.com", [ref(n) for n in range(1, 61)], now=lambda: NOW)
+    assert router.bulk_sizes == [25]
+    assert got.stopped is not None and got.stopped.code == "network_error"
+    assert len(got.unresolved) == 60
+
+
+# -- refs that cannot be asked, and answers that are not shaped as asked -------------------------
+
+
+def test_refs_that_cannot_be_asked_are_not_found_and_never_poison_a_page(
+    fake_forges: FakeForges,
+) -> None:
+    router = BulkRouter()
+    odd = ref(3, "a/b/c")
+    huge = ref(2**31)
+    refs = [ref(7), odd, huge, ref(8)]
+    got = read_bulk(rig(fake_forges, router).env, "github.com", refs, now=lambda: NOW)
+    assert router.bulk_sizes == [2]
+    assert set(got.snapshots) == {ref(7), ref(8)}
+    assert got.unresolved[odd].code == "not_found" and got.unresolved[huge].code == "not_found"
+
+
+@pytest.mark.parametrize("head", ["p\u00b2", "p" + "9" * 5000, "p", "p-1", "p٣"])
+def test_an_error_path_that_is_not_an_alias_fails_the_page_and_never_crashes(
+    fake_forges: FakeForges, head: str
+) -> None:
+    def answer(request: dict[str, Any]) -> Any:
+        doc = answer_for(request)
+        doc["errors"] = [{"type": "FORBIDDEN", "path": [head], "message": "x"}]
+        return doc
+
+    got = read_bulk(
+        rig(fake_forges, BulkRouter(answer)).env, "github.com", [ref(7), ref(8)], now=lambda: NOW
+    )
+    assert got.snapshots == {} and set(got.unresolved) == {ref(7), ref(8)}
+
+
+@pytest.mark.parametrize("kind", [["RATE_LIMITED"], {"a": 1}, 7, None])
+def test_an_error_type_that_is_not_a_string_fails_the_page_and_never_crashes(
+    fake_forges: FakeForges, kind: Any
+) -> None:
+    def answer(request: dict[str, Any]) -> Any:
+        doc = answer_for(request)
+        doc["errors"] = [{"type": kind, "message": "x"}]
+        return doc
+
+    got = read_bulk(rig(fake_forges, BulkRouter(answer)).env, "github.com", [REF], now=lambda: NOW)
+    assert got.snapshots == {} and REF in got.unresolved
+
+
+def test_an_omitted_alias_is_not_a_missing_pr(fake_forges: FakeForges) -> None:
+    def answer(request: dict[str, Any]) -> Any:
+        doc = bulk_answer(7, 8)
+        del doc["data"]["p1"]
+        return doc
+
+    got = read_bulk(
+        rig(fake_forges, BulkRouter(answer)).env, "github.com", [ref(7), ref(8)], now=lambda: NOW
+    )
+    assert set(got.snapshots) == {ref(7)}
+    assert got.unresolved[ref(8)].code == BULK_UNAVAILABLE
+
+
+def test_a_null_alias_without_errors_is_still_not_found(fake_forges: FakeForges) -> None:
+    def answer(request: dict[str, Any]) -> Any:
+        doc = bulk_answer(7, 8)
+        doc["data"]["p1"] = None
+        return doc
+
+    got = read_bulk(
+        rig(fake_forges, BulkRouter(answer)).env, "github.com", [ref(7), ref(8)], now=lambda: NOW
+    )
+    assert got.unresolved[ref(8)].code == "not_found"
+
+
+@pytest.mark.parametrize("field", ["additions", "deletions", "changedFiles", "author"])
+def test_an_absent_pr_field_gives_the_pr_up_but_a_null_author_is_fine(
+    fake_forges: FakeForges, field: str
+) -> None:
+    got = read_with(fake_forges, lambda pr: pr.pop(field))
+    assert got.snapshots == {} and got.unresolved[REF].code == BULK_UNAVAILABLE
+    assert field in got.unresolved[REF].message
+
+
+def test_an_absent_repository_field_gives_the_pr_up(fake_forges: FakeForges) -> None:
+    def answer(request: dict[str, Any]) -> Any:
+        doc = bulk_answer(7)
+        del doc["data"]["p0"]["mergeCommitAllowed"]
+        return doc
+
+    got = read_bulk(rig(fake_forges, BulkRouter(answer)).env, "github.com", [REF], now=lambda: NOW)
+    assert got.snapshots == {} and got.unresolved[REF].code == BULK_UNAVAILABLE
+
+
+def test_a_null_author_is_a_ghost_and_still_read(fake_forges: FakeForges) -> None:
+    got = read_with(fake_forges, lambda pr: pr.update(author=None))
+    assert REF in got.snapshots

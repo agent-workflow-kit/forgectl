@@ -41,9 +41,9 @@ from . import gitlab as gl
 from . import gitlab_snapshot as gls
 from .bulk_common import (
     BULK_UNAVAILABLE,
-    HOST_STOPS,
     BulkRead,
     Unresolved,
+    ends_run,
     give_up_stop,
     run_pages,
 )
@@ -64,6 +64,20 @@ JOBS = 100
 REVIEWERS = 30
 APPROVERS = 100
 LABELS = 100
+
+_IID = re.compile(r"[0-9]{1,9}")
+
+#: Fields that may be null but must be in the answer: an absent key is an answer that is not the
+#: one asked for (a null ``headPipeline`` is a fact: no pipeline).
+_REQUIRED = (
+    "headPipeline",
+    "sourceProjectId",
+    "diffRefs",
+    "approvalsLeft",
+    "mergeUser",
+    "mergeWhenPipelineSucceeds",
+    "autoMergeEnabled",
+)
 
 _GID = re.compile(r"gid://gitlab/[A-Za-z:]+/([0-9]{1,18})\Z")
 
@@ -302,6 +316,9 @@ class _Run:
 
     # -- one request ---------------------------------------------------------------------------
 
+    def exhausted(self) -> bool:
+        return self.env.gateway.budget.remaining() <= 0
+
     def _query(self, query: str, variables: Mapping[str, Any]) -> dict[str, Any]:
         if self.env.gateway.budget.remaining() <= 0:
             raise ForgectlError("network_error", "the time budget ran out before the call")
@@ -340,7 +357,7 @@ class _Run:
                 try:
                     data = self._query(list_query(field), {"first": size, "after": after})
                 except ForgectlError as error:
-                    if error.code in HOST_STOPS:
+                    if ends_run(error, self.exhausted):
                         raise
                     if halvings >= MAX_HALVINGS or size <= 1:
                         break
@@ -376,9 +393,15 @@ class _Run:
         except Unresolved as why:
             return why
         except ForgectlError as error:
-            if error.code == "wrong_host_response":
+            # a failure that ends the host's run (a rate limit met by a REST read of the project,
+            # a credential, the spent budget) is not this MR's: the run stops, others go on
+            if ends_run(error, self.exhausted):
                 raise
-            code = BULK_UNAVAILABLE if error.code == "upstream_error" else error.code
+            code = (
+                BULK_UNAVAILABLE
+                if error.code in ("upstream_error", "network_error")
+                else error.code
+            )
             return Unresolved(code, error.message)
         except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
             return Unresolved(BULK_UNAVAILABLE, "unusable answer")
@@ -429,8 +452,11 @@ class _Run:
         backend, target = self.backend, self.target
         number = ref.number
         iid = node.get("iid")
-        if not isinstance(iid, str) or not iid.isdigit() or int(iid) != number:
+        if not isinstance(iid, str) or not _IID.fullmatch(iid) or int(iid) != number:
             raise Unresolved(BULK_UNAVAILABLE, "unusable answer: iid")
+        absent = [k for k in _REQUIRED if k not in node]
+        if absent:
+            raise Unresolved(BULK_UNAVAILABLE, "the answer lacks: " + ", ".join(absent))
         canonical = backend._canonical_path(node.get("webUrl"), target, number)
         mr_id = _gid(node.get("id"), "id")
         project_id = _gid(_obj(node.get("project"), "project").get("id"), "project id")
@@ -824,11 +850,14 @@ def _discussion(raw: object, mr_id: int) -> dict[str, Any]:
     notes: list[dict[str, Any]] = []
     for item in _nodes(disc.get("notes"), "discussion notes"):
         note = _obj(item, "note")
+        system = note.get("system")
+        if not isinstance(system, bool):
+            raise Unresolved(BULK_UNAVAILABLE, "unusable answer: note system flag")
         notes.append(
             {
                 "id": _gid(note.get("id"), "note id"),
                 "body": note.get("body"),
-                "system": note.get("system") is True,
+                "system": system,
                 "created_at": note.get("createdAt"),
                 "updated_at": note.get("updatedAt"),
                 "resolvable": note.get("resolvable") is True,
@@ -839,6 +868,9 @@ def _discussion(raw: object, mr_id: int) -> dict[str, Any]:
                 "noteable_type": "MergeRequest",
             }
         )
+    # `individual_note` is False because GraphQL does not say; this holds only while an
+    # individual note is never resolvable (its `resolvable` is false), so the thread reader's
+    # `resolvable = not individual and any(note.resolvable)` gives the same answer either way
     return {"id": match.group(1), "individual_note": False, "notes": notes}
 
 
@@ -853,7 +885,7 @@ def _key(node: object) -> tuple[str, int] | None:
     project = node.get("project")
     path = project.get("fullPath") if isinstance(project, dict) else None
     iid = node.get("iid")
-    if not isinstance(path, str) or not isinstance(iid, str) or not iid.isdigit():
+    if not isinstance(path, str) or not isinstance(iid, str) or not _IID.fullmatch(iid):
         return None
     return path.lower(), int(iid)
 
@@ -887,14 +919,14 @@ def read_bulk(
     try:
         run.read_lists(wanted, result, page_size)
     except ForgectlError as error:
-        if error.code not in HOST_STOPS:
+        if not ends_run(error, run.exhausted):
             raise
         result.stopped = error
         give_up_stop(result, [r for r in refs if r not in result.snapshots], error)
         return result
     missing = [r for r in refs if r not in result.snapshots and r not in result.unresolved]
     if missing:
-        more = run_pages(missing, LOOKUP_PAGE, run.ask)
+        more = run_pages(missing, LOOKUP_PAGE, run.ask, exhausted=run.exhausted)
         result.snapshots.update(more.snapshots)
         result.unresolved.update(more.unresolved)
         result.stopped = more.stopped

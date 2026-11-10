@@ -22,6 +22,7 @@ asked once more (``bulk_common.run_pages``).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
@@ -203,12 +204,25 @@ def _variables(page: Sequence[PrRef]) -> dict[str, Any]:
 
 def _chunk_error(errors: Sequence[Any]) -> ForgectlError:
     """The failure a GraphQL ``errors`` list that names no PR amounts to."""
-    types = {e.get("type") for e in errors if isinstance(e, dict)}
+    types = {
+        t for e in errors if isinstance(e, dict) for t in [e.get("type")] if isinstance(t, str)
+    }
     if "RATE_LIMITED" in types:
         return ForgectlError("rate_limited", "GraphQL: rate limited")
     if "FORBIDDEN" in types:
         return ForgectlError("permission_denied", "GraphQL: forbidden")
     return ForgectlError("upstream_error", "GraphQL: the host answered errors for the page")
+
+
+#: An alias the answer does not hold at all (an explicit null is a PR that is not there).
+_ABSENT = object()
+
+#: Fields of the answer that may be null but must be there: a reader that sees none of them has
+#: read an answer that is not the one it asked for.
+_REQUIRED_PR = ("additions", "deletions", "changedFiles", "author")
+_REQUIRED_REPO = ("squashMergeAllowed", "mergeCommitAllowed", "rebaseMergeAllowed")
+
+_ALIAS = re.compile(r"p([0-9]{1,4})")
 
 
 def _alias_errors(errors: Sequence[Any], count: int) -> dict[int, list[dict[str, Any]]]:
@@ -218,7 +232,8 @@ def _alias_errors(errors: Sequence[Any], count: int) -> dict[int, list[dict[str,
     for error in errors:
         path = error.get("path") if isinstance(error, dict) else None
         head = path[0] if isinstance(path, list) and path else None
-        index = int(head[1:]) if isinstance(head, str) and head[1:].isdigit() else -1
+        alias = _ALIAS.fullmatch(head) if isinstance(head, str) else None
+        index = int(alias.group(1)) if alias is not None else -1
         if not isinstance(error, dict) or not 0 <= index < count:
             raise _chunk_error(errors)
         named.setdefault(index, []).append(error)
@@ -273,7 +288,7 @@ class _Run:
         for i, ref in enumerate(page):
             problems = named.get(i, [])
             try:
-                built.append((ref, self._item(ref, data.get(f"p{i}"), problems)))
+                built.append((ref, self._item(ref, data.get(f"p{i}", _ABSENT), problems)))
             except Unresolved as why:
                 built.append((ref, why))
             except Malformed as bad:
@@ -299,14 +314,18 @@ class _Run:
             repo_raw is None and not problems
         ):
             raise Unresolved("not_found", "no such repository, or no access to it, or no such PR")
+        if repo_raw is _ABSENT and not problems:
+            raise Unresolved(BULK_UNAVAILABLE, "the answer holds nothing for this pull request")
         if problems:  # a partial answer for this PR (a field the token may not read)
             raise Unresolved(BULK_UNAVAILABLE, "the host answered errors for this pull request")
         repo = _obj(repo_raw, "the repository")
+        lacking = [k for k in _REQUIRED_REPO if k not in repo]
         pr_raw = _opt_obj(repo.get("pullRequest"), "the pull request")
         if pr_raw is None:
             raise Unresolved("not_found", "no such pull request")
-        if ref.number > MAX_PR_NUMBER:
-            raise Unresolved("not_found", "no such pull request")
+        lacking += [k for k in _REQUIRED_PR if k not in pr_raw]
+        if lacking:
+            raise Unresolved(BULK_UNAVAILABLE, "the answer lacks: " + ", ".join(lacking))
         owner, name = _split(ref)
         project = _project(repo.get("nameWithOwner"), "the repository path")
         number = pr_raw.get("number")
@@ -534,6 +553,23 @@ def read_bulk(
     not for the others."""
     if not refs:
         return BulkRead()
+    # a ref the query cannot carry (a number GraphQL's Int cannot hold, a path that is not
+    # owner/name) is not found at once: in a page it would fail the page for its neighbours
+    askable: list[PrRef] = []
+    skipped: dict[PrRef, Unresolved] = {}
+    for ref in refs:
+        try:
+            _split(ref)
+            if ref.number > MAX_PR_NUMBER:
+                raise ForgectlError("not_found", "no such pull request")
+        except ForgectlError as error:
+            skipped[ref] = Unresolved("not_found", error.message)
+        else:
+            askable.append(ref)
     # a rate limit is retried by `_Run._graphql` itself; every other failure halves the page
     run = _Run(env, host, now)
-    return run_pages(list(refs), page_size, run.ask)
+    result = run_pages(
+        askable, page_size, run.ask, exhausted=lambda: env.gateway.budget.remaining() <= 0
+    )
+    result.unresolved.update(skipped)
+    return result

@@ -296,3 +296,27 @@ def test_a_reload_reads_the_rows_one_by_one_not_in_bulk() -> None:
 def test_bulk_items_are_schema_valid() -> None:
     for snap in BulkSource(rows(GH, 2)).whole([pr(GH, 1)])["items"]:
         validate(snap, "forgectl/cli/snapshot.json")
+
+
+def test_a_type_error_inside_a_batch_read_does_not_run_the_read_twice() -> None:
+    calls: list[list[str]] = []
+
+    class NoCancel(BulkSource):
+        def snapshots(self, prs: list[str]) -> dict[str, Any]:  # type: ignore[override]
+            calls.append(list(prs))
+            raise TypeError("bug inside the read")
+
+    source = NoCancel(rows(GH, 2))
+    app = drive(source, nothing)
+    assert calls == [[pr(GH, 1), pr(GH, 2)]]
+    assert loaded(app) == {pr(GH, 1), pr(GH, 2)}  # the pool read them one by one
+
+
+def test_a_source_whose_snapshots_takes_no_cancelled_is_still_read_in_bulk() -> None:
+    class NoCancel(BulkSource):
+        def snapshots(self, prs: list[str]) -> dict[str, Any]:  # type: ignore[override]
+            return self.whole(prs)
+
+    source = NoCancel(rows(GH, 3))
+    app = drive(source, nothing)
+    assert source.per_row() == [] and len(loaded(app)) == 3

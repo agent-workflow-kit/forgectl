@@ -11,6 +11,7 @@ app, and a row is never dropped: what is not returned as settled is returned for
 from __future__ import annotations
 
 import asyncio
+import inspect
 from typing import Any
 
 from forgectl.errors import ForgectlError
@@ -80,11 +81,17 @@ async def run(app: Any, token: int, order: list[str]) -> list[str]:
     return [pr for pr in order if pr not in settled]
 
 
-def _ask(reader: Any, batch: list[str], cancelled: Any) -> dict[str, Any]:
+def _takes_cancelled(reader: Any) -> bool:
+    """Whether ``reader`` takes ``cancelled`` (the signature decides, as for ``snapshot`` in
+    ``app.py``): a TypeError raised inside a read must never make it run a second time."""
     try:
-        answer = reader(batch, cancelled=cancelled)
-    except TypeError:  # a source whose `snapshots` takes no `cancelled`
-        answer = reader(batch)
+        return "cancelled" in inspect.signature(reader).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _ask(reader: Any, batch: list[str], cancelled: Any) -> dict[str, Any]:
+    answer = reader(batch, cancelled=cancelled) if _takes_cancelled(reader) else reader(batch)
     if not isinstance(answer, dict):
         raise ForgectlError("internal", "snapshots: the source gave no object")
     return answer

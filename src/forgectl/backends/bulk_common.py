@@ -28,9 +28,19 @@ HOST_STOPS = frozenset(
         "wrong_host_response",
         "tool_missing",
         "config_invalid",
-        "network_error",  # no answer in time: the budget of the command is spent
     }
 )
+
+#: ``network_error`` (a reset, a timeout, an unreadable answer) is one failed request: the page is
+#: halved and asked again and a PR it cannot read falls back to the per-PR path. It ends a host's
+#: run only once the command's time budget is spent or after this many failures in a row.
+MAX_NETWORK_FAILURES = 3
+
+
+def ends_run(error: ForgectlError, exhausted: Callable[[], bool]) -> bool:
+    """Whether ``error`` ends a host's run: a ``HOST_STOPS`` code, or a ``network_error`` once
+    the command's time budget (``exhausted()``) is spent."""
+    return error.code in HOST_STOPS or (error.code == "network_error" and exhausted())
 
 
 class Unresolved(Exception):
@@ -66,20 +76,36 @@ def run_pages(
     *,
     min_size: int = 1,
     shrink: Callable[[int], int] = lambda s: max(1, s // 2),
+    exhausted: Callable[[], bool] = lambda: False,
 ) -> BulkRead:
     """Ask for ``refs`` in pages of ``size``; ``ask(page, result)`` fills ``result`` or raises.
 
-    A page that fails (``ForgectlError`` other than ``HOST_STOPS``) is split in two halves, each
+    A page that fails (``ForgectlError`` that does not end the run) is split in two halves, each
     asked once more; a half that fails too is unresolved (``bulk_unavailable``) and the size of
     the pages after it is the half. A page of one PR is asked twice before it is given up. A
-    ``HOST_STOPS`` failure ends the run: this page and every later PR are unresolved with that
-    code and ``result.stopped`` is set.
+    failure that ends the run (``ends_run``, or ``MAX_NETWORK_FAILURES`` ``network_error`` in a
+    row) leaves this page and every later PR unresolved with that code and sets
+    ``result.stopped``.
     """
     result = BulkRead()
     pending = chunked(list(refs), size)
     current = size
     index = 0
     stopped: ForgectlError | None = None
+    network_failures = 0
+
+    def attempt(page: list[PrRef]) -> ForgectlError | None:
+        nonlocal stopped, network_failures
+        try:
+            ask(page, result)
+        except ForgectlError as error:
+            network_failures = network_failures + 1 if error.code == "network_error" else 0
+            if ends_run(error, exhausted) or network_failures >= MAX_NETWORK_FAILURES:
+                stopped = error
+                give_up_stop(result, page, error)
+            return error
+        network_failures = 0
+        return None
 
     def give_up(page: list[PrRef], error: ForgectlError) -> None:
         for ref in page:
@@ -88,41 +114,24 @@ def run_pages(
     while index < len(pending) and stopped is None:
         page = pending[index]
         index += 1
-        try:
-            ask(page, result)
+        failure = attempt(page)
+        if failure is None or stopped is not None:
             continue
-        except ForgectlError as error:
-            if error.code in HOST_STOPS:
-                stopped = error
-                give_up_stop(result, page, error)
-                break
-            failure = error
         # the page failed: halve and ask each half once more
         current = max(min_size, shrink(min(current, len(page))))
         if len(page) == 1:
-            try:
-                ask(page, result)
-                continue
-            except ForgectlError as again:
-                if again.code in HOST_STOPS:
-                    stopped = again
-                    give_up_stop(result, page, again)
-                    break
+            again = attempt(page)
+            if again is not None and stopped is None:
                 give_up(page, again)
-                continue
+            continue
         middle = (len(page) + 1) // 2
         for half in (page[:middle], page[middle:]):
             if stopped is not None:
                 give_up_stop(result, half, stopped)
                 continue
-            try:
-                ask(half, result)
-            except ForgectlError as again:
-                if again.code in HOST_STOPS:
-                    stopped = again
-                    give_up_stop(result, half, again)
-                else:
-                    give_up(half, again if again.code != "internal" else failure)
+            again = attempt(half)
+            if again is not None and stopped is None:
+                give_up(half, again if again.code != "internal" else failure)
         # later pages use the smaller size
         if current < size:
             rest = [ref for later in pending[index:] for ref in later]
