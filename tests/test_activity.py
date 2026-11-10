@@ -440,3 +440,9 @@ def test_to_dict_has_the_four_documented_fields() -> None:
 
 def test_a_null_push_time_serializes_as_null() -> None:
     assert run(pushed_at=None).to_dict()["others_since_push"] is None
+
+
+def test_an_absurdly_long_time_fraction_is_a_malformed_time() -> None:
+    long = "2026-10-02T08:30:00." + "1" * 5000 + "Z"
+    with pytest.raises(ValueError, match="is not an RFC 3339 time with an offset"):
+        run([thread(1, comment(1, OTHER, long))], pushed_at=PUSH)

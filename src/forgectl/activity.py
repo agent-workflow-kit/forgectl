@@ -49,9 +49,10 @@ def _instant(text: str, what: str) -> _Instant:
     whole, digits, offset = found.groups()
     try:
         moment = datetime.fromisoformat(f"{whole}{offset}".upper()).astimezone(UTC)
+        fraction = Fraction(int(digits), 10 ** len(digits)) if digits else Fraction(0)
     except (ValueError, OverflowError):
         raise ValueError(f"{what} is not an RFC 3339 time with an offset") from None
-    return moment, Fraction(int(digits), 10 ** len(digits)) if digits else Fraction(0)
+    return moment, fraction
 
 
 @lru_cache(maxsize=256)
