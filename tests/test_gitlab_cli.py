@@ -193,6 +193,7 @@ def test_show_of_a_checking_mr_runs_the_readiness_loop_once(
 
     monkeypatch.setattr(GitLabBackend, "get_pr", spy)
     out = reads.show(Invocation("show", Namespace(pr=ref()), True, None))
+    assert isinstance(out, dict)  # show answers a document, never a record stream
     assert [b["code"] for b in out["blocked_by"]] == ["mergeability_unknown"]
     assert asked == [ref()]  # the handler asks once: the loop is the backend's
     assert fake.count(mr_path()) == SHOW_READINESS.tries
