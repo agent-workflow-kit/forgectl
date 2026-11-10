@@ -590,6 +590,10 @@ class GitHubBackend:
     def __init__(self, env: ReadEnv) -> None:
         self._env = env
 
+    @classmethod
+    def from_env(cls, env: ReadEnv) -> GitHubBackend:
+        return cls(env)
+
     # -- show ----------------------------------------------------------------------------------
 
     def get_pr(self, ref: PrRef) -> m.PrRead:

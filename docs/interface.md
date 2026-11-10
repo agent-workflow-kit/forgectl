@@ -831,7 +831,7 @@ forgectl stores no long-lived objects, so it has no labels of its own. Conventio
 
 `browse [--focus <pr>] [--result-file PATH] [--interval D]` needs the extra `forgectl[tui]`; without it, exit 2 with the install command.
 
-`browse` is read-only: a dashboard of your open PRs and MRs on GitHub and GitLab, a detail pane with facts, CI, reviews, comments and diff, and one action, `o` open in a browser. The browser runs with forgectl's environment minus every configured `token_env` variable and the [ambient token list](#credentials), as a hook does. Posting stays with the tools that own drafts. Merging is a separate follow-up ([Merge from `browse`](#merge-from-browse-follow-up)). Forge text renders with Textual markup disabled. GitLab rows rely on the GitLab path being verified against a self-managed instance (#35).
+`browse` is read-only: a dashboard of your open PRs and MRs on GitHub and GitLab, a detail pane with facts, CI, reviews, comments and diff, and one action, `o` open in a browser. The browser opener is started with only a short list of variables (`PATH` without relative entries, `HOME`, the locale, display and desktop-session variables, `BROWSER`, `TMPDIR` and the proxy variables) and `/` as its working directory, so no token variable ever reaches it. It runs detached in its own session and outside the gateway's deadline kill: forgectl signals no process it did not start, never kills the opener, and `browse` does not wait on it, only reports a non-zero exit. Posting stays with the tools that own drafts. Merging is a separate follow-up ([Merge from `browse`](#merge-from-browse-follow-up)). Forge text renders with Textual markup disabled. GitLab rows rely on the GitLab path being verified against a self-managed instance (#35).
 
 ### List
 
@@ -861,7 +861,7 @@ The default list is the union of requested-from-you and authored-by-you, as two 
 
 ### Result file
 
-`--result-file` writes `{"intent": "open"|"back", "selected": [...], "merged": [...]}` on exit (`schemas/cli/browse-result.json`). `selected` holds zero or one `pr`; `merged` lists the PRs merged from `browse`, and stays empty until the merge follow-up. `enter` opens the detail pane and `intent` stays `back` on exit; `intent: open` means `o` was used. `o` opens only the built `url`; a check's `url` is shown, opened only when `http` or `https`. Keys: `q` quit, `?` help, `/` filter, `enter` open, `r` refresh selected, `R` refresh all, `o` open in a browser; the keys for sort order and filters are listed in `?`.
+`--result-file` writes `{"intent": "open"|"back", "selected": [...], "merged": [...]}` on exit (`schemas/cli/browse-result.json`). `selected` holds zero or one `pr`; `merged` lists the PRs merged from `browse`, and stays empty until the merge follow-up. `enter` opens the detail pane and `intent` stays `back` on exit; `intent: open` means `o` was used. `o` opens only the built `url`; a check's `url` is shown, opened only when `http` or `https`. Keys: `q` quit, `?` help, `/` filter, `enter` open, `r` refresh selected, `R` refresh all, `o` open in a browser; the keys for sort order and filters are listed in `?`. The result file is written only when `browse` exits 0; on any other exit an existing file is left unchanged and must be ignored by callers.
 
 ### Merge from `browse` (follow-up)
 
