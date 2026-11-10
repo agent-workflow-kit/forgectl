@@ -255,9 +255,29 @@ def test_a_failed_second_append_is_audit_failed_with_the_outcome_in_details(
     with pytest.raises(ForgectlError) as caught:
         attempt.finish("merged")
     assert caught.value.code == "audit_failed" and caught.value.exit_code == 12
-    assert caught.value.details is not None
-    assert caught.value.details["outcome"]["result"] == "merged"
-    assert caught.value.details["outcome"]["attempt_id"] == records(state)[0]["attempt_id"]
+    assert caught.value.details == {"outcome": "merged"}  # the result, as error_details says
+    assert attempt.finished
+
+
+def test_a_real_failed_second_append_is_audit_failed_and_its_envelope_is_valid(
+    state: Path,
+) -> None:
+    from .harness.schemas import validate_error_envelope
+
+    attempt = Attempt(state, context())
+    attempt.begin()
+    (state / "audit.jsonl").chmod(stat.S_IRUSR)
+    try:
+        with pytest.raises(ForgectlError) as caught:
+            attempt.finish("failed")
+    finally:
+        (state / "audit.jsonl").chmod(stat.S_IRUSR | stat.S_IWUSR)
+    err = caught.value
+    assert (err.code, err.details) == ("audit_failed", {"outcome": "failed"})
+    validate_error_envelope(
+        {"error": {"code": err.code, "message": err.message, "details": err.details}}
+    )
+    assert [r["result"] for r in records(state)] == ["attempted"]
 
 
 def test_a_failed_outcome_append_while_a_signal_propagates_keeps_the_signal(
@@ -569,3 +589,56 @@ def test_the_signal_mask_is_restored_when_blocking_raises_after_applying(
         assert real(signal.SIG_BLOCK, set()) == before
     finally:
         real(signal.SIG_SETMASK, before)
+
+
+def test_a_second_signal_during_the_unknown_outcome_append_is_marked_as_after_a_write(
+    state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A signal held during the outcome_unknown append is delivered as a new SignalExit that
+    replaces the first; it must still say a write was attempted (exit 12, not 128+N)."""
+    calls: list[int] = []
+    real = jsonlog._open_append
+
+    def open_and_signal(directory: Path, name: str) -> int:
+        calls.append(1)
+        if len(calls) == 1:  # the outcome_unknown append (patched after begin)
+            os.kill(os.getpid(), signal.SIGINT)
+        return real(directory, name)
+
+    with _signals(), pytest.raises(SignalExit) as caught, Attempt(state, context()) as attempt:
+        attempt.begin()
+        monkeypatch.setattr(jsonlog, "_open_append", open_and_signal)
+        raise SignalExit(signal.SIGTERM)
+    assert caught.value.signum == signal.SIGINT
+    assert caught.value.write_attempted is True
+    assert [r["result"] for r in records(state)] == ["attempted", "outcome_unknown"]
+
+
+def test_a_signal_after_the_outcome_is_recorded_is_marked_as_after_a_write(
+    state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _signals(), pytest.raises(SignalExit) as caught, Attempt(state, context()) as attempt:
+        attempt.begin()
+        _kill_self_during_open(monkeypatch, on_call=1)
+        attempt.finish("merged")
+    assert caught.value.write_attempted is True
+    assert attempt.finished
+
+
+@pytest.mark.parametrize("held", ["SIGINT", "SIGTERM", "SIGHUP"])
+def test_every_signal_forgectl_handles_is_held_during_an_append(
+    state: Path, monkeypatch: pytest.MonkeyPatch, held: str
+) -> None:
+    masks: list[set[int]] = []
+    real = jsonlog.append
+
+    def spy(directory: Path, name: str, record: Any) -> None:
+        masks.append(set(signal.pthread_sigmask(signal.SIG_BLOCK, set())))
+        real(directory, name, record)
+
+    monkeypatch.setattr(jsonlog, "append", spy)
+    with Attempt(state, context()) as attempt:
+        attempt.begin()
+        attempt.finish("merged")
+    assert len(masks) == 2
+    assert all(getattr(signal, held) in mask for mask in masks)

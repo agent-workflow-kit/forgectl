@@ -10,8 +10,9 @@ head as ``sha``, 9. verification by reading, 10. the audit result, ``post-merge`
 
 Nothing here believes an answer to the write: a 2xx is never proof, and every outcome is decided
 by what a later read shows. The write is never retried. After ``Attempt.begin()`` every path
-records exactly one outcome, then runs the ``post-merge`` hooks and exits; a signal records
-``outcome_unknown`` and exits 12 (``cli.py``), without hooks.
+records exactly one outcome, then runs the ``post-merge`` hooks and exits. A signal before the
+outcome is recorded records ``outcome_unknown`` and exits 12 (``cli.py``), without hooks; a signal
+after it stops the remaining hooks and the run ends with the recorded outcome. Never 128+N.
 
 TODO(#23): ``--auto`` (the GitHub ``enablePullRequestAutoMerge`` mutation, GitLab's flags, the
 ``already armed`` row, the ``--auto`` rows of the checks and the head-match availability step).
@@ -30,7 +31,7 @@ from typing import Any
 
 from . import audit, hooks, jsonlog, output, registry
 from .backends.base import Backend
-from .errors import ForgectlError, refused, usage
+from .errors import ForgectlError, SignalExit, refused, usage
 from .humanactions import HumanContext, require_confirmation
 from .identifiers import PrRef
 from .model import (
@@ -40,6 +41,7 @@ from .model import (
     BlockerCode,
     MergeAnswer,
     PrRead,
+    Readiness,
     sorted_blockers,
 )
 from .reads import MERGE_READINESS, NO_READINESS, ReadEnv, backend_for, make_env
@@ -101,12 +103,28 @@ def base_matches(pr: PR, expected_base: str) -> bool:
     return pr.base.ref == expected_base and _MARKER.search(pr.base.ref) is None
 
 
-def resolve_method(inv: registry.Invocation, pr: PR) -> str | None:
+def _allowed_list(pr: PR) -> list[str]:
+    allowed = pr.merge_methods_allowed or ()
+    return [x for x in MERGE_METHODS if x in allowed]
+
+
+def _still_allowed(pr: PR, method: str) -> None:
+    """The re-read of step 7: the method shown in the dialog and sent to the hooks is the one
+    written, so a repo that stopped allowing it refuses rather than switching methods."""
+    if pr.merge_methods_allowed is not None and method not in pr.merge_methods_allowed:
+        raise refused(
+            "method_not_allowed",
+            f"the repository no longer allows {method} merges",
+            details={"allowed": _allowed_list(pr)},
+        )
+
+
+def resolve_method(inv: registry.Invocation, pr: PR) -> str:
     """Merge method (interface: Merge method): ``--method``, else ``repos.<id>.merge_method``,
     else the only allowed one, else ``method_required``. A method the repo disallows is
     ``method_not_allowed``; with the allowed list unknown the host decides."""
     allowed = pr.merge_methods_allowed
-    listed = [] if allowed is None else [x for x in MERGE_METHODS if x in allowed]
+    listed = _allowed_list(pr)
     chosen = inv.config.merge_method_for(pr.repo, flag=inv.args.method)
     if chosen is None:
         if allowed is not None and len(listed) == 1:
@@ -140,6 +158,9 @@ class MergeRun:
         if not isinstance(ref, PrRef):  # bind_args binds it before any handler runs
             raise ForgectlError("internal", "merge: the pull request was not bound to a host")
         self.ref: PrRef = ref
+        #: What output, the audit target, hooks and the log name: the canonical path from the
+        #: first read once there is one (interface: Identifiers), the normalized input before.
+        self.pr_id: str = str(ref)
         self.expected_head: str | None = self.args.expected_head
         self.expected_base: str | None = self.args.expected_base
         self.env: ReadEnv = make_env(inv, sleep=_pause)
@@ -162,12 +183,12 @@ class MergeRun:
 
     def _log(self, level: str, event: str, details: dict[str, Any]) -> None:
         text = jsonlog.log_event(
-            self.directory, level, event, pr=str(self.ref), host=self.ref.host, details=details
+            self.directory, level, event, pr=self.pr_id, host=self.ref.host, details=details
         )
         if text:
             output.warn(text)
 
-    def _read(self, readiness: Any = MERGE_READINESS) -> PrRead:
+    def _read(self, readiness: Readiness = MERGE_READINESS) -> PrRead:
         return self.backend.get_pr(self.ref, readiness)
 
     @property
@@ -201,37 +222,33 @@ class MergeRun:
 
     # -- step 4 --------------------------------------------------------------------------------
 
-    def _check(self, read: PrRead, *, earlier: tuple[Blocker, ...] | None) -> Verdict:
+    def _check(
+        self, read: PrRead, *, earlier: tuple[Blocker, ...] | None, method: str | None = None
+    ) -> Verdict:
         """The table of step 4. ``earlier`` is the blockers of the first run when this is the
         re-read of step 7: a blocker that was not there then refuses even under
-        ``--override-blocks``."""
+        ``--override-blocks``. ``method`` is the first run's method on the re-read: it is kept,
+        or refused if the repo no longer allows it, never resolved again."""
         pr = read.pr
-        human = self.human
-        self._remember(read, None)  # a --dry-run refusal reports what was read
+        # a --dry-run refusal reports what was read, and the caller's method until it resolves
+        self._remember(read, self.args.method if method is None else method)
         if pr.state == "closed":
             raise refused(
                 "not_open", "the pull request is closed and not merged", details={"state": "closed"}
             )
-        if pr.state == "merged":
-            self._check_pin(pr)
-            return Verdict(True, None, ())
         self._check_pin(pr)
-        method_error: ForgectlError | None = None
-        method: str | None = None
-        queue_refuses = pr.merge_queue is not False and not human.is_human
-        if queue_refuses:
+        if pr.state == "merged":
+            return Verdict(True, None, ())
+        if pr.merge_queue is not False and not self.human.is_human:
             raise refused(
                 "no_head_match",
                 "a merge queue (or an unknown queue setting) needs a human: a non-human actor "
                 "cannot rely on the head check",
             )
-        try:
+        if method is None:
             method = resolve_method(self.inv, pr)
-        except ForgectlError as error:
-            method_error = error
-        if method_error is not None:
-            self._remember(read, None)
-            raise method_error
+        else:
+            _still_allowed(pr, method)
         blockers = self._effective_blockers(read)
         self._remember(read, method)
         if blockers and not self.args.override_blocks:
@@ -274,17 +291,23 @@ class MergeRun:
             raise ForgectlError("internal", "merge --auto: not implemented yet")
         if args.override_blocks and not self.human.is_human:  # the gate already refused it
             raise usage("--override-blocks is human-only")
+        if self.backend.name == "gitlab":
+            # TODO(#22): the GitLab backend's merge; refused before any read, hook or record
+            raise ForgectlError("internal", "gitlab merge is not implemented yet (#22)")
         try:
             return self._run()
         except ForgectlError as err:
-            if self.human.dry_run and err.exit_code == 20 and err.plan is None:
-                err.plan = dict(self._plan_fields or {})
+            if self.human.dry_run and err.exit_code == 20:
+                if err.plan is None:
+                    err.plan = dict(self._plan_fields or {})
+                err.fields = {**(err.fields or {}), "pr": self.pr_id}
             raise
 
     def _run(self) -> dict[str, Any]:
         # step 3: the audit file is checked before the PR is read
         audit.check_writable(self.directory)
         first = self._read()
+        self.pr_id = f"{first.pr.repo}#{first.pr.number}"
         self._pin(first.pr)
         verdict = self._check(first, earlier=None)
         if verdict.already_merged:
@@ -295,7 +318,8 @@ class MergeRun:
             return self._dry_output(first, verdict)
         if dialog and not self._dialog(first, verdict):
             raise ForgectlError("confirmation_required", "declined")
-        # step 6: pre-merge hooks (a veto or escalation raises)
+        # step 6: pre-merge hooks (a veto or escalation raises). The method is fixed from here:
+        # what the dialog showed and the hooks saw is what is written.
         method = verdict.method
         pre = hooks.run_pre_hooks(
             self.env.gateway,
@@ -311,11 +335,10 @@ class MergeRun:
         current = first
         if dialog or hooks.entries(self.inv.config.config, "pre-merge"):
             current = self._read()
-            verdict = self._check(current, earlier=self._effective_blockers(first))
+            verdict = self._check(current, earlier=self._effective_blockers(first), method=method)
             if verdict.already_merged:
                 self._log("info", "already_merged", {"decision_ids": self.decision_ids})
                 return self._already_merged_output(current.pr)
-            method = verdict.method
         return self._write(current, verdict, method)
 
     def _pin(self, pr: PR) -> None:
@@ -335,7 +358,7 @@ class MergeRun:
         blockers = ", ".join(b.code.value for b in verdict.blockers) or "none"
         ci = "no checks on this head" if read.ci.state == "none" else read.ci.state
         lines = [
-            f"merge {self.ref}",
+            f"merge {self.pr_id}",
             f"  head:    {pr.head.sha}",
             f"  base:    {pr.base.ref}",
             f"  method:  {verdict.method or 'the host decides'}",
@@ -357,7 +380,7 @@ class MergeRun:
     ) -> dict[str, Any]:
         pr = read.pr
         fields: dict[str, Any] = {
-            "object_id": str(self.ref),
+            "object_id": self.pr_id,
             "repo": pr.repo,
             "head_sha": pr.head.sha,
             "actor": self.human.actor,
@@ -390,7 +413,8 @@ class MergeRun:
         blockers: tuple[Blocker, ...],
         outcome: Outcome,
     ) -> None:
-        fields = self._hook_fields(read, method, blockers, ci=False)
+        # already merged by someone else: what merged is unknown
+        fields = self._hook_fields(read, None if outcome.already else method, blockers, ci=False)
         fields["observed"] = outcome.observed
         fields["result"] = outcome.result
         result = hooks.run_post_hooks(
@@ -399,7 +423,7 @@ class MergeRun:
             fields,
             decision_ids=self.decision_ids,
             state_dir=str(self.directory),
-            pr=str(self.ref),
+            pr=self.pr_id,
         )
         self._absorb_hooks(result)
         for report in result.reports:
@@ -432,7 +456,7 @@ class MergeRun:
         context = audit.AuditContext(
             actor=self.human.actor,
             decision_ids=self.decision_ids,
-            target=str(self.ref),
+            target=self.pr_id,
             action="merge",
             inputs=inputs,
             override=overrides,
@@ -440,21 +464,50 @@ class MergeRun:
         if self.env.gateway.budget.remaining() <= 0:  # nothing was sent: no `attempted` record
             raise ForgectlError("network_error", "the time budget ran out before the merge call")
         audit_error: ForgectlError | None = None
+        signalled = False
         with audit.Attempt(self.directory, context) as attempt:
             attempt.begin()  # a failure here is audit_unavailable and nothing has been sent
-            outcome = self._merge_and_verify(current, method)
+            outcome = self._attempt(current, method)
             try:
                 attempt.finish(outcome.result, observed=outcome.observed)
             except ForgectlError as err:  # audit_failed: the post- hooks still run
                 audit_error = err
-        # every path from here runs the post- hooks, then ends; a signal skipped them (the
-        # exception left the block above)
-        self._post_hooks(current, method, verdict.blockers, outcome)
+            except SignalExit:
+                if not attempt.finished:
+                    raise  # the outcome is not on record: Attempt records outcome_unknown
+                # held during the append and delivered after it: the run ends with what the
+                # record says, and without the post- hooks
+                signalled = True
+                audit_error = attempt.finish_error
+        # A signal before the outcome was recorded left the block above (exit 12
+        # outcome_unknown, no hooks). From here every path ends with the recorded outcome.
+        if not signalled:
+            try:
+                self._post_hooks(current, method, verdict.blockers, outcome)
+            except SignalExit:
+                pass  # the running hook's group was ended; the remaining hooks do not run
         if audit_error is not None:
             raise audit_error
         if outcome.error is not None:
             raise outcome.error
         return self._merged_output(outcome, method)
+
+    def _attempt(self, current: PrRead, method: str | None) -> Outcome:
+        """The write and its verification. A bug here (any non-forgectl exception) is an
+        unknown outcome: the write may have landed, so the audit result and the post- hooks
+        still follow. A signal is not caught."""
+        try:
+            return self._merge_and_verify(current, method)
+        except Exception as exc:
+            self._log("error", "internal", {"exception": type(exc).__name__})
+            return Outcome(
+                "outcome_unknown",
+                error=ForgectlError(
+                    "outcome_unknown",
+                    f"internal error after the merge was sent ({type(exc).__name__}); "
+                    "it may have landed",
+                ),
+            )
 
     def _merge_and_verify(self, current: PrRead, method: str | None) -> Outcome:
         try:
@@ -499,8 +552,8 @@ class MergeRun:
             return self._unexpected(pr)
         if answer.kind == "base_modified":
             return Outcome("failed", error=rejected)
-        if pr.state == "open" and self._effective_blockers_of(pr):
-            blockers = self._effective_blockers_of(pr)
+        blockers = sorted_blockers(pr.blocked_by)
+        if pr.state == "open" and blockers:
             return Outcome(
                 "failed",
                 error=refused(
@@ -511,19 +564,15 @@ class MergeRun:
                 ),
             )
         if answer.kind == "method_not_allowed":
-            allowed = [x for x in MERGE_METHODS if x in (pr.merge_methods_allowed or ())]
             return Outcome(
                 "failed",
                 error=refused(
                     "method_not_allowed",
                     f"the host does not allow this merge method: {shown}",
-                    details={"allowed": allowed},
+                    details={"allowed": _allowed_list(pr)},
                 ),
             )
         return Outcome("failed", error=rejected)
-
-    def _effective_blockers_of(self, pr: PR) -> tuple[Blocker, ...]:
-        return sorted_blockers(pr.blocked_by)
 
     # -- step 9 --------------------------------------------------------------------------------
 
@@ -600,7 +649,7 @@ class MergeRun:
         pr = outcome.pr
         assert pr is not None
         return {
-            "pr": str(self.ref),
+            "pr": self.pr_id,
             "merged": True,
             "already_merged": outcome.already,
             "auto_merge_enabled": False,
@@ -612,7 +661,7 @@ class MergeRun:
 
     def _already_merged_output(self, pr: PR) -> dict[str, Any]:
         out: dict[str, Any] = {
-            "pr": str(self.ref),
+            "pr": self.pr_id,
             "merged": True,
             "already_merged": True,
             "auto_merge_enabled": False,
@@ -644,7 +693,7 @@ class MergeRun:
 
     def _dry_output(self, read: PrRead, verdict: Verdict) -> dict[str, Any]:
         return {
-            "pr": str(self.ref),
+            "pr": self.pr_id,
             "merged": False,
             "already_merged": False,
             "auto_merge_enabled": False,

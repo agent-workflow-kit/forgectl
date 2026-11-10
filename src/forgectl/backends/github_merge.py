@@ -12,8 +12,10 @@ read decides (interface: Merge order, step 9). A 409 and a 405 are mapped here; 
 failure is the gateway's (``rate_limited``, ``permission_denied``, ``not_found``,
 ``host_rejected``, or ``outcome_unknown`` for a 5xx, a timeout or a protocol failure).
 
-UNVERIFIED against a live host until the live suite (#31, #32) checks it: the 200 answer, the
-409 for a wrong ``sha``, the 405 wordings below, and what a merge queue answers.
+Verified live (docs/design.md, Live verification): a ``sha`` that does not match the head answers
+409, and a merged PR with a wrong ``sha`` answers 200 ``merged: true``. UNVERIFIED until the live
+suite (#31, #32) checks it: the 200 answer of a fresh merge, the 405 wordings below, and what a
+merge queue answers.
 """
 
 from __future__ import annotations

@@ -9,11 +9,13 @@ suite (#31, #32) re-checks it.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import io
 import json
 import os
 import signal
+import stat
 import sys
 import time
 from collections.abc import Iterator
@@ -27,10 +29,10 @@ from forgectl import merge as merge_module
 from forgectl.cli import main
 from forgectl.humanactions import Tty
 
-from .harness import schemas
+from .harness import golden, schemas
 from .harness.fixtures import forgectl_env
 from .harness.forges import Call, FakeForges
-from .harness.procs import ProcessRegistry
+from .harness.procs import ProcessRegistry, group_members
 from .harness.safety import assert_call_safe
 from .test_github_show import HEAD, OTHER, TOKEN, recording
 
@@ -162,8 +164,9 @@ class Rig:
         method: str | None = "squash",
         actor: str | None = "auto:bot",
         yes: bool = True,
+        pr: str = PR,
     ) -> Result:
-        argv = ["merge", PR, "--json", "--config", str(self.config(extra_config))]
+        argv = ["merge", pr, "--json", "--config", str(self.config(extra_config))]
         if expected:
             argv += ["--expected-head", HEAD, "--expected-base", BASE]
         if method:
@@ -213,6 +216,10 @@ def rig(
 
 def results(records: list[dict[str, Any]]) -> list[str]:
     return [r["result"] for r in records]
+
+
+def graphql_reads(rig: Rig) -> int:
+    return sum(1 for c in rig.calls() if c.argv[-1] == "graphql")
 
 
 def assert_no_write(rig: Rig) -> None:
@@ -580,7 +587,8 @@ def test_a_dry_run_reports_a_refusal_as_would_refuse_with_the_plan(rig: Rig) -> 
 def test_a_dry_run_runs_no_hooks(rig: Rig, tmp_path: Path) -> None:
     marker = tmp_path / "ran"
     rig.reads(doc())
-    rig.run("--dry-run", extra_config=hook_config("pre-merge", f"touch {marker}"))
+    done = rig.run("--dry-run", extra_config=hook_config("pre-merge", f"touch {marker}"))
+    assert done.code == 0, done.err
     assert not marker.exists()
 
 
@@ -765,7 +773,8 @@ def test_post_merge_fires_on_a_failed_attempt(rig: Rig, tmp_path: Path) -> None:
 def test_post_merge_does_not_fire_on_a_refusal_before_any_attempt(rig: Rig, tmp_path: Path) -> None:
     marker = tmp_path / "ran"
     rig.reads(doc(head=OTHER))
-    rig.run(extra_config=hook_config("post-merge", f"touch {marker}"))
+    done = rig.run(extra_config=hook_config("post-merge", f"touch {marker}"))
+    assert done.code == 20 and done.error["reason"] == "stale_head"
     assert not marker.exists()
 
 
@@ -806,18 +815,26 @@ def test_an_audit_failure_after_the_write_is_audit_failed_and_post_hooks_still_r
     rig: Rig, tmp_path: Path
 ) -> None:
     marker = tmp_path / "ran"
+    audit_file = Path(os.environ["XDG_STATE_HOME"]) / "forgectl" / "audit.jsonl"
     rig.reads(doc(), merged())
     rig.put()
+    original = merge_module.MergeRun._merge_and_verify
 
-    def broken(self: Any, result: str, **kw: Any) -> None:
-        from forgectl.errors import ForgectlError
+    def then_lock(self: Any, current: Any, method: Any) -> Any:
+        outcome = original(self, current, method)
+        audit_file.chmod(stat.S_IRUSR)  # the real second append now fails
+        return outcome
 
-        self._finished = True
-        raise ForgectlError("audit_failed", "no", details={"outcome": result})
-
-    rig.monkeypatch.setattr("forgectl.audit.Attempt.finish", broken)
-    done = rig.run(extra_config=hook_config("post-merge", f"touch {marker}"))
-    assert done.code == 12 and done.error["code"] == "audit_failed"
+    rig.monkeypatch.setattr(merge_module.MergeRun, "_merge_and_verify", then_lock)
+    try:
+        done = rig.run(extra_config=hook_config("post-merge", f"touch {marker}"))
+    finally:
+        audit_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    assert done.code == 12
+    err = done.error  # validated against the envelope schema
+    assert err["code"] == "audit_failed"
+    assert err["details"] == {"outcome": "merged"}
+    assert results(rig.audit()) == ["attempted"]
     assert marker.exists()
 
 
@@ -832,6 +849,7 @@ def test_a_409_is_stale_head_with_the_head_from_one_read(rig: Rig) -> None:
     assert done.error["details"] == {"head_sha": OTHER}
     assert results(rig.audit()) == ["attempted", "failed"]
     assert len(rig.puts()) == 1
+    assert graphql_reads(rig) == 2  # the first read, then one read for the head
 
 
 def test_a_409_whose_read_fails_omits_the_head(rig: Rig) -> None:
@@ -853,7 +871,12 @@ def test_a_405_whose_re_read_shows_merged_at_the_expected_head_is_already_merged
     assert done.json["already_merged"] is True and done.json["merged"] is True
     schemas.validate_cli_output("merge", done.json)
     assert results(rig.audit()) == ["attempted", "merged"]
-    assert json.loads(out.read_text())["result"] == "merged"
+    payload = json.loads(out.read_text())
+    assert payload["result"] == "merged"
+    assert graphql_reads(rig) == 2  # one re-read decides
+    # what merged is unknown: someone else merged it
+    assert done.json["method"] is None and payload["method"] is None
+    assert rig.audit()[0]["inputs"]["method"] == "squash"  # the input that was sent
 
 
 def test_a_405_re_read_merged_elsewhere_is_merge_unverified(rig: Rig) -> None:
@@ -863,6 +886,7 @@ def test_a_405_re_read_merged_elsewhere_is_merge_unverified(rig: Rig) -> None:
     assert done.code == 12 and done.error["code"] == "merge_unverified"
     assert results(rig.audit()) == ["attempted", "merged_unexpected"]
     assert rig.audit()[1]["observed"]["head_sha"] == OTHER
+    assert graphql_reads(rig) == 2
 
 
 def test_a_405_with_blockers_is_not_ready(rig: Rig) -> None:
@@ -871,6 +895,7 @@ def test_a_405_with_blockers_is_not_ready(rig: Rig) -> None:
     done = rig.run()
     assert done.code == 20 and done.error["reason"] == "not_ready"
     assert results(rig.audit()) == ["attempted", "failed"]
+    assert graphql_reads(rig) == 2
 
 
 def test_a_405_naming_the_method_is_method_not_allowed(rig: Rig) -> None:
@@ -879,6 +904,7 @@ def test_a_405_naming_the_method_is_method_not_allowed(rig: Rig) -> None:
     done = rig.run()
     assert done.code == 20 and done.error["reason"] == "method_not_allowed"
     assert done.error["details"] == {"allowed": ["squash"]}
+    assert graphql_reads(rig) == 2
 
 
 def test_base_branch_was_modified_is_host_rejected_even_with_blockers(rig: Rig) -> None:
@@ -888,6 +914,7 @@ def test_base_branch_was_modified_is_host_rejected_even_with_blockers(rig: Rig) 
     assert done.code == 12 and done.error["code"] == "host_rejected"
     assert done.error["details"]["status"] == 405
     assert results(rig.audit()) == ["attempted", "failed"]
+    assert graphql_reads(rig) == 2
 
 
 def test_any_other_405_with_a_clean_re_read_is_host_rejected(rig: Rig) -> None:
@@ -895,6 +922,17 @@ def test_any_other_405_with_a_clean_re_read_is_host_rejected(rig: Rig) -> None:
     rig.put(405, {"message": "something else"})
     done = rig.run()
     assert done.code == 12 and done.error["code"] == "host_rejected"
+    assert graphql_reads(rig) == 2
+
+
+def test_a_405_whose_re_read_fails_is_host_rejected_and_failed(rig: Rig) -> None:
+    rig.reads(doc(), {"errors": [{"type": "NOT_FOUND", "message": "x"}], "data": None})
+    rig.put(405, {"message": "Pull Request is not mergeable"})
+    done = rig.run()
+    assert done.code == 12 and done.error["code"] == "host_rejected"
+    assert results(rig.audit()) == ["attempted", "failed"]
+    assert len(rig.puts()) == 1
+    assert graphql_reads(rig) == 2
 
 
 @pytest.mark.parametrize(
@@ -1170,3 +1208,331 @@ def test_copy_of_recordings_is_independent() -> None:
     a["data"]["repository"]["pullRequest"]["title"] = "x"
     assert b["data"]["repository"]["pullRequest"]["title"] != "x"
     assert copy.deepcopy(a) == a
+
+
+# -- review round 1: the write section ---------------------------------------------------------
+
+
+def test_an_internal_error_after_the_attempt_is_outcome_unknown_and_post_hooks_run(
+    rig: Rig, tmp_path: Path
+) -> None:
+    out = tmp_path / "post.json"
+    rig.reads(doc(), merged())
+    rig.put()
+
+    def boom(self: Any, **kw: Any) -> Any:
+        raise RuntimeError("a bug in verification")
+
+    rig.monkeypatch.setattr(merge_module.MergeRun, "_verify", boom)
+    done = rig.run(extra_config=hook_config("post-merge", f"cat > {out}"))
+    assert done.code == 12 and done.error["code"] == "outcome_unknown"
+    assert results(rig.audit()) == ["attempted", "outcome_unknown"]
+    assert json.loads(out.read_text())["result"] == "outcome_unknown"
+    internal = [r for r in rig.log() if r["event"] == "internal"]
+    assert [r["details"]["exception"] for r in internal] == ["RuntimeError"]
+    assert "a bug in verification" not in json.dumps(rig.log())
+
+
+def test_a_method_the_re_read_no_longer_allows_is_refused_with_no_write(
+    rig: Rig, tmp_path: Path
+) -> None:
+    payload = tmp_path / "pre.json"
+    rig.reads(doc(methods=(True, False, False)), doc(methods=(False, True, False)))
+    rig.put()
+    done = rig.run(method=None, extra_config=hook_config("pre-merge", f"cat > {payload}"))
+    assert json.loads(payload.read_text())["method"] == "squash"
+    assert done.code == 20 and done.error["reason"] == "method_not_allowed"
+    assert done.error["details"] == {"allowed": ["merge"]}
+    assert_no_write(rig)
+
+
+def test_the_write_uses_the_method_shown_to_the_hook_when_the_re_read_still_allows_it(
+    rig: Rig, tmp_path: Path
+) -> None:
+    payload = tmp_path / "pre.json"
+    rig.reads(doc(methods=(True, False, False)), doc(methods=(True, True, False)), merged())
+    rig.put()
+    done = rig.run(method=None, extra_config=hook_config("pre-merge", f"cat > {payload}"))
+    assert done.code == 0, done.err
+    assert json.loads(payload.read_text())["method"] == "squash"
+    assert json.loads(rig.puts()[0].stdin or "")["merge_method"] == "squash"
+    assert done.json["method"] == "squash"
+    assert rig.audit()[0]["inputs"]["method"] == "squash"
+
+
+MIXED = "github.com/User-7/Example-Repo#7"
+
+
+def test_merge_reports_the_canonical_pr_id_not_the_typed_one(rig: Rig, tmp_path: Path) -> None:
+    payload = tmp_path / "post.json"
+    rig.reads(doc(), merged())
+    rig.put()
+    hooks_text = (
+        f'hooks:\n  post-merge:\n    - cmd: {json.dumps(f"cat > {payload}")}\n    - cmd: "exit 9"\n'
+    )
+    done = rig.run(pr=MIXED, extra_config=hooks_text)
+    assert done.code == 0, done.err
+    assert done.json["pr"] == PR
+    assert {r["target"] for r in rig.audit()} == {PR}
+    assert json.loads(payload.read_text())["object_id"] == PR
+    failed = [r for r in rig.log() if r["event"] == "hook_failed"]
+    assert [r["pr"] for r in failed] == [PR]
+
+
+def test_a_dry_run_reports_the_canonical_pr_id(rig: Rig) -> None:
+    rig.reads(doc())
+    done = rig.run("--dry-run", pr=MIXED, yes=False)
+    assert done.code == 0 and done.json["pr"] == PR
+
+
+def test_a_dry_run_refusal_after_the_read_reports_the_canonical_pr_id(rig: Rig) -> None:
+    rig.reads(doc(head=OTHER))
+    done = rig.run("--dry-run", pr=MIXED, yes=False)
+    assert done.code == 20
+    schemas.validate_cli_output("merge", done.json)
+    assert done.json["pr"] == PR
+
+
+def test_a_dry_run_refusal_before_the_method_is_resolved_keeps_the_callers_method(
+    rig: Rig,
+) -> None:
+    rig.reads(doc(head=OTHER))
+    done = rig.run("--dry-run", yes=False, method="squash")
+    assert done.code == 20 and done.json["would_refuse"]["reason"] == "stale_head"
+    assert done.json["plan"]["method"] == "squash"
+
+
+def test_a_human_with_failing_ci_and_no_override_is_not_ready_although_the_host_would_merge(
+    rig: Rig,
+) -> None:
+    # an owner or admin may bypass branch protection on the host; forgectl still refuses
+    rig.reads(doc(ci="failing"), merged())
+    rig.put()  # the host would answer 200
+    done = rig.run(actor="human:me")
+    assert done.code == 20 and done.error["reason"] == "not_ready"
+    assert {"code": "checks_failing"} in done.error["details"]["blocked_by"]
+    assert_no_write(rig)
+
+
+def test_a_gitlab_backend_is_refused_before_any_read_hook_or_audit_record(
+    rig: Rig, tmp_path: Path
+) -> None:
+    from forgectl.backends.gitlab import GitLabBackend
+
+    marker = tmp_path / "ran"
+    rig.monkeypatch.setattr(merge_module, "backend_for", lambda ref, env: GitLabBackend(env.hosts))
+    done = rig.run(extra_config=hook_config("pre-merge", f"touch {marker}"))
+    assert done.code == 1 and done.error["code"] == "internal"
+    assert "not implemented yet" in done.error["message"]
+    assert rig.calls() == [] and rig.audit() == []
+    assert not marker.exists()
+
+
+# -- goldens -----------------------------------------------------------------------------------
+
+
+def test_golden_merged(rig: Rig) -> None:
+    rig.reads(doc(), merged())
+    rig.put()
+    done = rig.run()
+    assert done.code == 0, done.err
+    golden.assert_golden("merge/github-merged", done.json, schema_id="forgectl/cli/merge.json")
+
+
+def test_golden_already_merged(rig: Rig) -> None:
+    rig.reads(merged())
+    done = rig.run()
+    assert done.code == 0, done.err
+    golden.assert_golden(
+        "merge/github-already-merged", done.json, schema_id="forgectl/cli/merge.json"
+    )
+
+
+def test_golden_dry_run_plan(rig: Rig) -> None:
+    rig.reads(doc(ci="failing"))
+    done = rig.run("--dry-run", "--override-blocks", actor="human:me", yes=False)
+    assert done.code == 0, done.err
+    golden.assert_golden("merge/github-dry-run", done.json, schema_id="forgectl/cli/merge.json")
+
+
+def test_golden_dry_run_would_refuse(rig: Rig) -> None:
+    rig.reads(doc(merge_state="BEHIND"))
+    done = rig.run("--dry-run", yes=False)
+    assert done.code == 20
+    golden.assert_golden(
+        "merge/github-dry-run-would-refuse", done.json, schema_id="forgectl/cli/merge.json"
+    )
+
+
+# -- signals after the write (a real process) --------------------------------------------------
+
+
+def _merge_argv(cfg: str) -> list[str]:
+    return [sys.executable, "-m", "forgectl", "merge", PR, "--json", "--config", cfg,
+            "--expected-head", HEAD, "--expected-base", BASE, "--method", "squash",
+            "--actor", "auto:bot", "--yes"]  # fmt: skip
+
+
+def _records_of(env: dict[str, str]) -> list[str]:
+    path = Path(env["XDG_STATE_HOME"]) / "forgectl" / "audit.jsonl"
+    return [json.loads(x)["result"] for x in path.read_text().splitlines()]
+
+
+def _wait_for_file(path: Path, timeout: float = 20) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists() and path.read_text().strip():
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"{path} never appeared")
+
+
+def _reap_hook_group(pgid: int) -> None:
+    """The hook's own process group was ended by forgectl; what it left (a killed grandchild,
+    reparented to this subreaper as a zombie) is reaped here by exact PID, so the leaked-child
+    check sees a clean process. A member still alive is our child only if reparented: it is
+    pinned by a pidfd before it is killed."""
+    me = os.getpid()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        members = group_members(pgid)
+        if not members:
+            return
+        for pid, ppid, state in members:
+            if ppid != me:
+                continue
+            if state != "Z":
+                fd = os.pidfd_open(pid)
+                try:
+                    signal.pidfd_send_signal(fd, signal.SIGKILL)  # type: ignore[attr-defined]
+                finally:
+                    os.close(fd)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(pid, os.WNOHANG)
+        time.sleep(0.02)
+    assert group_members(pgid) == [], "the hook's group outlived forgectl"
+
+
+def _slow_hook_env(fake_forges: FakeForges, tmp_path: Path) -> tuple[dict[str, str], Path, Path]:
+    pidfile = tmp_path / "hook-pid"
+    second = tmp_path / "second-ran"
+    cfg = tmp_path / "config.yaml"
+    slow = f"echo $$ > {pidfile}; sleep 30; true"
+    cfg.write_text(
+        "hosts:\n  github.com:\n    token_env: MERGE_TOKEN\n"
+        "hooks:\n  post-merge:\n"
+        f"    - cmd: {json.dumps(slow)}\n"
+        f"    - cmd: {json.dumps(f'touch {second}')}\n",
+        encoding="utf-8",
+    )
+    env = forgectl_env(fake_forges, {"MERGE_TOKEN": TOKEN})
+    env["_CFG"] = str(cfg)
+    return env, pidfile, second
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="needs /proc and pidfd")
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT])
+def test_a_signal_during_a_post_merge_hook_after_a_merge_still_reports_the_merge(
+    fake_forges: FakeForges, procs: ProcessRegistry, tmp_path: Path, signum: int
+) -> None:
+    env, pidfile, second = _slow_hook_env(fake_forges, tmp_path)
+    fake_forges.answer("gh", "graphql", method="POST", body=doc(), times=1)
+    fake_forges.answer("gh", "graphql", method="POST", body=merged())
+    fake_forges.answer("gh", MERGE_ENDPOINT, method="PUT", body=MERGE_OK)
+    proc = procs.popen(_merge_argv(env["_CFG"]), env=env, stdout=-1, stderr=-1, text=True)
+    _wait_for_file(pidfile)
+    hook_pgid = int(pidfile.read_text())
+    time.sleep(0.3)
+    procs.signal(proc, signum)
+    out, err = proc.communicate(timeout=30)
+    _reap_hook_group(hook_pgid)
+    assert proc.returncode == 0, err
+    body = json.loads(out)
+    schemas.validate_cli_output("merge", body)
+    assert body["merged"] is True and body["already_merged"] is False
+    assert _records_of(env) == ["attempted", "merged"]
+    assert not second.exists()  # the remaining post-merge hooks stop
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="needs /proc and pidfd")
+def test_a_signal_during_a_post_merge_hook_after_merge_unverified_keeps_that_outcome(
+    fake_forges: FakeForges, procs: ProcessRegistry, tmp_path: Path
+) -> None:
+    env, pidfile, second = _slow_hook_env(fake_forges, tmp_path)
+    fake_forges.answer("gh", "graphql", method="POST", body=doc(), times=1)
+    fake_forges.answer("gh", "graphql", method="POST", body=merged(head=OTHER))
+    fake_forges.answer("gh", MERGE_ENDPOINT, method="PUT", body=MERGE_OK)
+    proc = procs.popen(_merge_argv(env["_CFG"]), env=env, stdout=-1, stderr=-1, text=True)
+    _wait_for_file(pidfile)
+    hook_pgid = int(pidfile.read_text())
+    time.sleep(0.3)
+    procs.signal(proc, signal.SIGTERM)
+    out, err = proc.communicate(timeout=30)
+    _reap_hook_group(hook_pgid)
+    assert proc.returncode == 12, err
+    body = json.loads(out)
+    schemas.validate_error_envelope(body)
+    assert body["error"]["code"] == "merge_unverified"
+    assert _records_of(env) == ["attempted", "merged_unexpected"]
+    assert not second.exists()
+
+
+def _slow_append_env(
+    env: dict[str, str], tmp_path: Path, result: str
+) -> tuple[dict[str, str], Path]:
+    """Make the audit append of ``result`` slow in the child, through a sitecustomize shim, and
+    mark when it starts; the signals are held while it runs."""
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    started = tmp_path / "append-started"
+    (shim / "sitecustomize.py").write_text(
+        "import os, time\n"
+        "import forgectl.jsonlog as _j\n"
+        "_append = _j.append\n"
+        "def _slow(directory, name, record):\n"
+        "    if name == 'audit.jsonl' and record.get('result') == os.environ['_SLOW_RESULT']:\n"
+        "        with open(os.environ['_SLOW_MARK'], 'w') as f:\n"
+        "            f.write('1')\n"
+        "        time.sleep(1.5)\n"
+        "    return _append(directory, name, record)\n"
+        "_j.append = _slow\n",
+        encoding="utf-8",
+    )
+    return dict(env, PYTHONPATH=str(shim), _SLOW_RESULT=result, _SLOW_MARK=str(started)), started
+
+
+def test_a_second_signal_during_the_unknown_outcome_append_still_exits_12(
+    fake_forges: FakeForges, procs: ProcessRegistry, signal_env: dict[str, str], tmp_path: Path
+) -> None:
+    env, started = _slow_append_env(signal_env, tmp_path, "outcome_unknown")
+    fake_forges.answer("gh", "graphql", method="POST", body=doc())
+    fake_forges.answer("gh", MERGE_ENDPOINT, method="PUT", hang=60)
+    proc = procs.popen(_merge_argv(env["_CFG"]), env=env, stdout=-1, stderr=-1, text=True)
+    _wait_for_call(fake_forges, 2)
+    procs.signal(proc, signal.SIGTERM)
+    _wait_for_file(started)
+    procs.signal(proc, signal.SIGINT)  # held while the outcome_unknown record is written
+    out, err = proc.communicate(timeout=30)
+    assert proc.returncode == 12, err
+    body = json.loads(out)
+    schemas.validate_error_envelope(body)
+    assert body["error"]["code"] == "outcome_unknown"
+    assert _records_of(env) == ["attempted", "outcome_unknown"]
+    assert not Path(signal_env["_MARK"]).exists()
+
+
+def test_a_signal_held_during_the_merged_append_still_reports_the_merge(
+    fake_forges: FakeForges, procs: ProcessRegistry, signal_env: dict[str, str], tmp_path: Path
+) -> None:
+    env, started = _slow_append_env(signal_env, tmp_path, "merged")
+    fake_forges.answer("gh", "graphql", method="POST", body=doc(), times=1)
+    fake_forges.answer("gh", "graphql", method="POST", body=merged())
+    fake_forges.answer("gh", MERGE_ENDPOINT, method="PUT", body=MERGE_OK)
+    proc = procs.popen(_merge_argv(env["_CFG"]), env=env, stdout=-1, stderr=-1, text=True)
+    _wait_for_file(started)
+    procs.signal(proc, signal.SIGTERM)  # delivered once the merged record is on disk
+    out, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    assert json.loads(out)["merged"] is True
+    assert _records_of(env) == ["attempted", "merged"]
+    assert not Path(signal_env["_MARK"]).exists()  # the post-merge hooks stop
