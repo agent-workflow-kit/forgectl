@@ -48,11 +48,12 @@ import threading
 import time
 import urllib.parse
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from .errors import ForgectlError
+from .errors import Cancelled, ForgectlError
 from .sanitize import sanitize_line
 
 if TYPE_CHECKING:  # the watchdog imports this module with the standard library only
@@ -1328,6 +1329,24 @@ class ExecutableMissing(Exception):
         self.name = name
 
 
+@dataclass(frozen=True)
+class CallScope:
+    """What a caller that owns a read wants of every gateway built in its thread meanwhile.
+
+    ``cancelled`` is checked before each host call (true: ``Cancelled``, nothing sent).
+    ``on_spawn(pid, pgid)`` sees each child at launch, and ``on_done()`` runs when that call has
+    ended and its child is reaped, so the caller knows which groups are alive.
+    """
+
+    cancelled: Callable[[], bool] | None = None
+    on_spawn: Callable[[int, int], None] | None = None
+    on_done: Callable[[], None] | None = None
+
+
+CALL_SCOPE: ContextVar[CallScope | None] = ContextVar("forgectl_call_scope", default=None)
+"""Set by ``tui.source_live`` around one read on a worker thread; read when a Gateway is built."""
+
+
 class Gateway:
     """One command's forge access: a budget, the configured executables and a runner.
 
@@ -1353,11 +1372,26 @@ class Gateway:
         self.budget = Budget(config.timeout_for(None) if timeout is None else timeout)
         self._environ = environ
         self._runner = runner
-        self._on_spawn = on_spawn
+        scope = CALL_SCOPE.get()
+        self._cancelled = None if scope is None else scope.cancelled
+        self._on_done = None if scope is None else scope.on_done
+        self._on_spawn = on_spawn if on_spawn is not None or scope is None else scope.on_spawn
         self._max_stdout = max_stdout
         self._max_stderr = max_stderr
         #: The rate-limit headers of every answer this command received, success or failure.
         self.rate_readings: list[RateReading] = []
+
+    def check_cancelled(self) -> None:
+        """Raise ``Cancelled`` when the read this gateway serves was cancelled: called before
+        each host call, so an abandoned read makes no further call."""
+        if self._cancelled is None:
+            return
+        try:
+            stop = self._cancelled()
+        except Exception as exc:  # the caller's callable: its text may hold anything
+            raise _error("internal", f"cancelled: {type(exc).__name__}") from exc
+        if stop:
+            raise Cancelled("cancelled")
 
     def lowest_rate(self, host: str | None = None) -> RateReading | None:
         """The reading with the lowest ``remaining`` (of ``host``, or of every host); the
@@ -1416,6 +1450,7 @@ class Gateway:
         extra = _header_args(headers, has_body=body is not None)
         exe = self._executable(target)
         argv = self._argv(exe, target, method, endpoint, extra, has_body=body is not None)
+        self.check_cancelled()
         remaining = self.budget.remaining()
         if remaining <= 0:
             raise _error("network_error", "the time budget ran out before the call; nothing sent")
@@ -1442,6 +1477,8 @@ class Gateway:
             finally:
                 if write:
                     self.budget.grant_write_reserve()
+                if self._on_done is not None:
+                    self._on_done()
         return self._classify(
             result,
             target,
