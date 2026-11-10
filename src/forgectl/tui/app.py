@@ -51,7 +51,7 @@ v       filter: review requested from me
 f       filter: CI failing
 n       filter: new comments from others
         (filters combine as an intersection; the status bar names them)
-r       refresh selected (the PR in the detail pane, else the highlighted PR)
+r       refresh selected (the PR in the detail pane, else the highlighted row only)
 R       refresh all (both lists, every row, then the detail pane)
         rows keep their last data meanwhile ([refreshing]); a failed refresh keeps it
         and marks the row [stale: code]; [changed] marks a row whose data changed, until
@@ -757,7 +757,8 @@ class BrowseApp(App[None]):
             self.query_one("#list", OptionList).focus()
 
     def action_refresh_selected(self) -> None:
-        """The PR in the visible detail pane, else the highlighted row's PR (opening it)."""
+        """The PR in the visible detail pane (row and detail), else only the highlighted row.
+        With the pane closed it never opens it."""
         if self._detail_pr is not None and self._detail_shown():
             self._start_detail(self._detail_pr)
             return
@@ -765,7 +766,11 @@ class BrowseApp(App[None]):
         if row is None:
             self._status("nothing to refresh: no PR highlighted")
             return
-        self._start_detail(row.pr)
+        if self._busy:  # a round of snapshots is running; it covers this row
+            self._status("a refresh is already running")
+            return
+        if not self._start_snapshots({row.pr}):
+            self._finish_refresh()
 
     def action_reload_list(self) -> None:
         """R: `prs`, then every row's snapshot, then the PR in the detail pane. Never started
