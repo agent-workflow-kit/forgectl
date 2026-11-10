@@ -231,6 +231,13 @@ class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
         raise usage(message)
 
+    def _get_option_tuples(self, option_string: str) -> list[Any]:
+        """No prefix matching of options. ``allow_abbrev=False`` stops it only for ``--long``
+        options; a single-dash argument such as ``-https://...`` would still match ``-h`` as a
+        short-option cluster and print help. Only an exact option string (or ``--opt=value``,
+        which argparse resolves before it gets here) is an option."""
+        return []
+
     def _print_message(self, message: str, file: Any = None) -> None:
         """Print help and version text through the stream-safe writer, so a full or closed
         stdout cannot change the exit code or fail at shutdown."""
@@ -439,7 +446,9 @@ def build_parser() -> argparse.ArgumentParser:
     _writes(p)
 
     p = add("browse", "terminal browser (needs the tui extra)")
-    _once(p, "--focus", type=nonempty, metavar="PR")  # TODO(#38): parse and normalize
+    # TODO(#5): the URL forms of --focus, through identifiers.py (see browse.parse_focus).
+    _once(p, "--focus", type=nonempty, metavar="PR")
+    # TODO(#59): --interval D (a duration or 0) is not parsed yet.
     _once(p, "--result-file", dest="result_file", type=nonempty, metavar="PATH")
 
     p = add("export", "audit records as JSONL")

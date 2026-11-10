@@ -5,7 +5,7 @@
       "resetAt": "2026-10-02T12:00:00Z"
     },
     "repository": {
-      "nameWithOwner": "example-org/example-repo",
+      "nameWithOwner": "user-7/example-repo",
       "pullRequest": {
         "comments": {
           "nodes": [
@@ -236,7 +236,7 @@
             "hasNextPage": false
           }
         },
-        "url": "https://github.com/example-org/example-repo/pull/7"
+        "url": "https://github.com/user-7/example-repo/pull/7"
       }
     }
   }

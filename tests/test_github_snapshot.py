@@ -55,12 +55,12 @@ def pr_of(doc: dict[str, Any]) -> dict[str, Any]:
 
 
 REPO_IDENTITY = {
-    "nameWithOwner": "example-org/example-repo",
-    "url": "https://github.com/example-org/example-repo",
+    "nameWithOwner": "user-7/example-repo",
+    "url": "https://github.com/user-7/example-repo",
 }
 IDENTITY = {
     "number": 7,
-    "url": "https://github.com/example-org/example-repo/pull/7",
+    "url": "https://github.com/user-7/example-repo/pull/7",
     "headRefOid": HEAD,
 }
 
@@ -228,7 +228,7 @@ def test_the_snapshot_is_complete_and_names_no_incomplete_part(make: Callable[..
     out = snap(make)
     assert out["complete"] is True and out["incomplete"] == []
     assert out["fetched_at"] == "2026-10-02T12:00:05Z"
-    assert out["pr"] == "github.com/example-org/example-repo#7"
+    assert out["pr"] == "github.com/user-7/example-repo#7"
 
 
 def test_every_query_is_a_constant_text_and_values_travel_as_variables(
@@ -246,13 +246,11 @@ def test_every_query_is_a_constant_text_and_values_travel_as_variables(
     texts = {r["query"] for r in rig.router.requests if r}
     assert PARTS_QUERY in texts and REQUESTS_QUERY in texts and PUSH_QUERY in texts
     for request in rig.router.requests:
-        assert "example-org" not in request.get("query", "")
+        assert "user-7" not in request.get("query", "")
     push = next(r for r in rig.router.requests if operation(r) == "ForgectlPush")
     assert push["variables"]["head"] == HEAD
     rest_argv = rig.router.argvs[3]
-    assert (
-        rest_argv[-1] == "repos/example-org/example-repo/pulls/7/requested_reviewers?per_page=100"
-    )
+    assert rest_argv[-1] == "repos/user-7/example-repo/pulls/7/requested_reviewers?per_page=100"
     assert rest_argv[rest_argv.index("-X") + 1] == "GET"
 
 
@@ -1003,7 +1001,7 @@ def test_a_login_that_is_not_a_github_login_is_never_passed_on(make: Callable[..
         lambda p: p["reviews"].update(pageInfo={"hasNextPage": True, "endCursor": "bad cursor"}),
         lambda p: p.update(number=8),
         lambda p: p.update(headRefOid="zz"),
-        lambda p: p.update(url="https://evil.example.test/example-org/example-repo/pull/7"),
+        lambda p: p.update(url="https://evil.example.test/user-7/example-repo/pull/7"),
     ],
 )
 def test_hostile_answers_are_typed_errors_never_tracebacks(
@@ -1067,10 +1065,15 @@ def test_ordinary_commits_after_the_last_event_give_the_newest_commit_time(
     make: Callable[..., Rig],
 ) -> None:
     docs = push_doc(force("2026-10-02T08:30:00Z", OTHER), commit("2026-10-02T09:15:00Z"))
-    assert pushed(snap(make, ForgectlPush=docs)) == ("2026-10-02T09:15:00Z", "push_event")
+    assert pushed(snap(make, ForgectlPush=docs)) == ("2026-10-02T09:15:00Z", "commit_date")
 
 
-def test_the_newer_of_event_and_commit_wins(make: Callable[..., Rig]) -> None:
+def test_a_backdated_commit_is_a_commit_date_never_a_push_event(make: Callable[..., Rig]) -> None:
+    docs = push_doc(commit("2025-01-01T00:00:00Z"))
+    assert pushed(snap(make, ForgectlPush=docs)) == ("2025-01-01T00:00:00Z", "commit_date")
+
+
+def test_a_force_push_event_wins_over_an_older_commit(make: Callable[..., Rig]) -> None:
     docs = push_doc(commit("2026-10-02T07:00:00Z"), force("2026-10-02T08:30:00Z"))
     assert pushed(snap(make, ForgectlPush=docs)) == ("2026-10-02T08:30:00Z", "push_event")
 
@@ -1159,6 +1162,64 @@ def test_the_push_search_is_capped(make: Callable[..., Rig]) -> None:
     assert rig.router.ops.count("ForgectlPushPage") == github_snapshot.MAX_PUSH_PAGES - 1
 
 
+def _older_page(*nodes: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "data": {
+            "node": {
+                "timelineItems": {
+                    "pageInfo": {"hasPreviousPage": False, "startCursor": "x"},
+                    "nodes": list(nodes),
+                }
+            }
+        }
+    }
+
+
+def _with_older_pages(doc: dict[str, Any]) -> dict[str, Any]:
+    doc["data"]["repository"]["pullRequest"]["timelineItems"]["pageInfo"] = {
+        "hasPreviousPage": True,
+        "startCursor": "Y3Vyc29yOjk=",
+    }
+    return doc
+
+
+def test_a_force_push_on_an_older_page_wins_over_a_head_commit_on_the_first(
+    make: Callable[..., Rig],
+) -> None:
+    first = _with_older_pages(push_doc(commit("2026-10-02T09:00:00Z")))
+    page = _older_page(force("2026-10-02T08:00:00Z"))
+    rig = make(standard(ForgectlPush=first, ForgectlPushPage=page))
+    assert pushed(rig.snapshot()) == ("2026-10-02T08:00:00Z", "push_event")
+    assert rig.router.ops.count("ForgectlPushPage") == 1
+
+
+def test_a_head_commit_with_no_force_push_on_older_pages_is_its_commit_date(
+    make: Callable[..., Rig],
+) -> None:
+    first = _with_older_pages(push_doc(commit("2026-10-02T09:00:00Z")))
+    page = _older_page(commit("2026-10-01T09:00:00Z", OTHER), force("2026-10-01T10:00:00Z", OTHER))
+    rig = make(standard(ForgectlPush=first, ForgectlPushPage=page))
+    assert pushed(rig.snapshot()) == ("2026-10-02T09:00:00Z", "commit_date")
+    assert rig.router.ops.count("ForgectlPushPage") == 1
+
+
+def test_a_head_commit_is_kept_when_the_push_search_is_capped(make: Callable[..., Rig]) -> None:
+    first = _with_older_pages(push_doc(commit("2026-10-02T09:00:00Z")))
+    forever = {
+        "data": {
+            "node": {
+                "timelineItems": copy.deepcopy(
+                    first["data"]["repository"]["pullRequest"]["timelineItems"]
+                )
+                | {"nodes": [commit("2026-10-01T09:00:00Z", OTHER)]}
+            }
+        }
+    }
+    rig = make(standard(ForgectlPush=first, ForgectlPushPage=endless(forever)))
+    assert pushed(rig.snapshot()) == ("2026-10-02T09:00:00Z", "commit_date")
+    assert rig.router.ops.count("ForgectlPushPage") == github_snapshot.MAX_PUSH_PAGES - 1
+
+
 # -- comments, reviews and ci commands ------------------------------------------------------
 
 
@@ -1168,7 +1229,7 @@ def test_comments_reads_one_query_and_no_show(make: Callable[..., Rig]) -> None:
     golden.assert_golden("comments/github-open", result, schema_id="forgectl/cli/comments.json")
     assert rig.router.ops == ["ForgectlParts"]
     assert result["head_sha"] == HEAD and result["complete"] is True
-    assert result["pr"] == "github.com/example-org/example-repo#7"
+    assert result["pr"] == "github.com/user-7/example-repo#7"
 
 
 def test_comments_is_incomplete_when_a_thread_list_is_cut(make: Callable[..., Rig]) -> None:
@@ -1422,11 +1483,11 @@ def test_the_lists_have_a_fixed_order(make: Callable[..., Rig]) -> None:
 # -- identity of every answer ---------------------------------------------------------------
 
 OTHER_URLS = [
-    "https://evil.example.test/example-org/example-repo/pull/7",
-    "https://github.com/example-org/other-repo/pull/7",
-    "https://github.com/example-org/example-repo/pull/8",
-    "https://github.com/example-org/example-repo/pull/7/../8",
-    "https://github.com/example-org/example-repo/pull/%37",
+    "https://evil.example.test/user-7/example-repo/pull/7",
+    "https://github.com/user-7/other-repo/pull/7",
+    "https://github.com/user-7/example-repo/pull/8",
+    "https://github.com/user-7/example-repo/pull/7/../8",
+    "https://github.com/user-7/example-repo/pull/%37",
 ]
 
 
@@ -1557,7 +1618,7 @@ def test_r1_1_a_malformed_answer_is_retried_then_recovers(
 ) -> None:
     key, answers = _malformed_answers(case, recover=True)
     rig = make(standard(**answers), retries=2)
-    assert rig.snapshot()["pr"] == "github.com/example-org/example-repo#7"
+    assert rig.snapshot()["pr"] == "github.com/user-7/example-repo#7"
     assert rig.router.ops.count(key) == 2
 
 
@@ -1698,8 +1759,8 @@ def test_r1_4_parts_of_another_repository_with_consistent_urls_are_refused(
     make: Callable[..., Rig],
 ) -> None:
     doc = rec("parts")
-    doc["data"]["repository"]["nameWithOwner"] = "example-org/other-repo"
-    pr_of(doc)["url"] = "https://github.com/example-org/other-repo/pull/7"
+    doc["data"]["repository"]["nameWithOwner"] = "user-7/other-repo"
+    pr_of(doc)["url"] = "https://github.com/user-7/other-repo/pull/7"
     assert failure(make, ForgectlParts=doc).code in ("upstream_error", "wrong_host_response")
 
 
@@ -1776,7 +1837,7 @@ def test_r1_6_a_push_time_within_five_minutes_of_the_reading_is_kept(
     make: Callable[..., Rig],
 ) -> None:
     out = snap(make, ForgectlPush=push_doc(commit("2026-10-02T12:05:05Z")))
-    assert pushed(out) == ("2026-10-02T12:05:05Z", "push_event")
+    assert pushed(out) == ("2026-10-02T12:05:05Z", "commit_date")
 
 
 def test_r1_7_a_malformed_push_page_one_then_a_good_one_recovers(make: Callable[..., Rig]) -> None:
