@@ -399,7 +399,7 @@ def test_every_exit_path_stops_the_timer_and_a_late_tick_starts_nothing(how: str
     source = three()
 
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
-        assert app.refresh_timer is not None
+        assert app.refresh_timer is not None  # armed, but 1000s out: no tick can interleave
         base = source.count("prs")
         if how == "exit":
             app.exit()  # the path `q`, ctrl+q and explicit exit() callers take
@@ -411,7 +411,7 @@ def test_every_exit_path_stops_the_timer_and_a_late_tick_starts_nothing(how: str
         await pilot.pause()
         assert source.count("prs") == base
 
-    run(source, script, interval=0.1)
+    run(source, script, interval=1000)
 
 
 def test_a_tick_just_before_exit_leaves_no_coroutine_never_awaited() -> None:
