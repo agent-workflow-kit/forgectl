@@ -29,7 +29,7 @@ from textual.widgets.option_list import Option
 
 from forgectl.errors import ForgectlError
 
-from . import columns, filtering, render, safe, sections, style
+from . import bulk_load, columns, filtering, render, safe, sections, style
 from . import query as ql
 from .opener import Opener, OpenRefused, is_openable
 from .query_screen import PanelActions, QueryScreen
@@ -371,6 +371,7 @@ class BrowseApp(App[None]):
         self._rebuild_pending = False  # a rebuild after snapshot arrivals is queued
         self._shown_prs: list[str] = []  # the PRs in the option list, in order
         self._snap_token = 0  # a newer list load stops the snapshot pool of an older one
+        self._bulk_next = True  # the first full round of snapshots goes through `snapshots`
         # One limiter for every round: reads of an older round still in flight keep their slots,
         # so a reload cannot put more than ``concurrency`` snapshot reads on the wire.
         self._snap_slots = asyncio.Semaphore(max(1, self.concurrency))
@@ -431,10 +432,23 @@ class BrowseApp(App[None]):
         if self.refresh_interval > 0:
             self.refresh_timer = self.set_interval(self.refresh_interval, self._tick)
 
+    def exit(self, *args: Any, **kwargs: Any) -> None:
+        """`q`, ctrl+q and explicit exit() callers go through here: the timer stops first, so
+        no tick can start a worker once the app is shutting down."""
+        if self.refresh_timer is not None:
+            self.refresh_timer.stop()
+            self.refresh_timer = None
+        super().exit(*args, **kwargs)
+
     def _tick(self) -> None:
         """The automatic refresh. A tick that finds a refresh, a detail load or a modal in the
         way is skipped, not queued: the next tick tries again."""
-        if self._busy or self._detail_loading is not None or len(self.screen_stack) > 1:
+        if (
+            self.refresh_timer is None
+            or self._busy
+            or self._detail_loading is not None
+            or len(self.screen_stack) > 1
+        ):
             return
         self._auto_cycles += 1
         self._start_list(refresh_detail=True, auto=True)
@@ -473,7 +487,11 @@ class BrowseApp(App[None]):
         re-reads only what may have changed; the others re-read every row."""
         self._busy = True
         self._clear_changed()  # a highlight lasts until the next cycle
-        self.run_worker(self._load_list(refresh_detail, auto), group="list")
+
+        async def work() -> None:  # the coroutine exists only once the worker runs: a worker
+            await self._load_list(refresh_detail, auto)  # cancelled at exit leaves none unawaited
+
+        self.run_worker(work, group="list")
 
     async def _load_list(self, refresh_detail: bool, auto: bool) -> None:
         self._status("refreshing..." if self._loaded_once else "loading...")
@@ -705,6 +723,8 @@ class BrowseApp(App[None]):
             if p not in self._unlisted and p != skip and (wanted is None or p in wanted)
         ]
         self._snap_total = len(order) if self.concurrency else 0
+        bulk = self._bulk_next and wanted is None and bool(order) and self.concurrency > 0
+        self._bulk_next = self._bulk_next and not bulk
         self._busy = True
         now = self.clock()
         flagged = False
@@ -719,7 +739,7 @@ class BrowseApp(App[None]):
             self._paint_bar()
         if order and self.concurrency:
             self.run_worker(
-                self._load_snapshots(self._snap_token, order, listed), group="snapshots"
+                self._load_snapshots(self._snap_token, order, listed, bulk), group="snapshots"
             )
             return True
         return False
@@ -743,9 +763,11 @@ class BrowseApp(App[None]):
         return columns.RowState(columns.FAILED, error=error)
 
     async def _load_snapshots(
-        self, token: int, order: list[str], listed: bool | None = None
+        self, token: int, order: list[str], listed: bool | None = None, bulk: bool = False
     ) -> None:
-        """At most ``self.concurrency`` snapshot reads at once; a failure marks only its row."""
+        """At most ``self.concurrency`` snapshot reads at once; a failure marks only its row.
+        With ``bulk`` (the first round) the rows come first in batches through ``snapshots``,
+        and only what that does not settle is read one by one."""
         queue = deque(order)
 
         async def lane() -> None:
@@ -770,6 +792,10 @@ class BrowseApp(App[None]):
                 self._snapshot_arrived(pr, state)
 
         try:
+            if bulk:
+                rest = await bulk_load.run(self, token, order)
+                queue.clear()
+                queue.extend(rest)
             await asyncio.gather(*(lane() for _ in range(self.concurrency)))
         finally:
             if token == self._snap_token:
@@ -1214,9 +1240,6 @@ class BrowseApp(App[None]):
     # -- actions --------------------------------------------------------------------------
 
     def action_quit_app(self) -> None:
-        if self.refresh_timer is not None:
-            self.refresh_timer.stop()
-            self.refresh_timer = None
         self._snap_token += 1  # reads that have not started yet are skipped
         self.exit()
 
