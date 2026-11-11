@@ -57,6 +57,7 @@ def snap(
     act: dict[str, Any] | None = None,
     decision: str = "none",
     approvals: int = 0,
+    approvals_left: int | None = None,
     pushed_at: str | None = "2026-11-03T09:00:00Z",
     blocked: list[dict[str, Any]] | None = None,
     updated_at: str = "2026-11-03T11:30:00Z",
@@ -67,6 +68,7 @@ def snap(
         "activity": act if act is not None else activity(),
         "review_decision": decision,
         "approvals": approvals,
+        "approvals_left": approvals_left,
         "blocked_by": blocked or [],
         "updated_at": updated_at,
     }
@@ -160,16 +162,52 @@ def test_every_column_renders_for_a_mixed_github_and_gitlab_fixture() -> None:
     asyncio.run(go())
 
 
-def test_approvals_show_the_bare_count_on_both_hosts() -> None:
-    # todo(#86): `1/2` once the snapshot exposes the required count; until then only the count
+def test_approvals_show_the_bare_count_when_no_required_count_is_known() -> None:
     assert columns.approvals_cell(columns.Summary(approvals=2)) == "2"
     assert columns.approvals_cell(columns.Summary()) == "?"
     for repo in (GH, GL):
         summary = columns.summarize(snap(1, repo=repo, approvals=1))
         assert columns.approvals_cell(summary) == "1"
-    # a stray `approvals_left` is not a documented field: it changes nothing
-    assert columns.summarize({"approvals": 1, "approvals_left": 1}).approvals == 1
-    assert columns.approvals_cell(columns.summarize({"approvals": 1, "approvals_left": 1})) == "1"
+    unknown = columns.summarize({"approvals": 1, "approvals_left": None})
+    assert columns.approvals_cell(unknown) == "1"
+
+
+@pytest.mark.parametrize(
+    ("approvals", "left", "cell"),
+    [
+        (1, 1, "1/2"),
+        (0, 2, "0/2"),
+        (2, 0, "2/2"),
+        (3, 0, "3/3"),  # over-approved: the rule is met, so the cell shows the count it met
+        (0, 0, "0"),  # no rule and no approval: nothing is required, so no fraction
+        (None, 1, "?"),  # no approvals count at all is unknown, whatever the rule says
+        (1, None, "1"),
+        (1, -1, "1"),  # not a count
+        (1, True, "1"),  # a bool is not a count
+        (1, "1", "1"),
+        (1, 1.5, "1"),
+        (123, 333, "123"),  # "123/456" does not fit the 6-cell column: the bare count, not "123/4…"
+        (12, 34, "12/46"),
+        (99, 1, "99/100"),  # exactly 6 cells
+        (100, 1, "100"),  # "100/101" is 7 cells: the bare count
+    ],
+)
+def test_approvals_cell_is_approvals_over_the_required_count(
+    approvals: object, left: object, cell: str
+) -> None:
+    snapshot = {"approvals": approvals, "approvals_left": left}
+    assert columns.approvals_cell(columns.summarize(snapshot)) == cell
+
+
+def test_a_gitlab_row_shows_the_required_count_and_still_sorts_by_approvals() -> None:
+    gitlab = snap(2, repo=GL, approvals=1, approvals_left=1)
+    github = snap(1, approvals=1)
+    gl_item, gh_item = make_item(2, repo=GL), make_item(1)
+    gl_state = columns.RowState(columns.LOADED, columns.summarize(gitlab))
+    gh_state = columns.RowState(columns.LOADED, columns.summarize(github))
+    assert columns.cells(Row(item=gl_item), gl_state, NOW)[3] == "1/2"
+    assert columns.cells(Row(item=gh_item), gh_state, NOW)[3] == "1"
+    assert columns._value("approvals", Row(item=gl_item), gl_state) == 1
 
 
 def test_every_snap_shape_is_schema_valid() -> None:

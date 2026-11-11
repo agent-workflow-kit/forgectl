@@ -490,6 +490,19 @@ def test_approvals_left_gives_review_required(fake: FakeGitLab, tmp_path: Path) 
     assert "reviews_required" not in codes(PrRead(pr, show(FakeGitLab(), tmp_path / "b").ci, ()))
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"), [(2, 2), (0, 0), (None, None), (-1, None), (True, None), ("1", None)]
+)
+def test_approvals_left_is_exposed_as_a_non_negative_integer_or_null(
+    fake: FakeGitLab, tmp_path: Path, raw: object, expected: int | None
+) -> None:
+    approvals = recording("approvals")
+    approvals.update(approvals_left=raw)
+    pr = show(fake, tmp_path, approvals=approvals).pr
+    assert pr.approvals_left == expected
+    assert pr.to_dict()["approvals_left"] == expected
+
+
 def test_a_null_approvals_left_reads_none_unless_a_change_was_requested(
     fake: FakeGitLab, tmp_path: Path
 ) -> None:

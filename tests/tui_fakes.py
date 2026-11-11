@@ -138,6 +138,7 @@ def make_snapshot(
         "review_decision": "none",
         "approvals": 0,
         "approvals_at_head": 0,
+        "approvals_left": None,
         "review_requests": [],
         "teams_visible": True,
         "reviews": reviews or [],

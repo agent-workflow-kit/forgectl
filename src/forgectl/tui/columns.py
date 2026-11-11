@@ -45,6 +45,7 @@ class Summary:
 
     ci_state: str | None = None
     approvals: int | None = None
+    approvals_left: int | None = None  # GitLab: approvals still needed; null on GitHub
     review_decision: str | None = None
     blocker: str | None = None
     pushed_at: str | None = None
@@ -86,6 +87,7 @@ def summarize(snap: dict[str, Any]) -> Summary:
     return Summary(
         ci_state=_word(_d(snap.get("ci")).get("state")),
         approvals=_count(snap.get("approvals")),
+        approvals_left=_count(snap.get("approvals_left")),
         review_decision=_word(snap.get("review_decision")),
         blocker=_word(_d(first).get("code")),
         pushed_at=_word(_d(snap.get("head")).get("pushed_at")),
@@ -125,10 +127,21 @@ def age(value: Any, now: datetime) -> str:
     return f"{seconds // 60}m"
 
 
+APPROVALS_WIDTH = 6  # the appr column's width in COLUMNS
+
+
 def approvals_cell(s: Summary) -> str:
-    """The bare ``approvals`` count on both hosts; ``?`` when the snapshot has none."""
-    # todo(#86): render approvals/required once the snapshot exposes the required count
-    return "?" if s.approvals is None else str(s.approvals)
+    """``approvals/required`` where the snapshot gives ``approvals_left`` (GitLab: the required
+    count is ``approvals`` plus what is still needed), else the bare ``approvals`` count;
+    ``?`` when the snapshot has no count. A fraction wider than the column (6 cells) is shown as
+    the bare count, since a clipped ``123/4...`` would read as a wrong required count."""
+    if s.approvals is None:
+        return "?"
+    required = None if s.approvals_left is None else s.approvals + s.approvals_left
+    if not required:
+        return str(s.approvals)
+    fraction = f"{s.approvals}/{required}"
+    return fraction if len(fraction) <= APPROVALS_WIDTH else str(s.approvals)
 
 
 def ci_cell(s: Summary) -> str:
@@ -231,7 +244,7 @@ COLUMNS = (
     Column("note", "note", 10, 12),  # [refreshing], [stale: code], [changed]; pinned
     Column("badge", "badge", 1, 26),
     Column("ci", "CI", 2, 4),  # a glyph; wide enough for the sort arrow and its position
-    Column("approvals", "appr", 3, 6),
+    Column("approvals", "appr", 3, APPROVALS_WIDTH),
     Column("review", "rev", 4, 5),
     Column("comments", "comments", 5, 20),
     Column("age", "age", 6, 9),

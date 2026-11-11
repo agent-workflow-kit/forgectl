@@ -30,7 +30,7 @@ from forgectl.reads import ReadEnv
 
 from .gitlab_support import HEAD, FakeGitLab, make_hosts, recording, ref, standard
 from .harness import schemas
-from .test_gitlab_snapshot import Rig, snap_rec
+from .test_gitlab_snapshot import APPROVALS, Rig, snap_rec
 
 NOW = datetime(2026, 10, 3, 12, 0, 0, tzinfo=UTC)
 HOST = "gitlab.com"
@@ -344,6 +344,34 @@ def test_bulk_item_equals_the_per_pr_snapshot_on_the_same_facts(tmp_path: Path) 
     bulk = got.snapshots[ref()].to_dict()
     assert neutral(bulk) == neutral(per_pr)
     schemas.validate_cli_output("snapshot", bulk)
+    expected = recording("approvals")["approvals_left"]
+    assert bulk["approvals_left"] == per_pr["approvals_left"] == expected
+
+
+def test_bulk_and_per_pr_agree_on_a_nonzero_approvals_left(tmp_path: Path) -> None:
+    approvals = {**recording("approvals"), "approvals_left": 2}
+    per_pr_fake = GraphFake()
+    rig = Rig(per_pr_fake, tmp_path / "a")
+    per_pr_fake.on(APPROVALS, approvals)
+    per_pr = rig.snapshot()
+    node = mr_node()
+    node["approvalsLeft"] = 2
+    fake = GraphFake(authored=[node])
+    bulk = read(fake, tmp_path / "b").snapshots[ref()].to_dict()
+    assert bulk["approvals_left"] == per_pr["approvals_left"] == 2
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"), [(2, 2), (0, 0), (None, None), (-1, None), (True, None), ("1", None)]
+)
+def test_bulk_approvals_left_is_a_non_negative_integer_or_null(
+    tmp_path: Path, raw: object, expected: int | None
+) -> None:
+    node = mr_node()
+    node["approvalsLeft"] = raw
+    fake = GraphFake(authored=[node])
+    bulk = read(fake, tmp_path).snapshots[ref()].to_dict()
+    assert bulk["approvals_left"] == expected
 
 
 def test_bulk_gives_real_additions_and_deletions(tmp_path: Path) -> None:

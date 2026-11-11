@@ -41,7 +41,7 @@ from .source_live import Cancelled, HostStopped
 
 DEFAULT_CONCURRENCY = 4  # snapshots in flight at once; `browse.concurrency` sets it
 DEFAULT_FULL_REFRESH_EVERY = 5  # `browse.full_refresh_every`
-PREFETCH_MAX = 2  # detail reads ahead in flight at once (D-39)
+PREFETCH_MAX = 2  # detail reads ahead in flight at once (D-40)
 PREFETCH_KEEP = 3  # a read ahead is cancelled when its row is further than this from the highlight
 
 # The help is data, one logical line per entry; the widgets wrap it to the terminal width. Adding a
@@ -419,7 +419,7 @@ class BrowseApp(App[None]):
         self._detail: render.Detail | None = None
         self._painted: set[str] = set()  # sections whose body shows the current detail
         self._detail_loading: str | None = None  # the PR whose detail load is in flight
-        # D-39: what was read stays for the session, bounded; the diff is read only when the
+        # D-40: what was read stays for the session, bounded; the diff is read only when the
         # Changes section is open, and the detail of a neighbor row may be read ahead.
         self._detail_cache: detail_cache.BoundedCache[detail_cache.DetailKey, dict[str, Any]] = (
             detail_cache.BoundedCache(detail_cache.DETAIL_ENTRIES)
@@ -1276,7 +1276,7 @@ class BrowseApp(App[None]):
         and the diff, started together, arrive (D-37). Every arrival repaints the pane; a read that
         failed marks its own sections only. A newer request (``token``) discards this one.
 
-        D-39: a detail read that the cache holds for the row's current version is not repeated;
+        D-40: a detail read that the cache holds for the row's current version is not repeated;
         the diff is read only while the Changes section is open (opening it mid-load starts it)
         and is cached by head sha. ``force`` skips both caches."""
         self._status("loading detail...")
@@ -1493,7 +1493,7 @@ class BrowseApp(App[None]):
                 return None
         return snap
 
-    # -- prefetch (D-39) --------------------------------------------------------------------
+    # -- prefetch (D-40) --------------------------------------------------------------------
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         if event.option_list.id == "list":
@@ -1685,7 +1685,7 @@ class BrowseApp(App[None]):
             self._changes_opened()
 
     def _changes_opened(self) -> None:
-        """The diff is read when the Changes section is opened (D-39), once: an open section that
+        """The diff is read when the Changes section is opened (D-40), once: an open section that
         holds it, or one whose read is on its way, reads nothing."""
         pr = self._detail_loading or self._detail_pr  # a load for another PR may be on its way
         if pr is None or not self._detail_shown():
