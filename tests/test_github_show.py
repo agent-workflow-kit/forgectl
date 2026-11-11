@@ -743,6 +743,10 @@ def test_a_deleted_reviewer_is_skipped_and_the_author_cannot_approve_themselves(
 # -- approvals and the retarget ----------------
 
 
+def test_approvals_left_is_null_on_github(make: Callable[..., Harness]) -> None:
+    assert run(make, recording()).pr.approvals_left is None
+
+
 def test_an_approval_at_the_head_counts(make: Callable[..., Harness]) -> None:
     read = run(make, recording())
     assert (read.pr.approvals, read.pr.approvals_at_head) == (1, 1)

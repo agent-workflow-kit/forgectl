@@ -53,6 +53,7 @@
     "changed_files",
     "review_decision",
     "approvals",
-    "approvals_at_head"
+    "approvals_at_head",
+    "approvals_left"
   ]
 }

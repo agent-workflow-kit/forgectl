@@ -799,6 +799,7 @@ class GitHubBackend:
             review_decision=decision,
             approvals=approvals,
             approvals_at_head=approvals_at_head,
+            approvals_left=None,  # GitHub reports no required count in the model
         )
         return m.PrRead(pr=built, ci=ci, latest_by_reviewer=table.entries)
 

@@ -589,6 +589,7 @@ class _Run:
             review_decision=m.gitlab_review_decision(entries, approvals_left, approvals),
             approvals=approvals,
             approvals_at_head=at_head,
+            approvals_left=approvals_left,
         )
         return self._snapshot(ref, node, pr, ci, entries, mr_id, project_id, canonical, head_sha)
 
