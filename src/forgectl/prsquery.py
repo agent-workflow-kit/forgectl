@@ -22,6 +22,7 @@ from .bulk import run_snapshots
 from .config import Config
 from .errors import ForgectlError, usage
 from .fanout import PrsArgs, entry_error, host_error, lowest_rate_limit, resolve_me, run_prs
+from .gateway import Budget
 from .identifiers import bind_pr, bind_repo, parse_pr, parse_repo
 from .reads import ReadEnv
 from .sanitize import sanitize_line
@@ -235,6 +236,23 @@ def _states(
     return states, messages, list(result.get("errors") or [])
 
 
+def _budget_note(env: ReadEnv, count: int) -> str:
+    """When the budget of the snapshot phase is spent, what a failed read needs to be understood:
+    the phase, the number of PRs it was asked for and the budget it had (empty otherwise)."""
+    budget = getattr(env.gateway, "budget", None)
+    if not isinstance(budget, Budget) or budget.remaining() > 0:
+        return ""
+    return (
+        f"the snapshot phase of {count} PRs used its whole {budget.total:g}s budget; "
+        "a larger --timeout reads the rest"
+    )
+
+
+def _with_note(message: str, note: str) -> str:
+    """``message`` with ``note`` after it, for a read that ended on the time budget only."""
+    return f"{message} ({note})" if "time budget" in message else message
+
+
 def _without_times(states: dict[str, columns.RowState]) -> dict[str, columns.RowState]:
     """``states`` with the update and push time of every snapshot left out, so that ``ORDER BY
     age`` sorts on the time of the list item whether or not a snapshot was read (the TUI prefers
@@ -290,8 +308,12 @@ def apply(
     unloaded = columns.RowState()
     unread = undecided(q.where)
     survivors = [r for r in rows if decide(unread, r, unloaded, now, cheap=True) is not False]
-    if survivors and needs_snapshots(q):
+    read_snapshots = bool(survivors) and needs_snapshots(q)
+    if read_snapshots:
         states, messages, stopped = _states(env, survivors, read)
+        note = _budget_note(env, len(survivors))
+        if note:  # a read that ran out of time says in which phase and how much it had
+            messages = {pr: _with_note(message, note) for pr, message in messages.items()}
         host_errors += [host_error(e["host"], entry_error(e)) for e in stopped]
     kept = [r for r in survivors if decide(q.where, r, states.get(r.pr) or unloaded, now) is True]
     if q.order:
@@ -315,7 +337,13 @@ def apply(
                 }
             )
     merged = dict(output)
-    merged["items"] = [r.item for r in kept]
+    if read_snapshots:  # the query read snapshots: each item says what it was decided on
+        merged["items"] = [
+            {**r.item, "snapshot": columns.snapshot_summary(states.get(r.pr) or unloaded)}
+            for r in kept
+        ]
+    else:
+        merged["items"] = [r.item for r in kept]
     merged["query"] = query.format_query(q)
     merged["errors"] = [*output["errors"], *host_errors]
     merged["complete"] = bool(output["complete"]) and not failures and not host_errors
@@ -445,6 +473,10 @@ def run(
             raise
         output, partial = err.output, err
     listed = len(output["errors"])  # the hosts that failed to list
+    # the snapshot phase has a budget of its own, as long as --timeout: a slow list cannot leave
+    # the reads after it without time (D-43)
+    if needs_snapshots(q) and isinstance(env.gateway.budget, Budget):
+        env.gateway.budget = Budget(env.gateway.budget.total)
     output = apply(env, output, q, scope, now=now, read=read)
     failed = output["errors"]
     if failed:  # a host failed to list, or the read of its snapshots stopped

@@ -1451,6 +1451,120 @@
         },
         "updated_at": {
           "$ref": "#/$defs/ts"
+        },
+        "snapshot": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "Only with --query, and only when the query read snapshots: the data of the PR's snapshot the query was decided on (null when the snapshot failed or never loaded; the PR is then in snapshot_failures). ready and attention are the values of the ready and attention query fields. A field the snapshot did not report is null.",
+          "properties": {
+            "ci_state": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "x-untrusted": true,
+              "x-one-line": true,
+              "description": "Untrusted: the snapshot's ci.state, bounded."
+            },
+            "review_decision": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "x-untrusted": true,
+              "x-one-line": true,
+              "description": "Untrusted: the snapshot's review_decision, bounded."
+            },
+            "approvals": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "approvals_left": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "mergeable": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "blocked_by": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "maxItems": 16,
+              "items": {
+                "type": "string",
+                "x-untrusted": true,
+                "x-one-line": true
+              },
+              "description": "The codes of the snapshot's blocked_by, at most 16."
+            },
+            "others_since_push": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "awaiting_my_reply": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "unresolved": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "description": "The count of unresolved threads, when the snapshot reports it."
+            },
+            "complete": {
+              "type": "boolean",
+              "description": "false: part of the snapshot could not be read, so ready is never true."
+            },
+            "ready": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "Ready to merge, three-valued as the ready query field is: null when unknown."
+            },
+            "attention": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4,
+              "description": "The attention query field: 4 failing CI, 3 new comments from others since the push, 2 a thread awaiting my reply, 1 changes requested, 0 the rest."
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "ci_state",
+            "review_decision",
+            "approvals",
+            "approvals_left",
+            "mergeable",
+            "blocked_by",
+            "others_since_push",
+            "awaiting_my_reply",
+            "unresolved",
+            "complete",
+            "ready",
+            "attention"
+          ]
         }
       },
       "additionalProperties": false,

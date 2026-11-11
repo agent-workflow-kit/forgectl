@@ -66,6 +66,7 @@ class Summary:
     complete: bool = True  # False: the snapshot says part of its data could not be read
     mergeable: bool | None = None  # the host's mergeability; None when null or not reported
     blocked_count: int | None = None  # len(blocked_by); None when the snapshot has no list
+    blocked_codes: tuple[str, ...] | None = None  # the blocker codes (bounded); None: no list
 
 
 @dataclass
@@ -110,7 +111,19 @@ def summarize(snap: dict[str, Any]) -> Summary:
         complete=snap.get("complete") is not False,
         mergeable=snap["mergeable"] if isinstance(snap.get("mergeable"), bool) else None,
         blocked_count=len(blocked) if isinstance(blocked, list) else None,
+        blocked_codes=_codes(blocked),
     )
+
+
+MAX_CODES = 16  # blocker codes in a summary: bounded, whatever the snapshot holds
+CODE_LIMIT = 40
+
+
+def _codes(blocked: Any) -> tuple[str, ...] | None:
+    if not isinstance(blocked, list):
+        return None
+    codes = (_word(_d(b).get("code")) for b in blocked[:MAX_CODES])
+    return tuple(safe.line(c, CODE_LIMIT) for c in codes if c is not None)
 
 
 # -- cells -------------------------------------------------------------------------------------
@@ -722,3 +735,30 @@ def order(
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def snapshot_summary(state: RowState) -> dict[str, Any] | None:
+    """The snapshot data of a loaded row as a JSON object (``prs --query`` puts it in each item),
+    or None for a row that has none. ``ready`` and ``attention`` are the values of the ``ready``
+    and ``attention`` query fields, from ``is_ready`` and ``attention_level`` (the one
+    definition, not a copy). A field the snapshot did not report is null; every text is bounded
+    and sanitized by ``summarize``."""
+    if state.status != LOADED or state.summary is None:
+        return None
+    s = state.summary
+    return {
+        "ci_state": None if s.ci_state is None else safe.line(s.ci_state, CODE_LIMIT),
+        "review_decision": (
+            None if s.review_decision is None else safe.line(s.review_decision, CODE_LIMIT)
+        ),
+        "approvals": s.approvals,
+        "approvals_left": s.approvals_left,
+        "mergeable": s.mergeable,
+        "blocked_by": None if s.blocked_codes is None else list(s.blocked_codes),
+        "others_since_push": s.others_since_push,
+        "awaiting_my_reply": s.awaiting_my_reply,
+        "unresolved": s.unresolved_threads,
+        "complete": s.complete,
+        "ready": is_ready(s),
+        "attention": attention_level(state),
+    }

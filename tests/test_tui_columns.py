@@ -298,7 +298,7 @@ def test_type_confused_snapshot_fields_become_unknown_not_a_crash() -> None:
         }
     )
     # a malformed blocker entry still counts as a blocker: never ready on a guess
-    assert s == columns.Summary(blocked_count=1)
+    assert s == columns.Summary(blocked_count=1, blocked_codes=())
     assert columns.summarize({"activity": None}) == columns.Summary()
 
 

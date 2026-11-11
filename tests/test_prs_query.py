@@ -18,6 +18,7 @@ from forgectl import prsquery
 from forgectl.config import LoadedConfig
 from forgectl.errors import ForgectlError
 from forgectl.fanout import PrsArgs, resolve_since
+from forgectl.gateway import Budget
 from forgectl.identifiers import bind_repo, parse_repo
 from forgectl.surface import parse
 from forgectl.tui import columns, filtering, query
@@ -435,6 +436,11 @@ def test_the_snapshots_come_from_the_bulk_reader(fake_forges: FakeForges) -> Non
     )
     assert numbers(out) == [8, 7]
     assert "snapshot_failures" not in out
+    for i in out["items"]:  # the real reader's snapshot gives a summary the schema accepts
+        schemas.validate(
+            i["snapshot"], "forgectl/defs.json#/$defs/pr_list_item/properties/snapshot"
+        )
+        assert i["snapshot"]["attention"] in range(5)
 
 
 # -- the command line ----------------------------------------------------------------------------
@@ -1031,3 +1037,252 @@ def test_an_is_null_on_an_unread_snapshot_never_drops_a_row_before_it_is_read(
     assert asked == read
     if text == "ci IS NOT NULL":
         assert numbers(out) == [1, 2]
+
+
+# -- the snapshot summary of each item (#147) ----------------------------------------------------
+
+
+def test_each_item_of_a_snapshot_query_carries_the_summary_its_snapshot_gave() -> None:
+    snaps = ready_attention_snaps()
+    snaps[1]["blocked_by"] = [{"code": "ci_failing"}, {"code": "other", "detail": "x"}]
+    snaps[1]["approvals_left"] = 2
+    snaps[1]["activity"] = {"others_since_push": 1, "awaiting_my_reply": 3, "unresolved_threads": 5}
+    out = run(
+        "ORDER BY ready DESC, attention DESC", listing(*(item(n) for n in (1, 2))), reader(snaps)
+    )
+    by_number = {i["number"]: i["snapshot"] for i in out["items"]}
+    assert by_number[1] == {
+        "ci_state": "passing",
+        "review_decision": "approved",
+        "approvals": 1,
+        "approvals_left": None,
+        "mergeable": True,
+        "blocked_by": [],
+        "others_since_push": None,
+        "awaiting_my_reply": None,
+        "unresolved": None,
+        "complete": True,
+        "ready": True,
+        "attention": 0,
+    }
+    assert by_number[2] == {
+        **by_number[2],
+        "ci_state": "failing",
+        "approvals_left": 2,
+        "blocked_by": ["ci_failing", "other"],
+        "others_since_push": 1,
+        "awaiting_my_reply": 3,
+        "unresolved": 5,
+        "ready": False,
+        "attention": 4,
+    }
+
+
+def test_ready_and_attention_of_the_summary_are_the_values_of_the_query_fields() -> None:
+    snaps = ready_attention_snaps()
+    items = [item(n) for n in (1, 2, 3, 4)]
+    out = run("ORDER BY ready DESC, pr", listing(*items), reader(snaps))
+    getter = {
+        s["pr"]: filtering.getter(
+            Row(item=i),
+            columns.RowState(columns.LOADED, columns.summarize(s)),
+            NOW,
+        )
+        for i, s in zip(items, snaps, strict=True)
+    }
+    assert [i["snapshot"]["ready"] for i in out["items"]] == [
+        True,
+        False,
+        False,
+        False,
+    ]  # by ORDER BY
+    for i in out["items"]:
+        get = getter[i["pr"]]
+        assert i["snapshot"]["ready"] is get("ready")
+        assert i["snapshot"]["attention"] == get("attention")
+    # and the query fields select exactly the rows the summary marks
+    ready = run("ready", listing(*items), reader(snaps))
+    assert [i["number"] for i in ready["items"] if i["snapshot"]["ready"]] == numbers(ready)
+
+
+def test_an_incomplete_snapshot_has_ready_null_in_the_summary() -> None:
+    incomplete = {**snap(1), "mergeable": True, "complete": False}
+    out = run("ORDER BY ready", listing(item(1)), reader([incomplete]))
+    assert out["items"][0]["snapshot"]["ready"] is None
+    assert out["items"][0]["snapshot"]["complete"] is False
+
+
+def test_a_failed_or_unread_row_in_the_items_has_a_null_summary() -> None:
+    out = run(
+        "draft OR ci = passing ORDER BY ci",
+        listing(item(1, draft=True), item(2, draft=True), item(3)),
+        reader([snap(3)], failed={1: "rate_limited"}),  # #2 was never answered
+    )
+    assert {i["number"]: i["snapshot"] is None for i in out["items"]} == {
+        1: True,
+        2: True,
+        3: False,
+    }
+    assert {f["pr"][-1]: f["in_items"] for f in out["snapshot_failures"]} == {"1": True, "2": True}
+
+
+def test_a_query_that_reads_no_snapshot_adds_no_key() -> None:
+    listed = listing(item(1), item(2))
+    out = run("NOT draft ORDER BY age", listed, reader([]))
+    assert out["items"] == listed["items"]
+    assert all("snapshot" not in i for i in out["items"])
+
+
+def test_a_snapshot_query_that_reads_nothing_has_no_items_to_mark() -> None:
+    out = run("draft AND ci = passing", listing(item(1)), reader([]))
+    assert out["items"] == []
+
+
+def test_hostile_snapshot_data_is_null_or_bounded_in_the_summary() -> None:
+    hostile = {
+        "pr": f"{REPO}#1",
+        "ci": {"state": "pass\x1b[31ming" + "x" * 500},
+        "review_decision": 7,
+        "approvals": True,
+        "approvals_left": -1,
+        "mergeable": "yes",
+        "blocked_by": [{"code": "a\nb" + "y" * 500}, "junk", {"code": None}, None]
+        + [{"code": f"c{n}"} for n in range(100)],
+        "activity": {
+            "others_since_push": "3",
+            "awaiting_my_reply": 1.5,
+            "unresolved_threads": None,
+        },
+        "complete": "no",
+    }
+    out = run("ORDER BY ready", listing(item(1)), reader([hostile]))
+    s = out["items"][0]["snapshot"]
+    assert (s["approvals"], s["approvals_left"], s["mergeable"]) == (None, None, None)
+    assert (s["review_decision"], s["others_since_push"], s["awaiting_my_reply"]) == (None,) * 3
+    assert s["unresolved"] is None
+    assert (
+        "truncated" in s["ci_state"]
+        and "\x1b" not in s["ci_state"]
+        and "\n" not in s["blocked_by"][0]
+    )
+    assert len(s["blocked_by"]) <= columns.MAX_CODES
+    assert all(len(c) < 100 for c in s["blocked_by"])  # cut before it is sanitized
+
+
+def test_a_summary_of_a_non_list_blocked_by_is_null() -> None:
+    out = run("ORDER BY ready", listing(item(1)), reader([{**snap(1), "blocked_by": "x"}]))
+    assert out["items"][0]["snapshot"]["blocked_by"] is None
+
+
+def test_the_summary_validates_against_the_schema() -> None:
+    snaps = ready_attention_snaps()
+    out = run("ORDER BY ready DESC", listing(*(item(n) for n in (1, 2, 3, 4))), reader(snaps))
+    for i in out["items"]:
+        schemas.validate(
+            i["snapshot"], "forgectl/defs.json#/$defs/pr_list_item/properties/snapshot"
+        )
+
+
+# -- the time budget of the snapshot phase (#147) ------------------------------------------------
+
+
+def budgeted_env(total: float) -> Any:
+    env = Env()
+    env.gateway.budget = Budget(total)
+    return env
+
+
+def test_the_snapshot_phase_has_a_budget_of_its_own() -> None:
+    env = budgeted_env(30)
+    seen: list[float] = []
+
+    def slow_list(e: Any, args: PrsArgs) -> dict[str, Any]:
+        e.gateway.budget.spent = 29.5  # the list phase left half a second
+        return listing(item(1))
+
+    def read(e: Any, refs: list[Any]) -> dict[str, Any]:
+        seen.append(e.gateway.budget.remaining())
+        return {"items": [snap(1)], "failed": [], "errors": []}
+
+    prsquery.run(
+        env,
+        replace(BASE, author="carol"),
+        prsquery.compile_query("ci = passing"),
+        state_given=True,
+        now=NOW,
+        lister=slow_list,
+        read=read,
+    )
+    assert seen == [30.0]  # --timeout, not what the list left
+
+
+def test_an_explicit_timeout_sets_the_size_of_the_snapshot_budget() -> None:
+    env = budgeted_env(7)
+    seen: list[float] = []
+
+    def read(e: Any, refs: list[Any]) -> dict[str, Any]:
+        seen.append(e.gateway.budget.remaining())
+        return {"items": [snap(1)], "failed": [], "errors": []}
+
+    prsquery.run(
+        env,
+        replace(BASE, author="carol"),
+        prsquery.compile_query("ci = passing"),
+        state_given=True,
+        now=NOW,
+        lister=lambda e, a: listing(item(1)),
+        read=read,
+    )
+    assert seen == [7.0]
+
+
+def test_a_query_that_reads_no_snapshot_keeps_the_one_budget() -> None:
+    env = budgeted_env(30)
+    before = env.gateway.budget
+
+    def lister(e: Any, args: PrsArgs) -> dict[str, Any]:
+        e.gateway.budget.spent = 12.0
+        return listing(item(1))
+
+    prsquery.run(
+        env,
+        replace(BASE, author="carol"),
+        prsquery.compile_query("NOT draft"),
+        state_given=True,
+        now=NOW,
+        lister=lister,
+        read=reader([]),
+    )
+    assert env.gateway.budget is before and before.spent == 12.0
+
+
+def test_a_read_that_ran_out_of_time_says_the_phase_the_count_and_the_budget() -> None:
+    env = budgeted_env(30)
+
+    def read(e: Any, refs: list[Any]) -> dict[str, Any]:
+        e.gateway.budget.spent = 30.0  # the reads used all of it
+        gone = "no answer within the time budget"
+        return {
+            "items": [snap(1)],
+            "failed": [
+                {"pr": f"{REPO}#2", "error": {"code": "network_error", "message": gone}},
+                {"pr": f"{REPO}#3", "error": {"code": "not_found", "message": "no such PR"}},
+            ],
+            "errors": [],
+        }
+
+    out = prsquery.run(
+        env,
+        replace(BASE, author="carol"),
+        prsquery.compile_query("ci = passing"),
+        state_given=True,
+        now=NOW,
+        lister=lambda e, a: listing(item(1), item(2), item(3)),
+        read=read,
+    )
+    by_pr = {f["pr"][-1]: f["error"] for f in out["snapshot_failures"]}
+    assert by_pr["2"]["code"] == "network_error"
+    assert (
+        "snapshot phase of 3 PRs" in by_pr["2"]["message"] and "30s budget" in by_pr["2"]["message"]
+    )
+    assert by_pr["3"]["message"] == "no such PR"  # only a time-budget failure is annotated
