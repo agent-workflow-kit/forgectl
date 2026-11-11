@@ -8,11 +8,14 @@ actions, no styles). Neither the sanitizer nor the markup switch is imported any
 
 from __future__ import annotations
 
-from textual.content import Content
+from typing import TYPE_CHECKING
 
 from forgectl.sanitize import sanitize_diff as _sanitize_diff
 from forgectl.sanitize import sanitize_line as _sanitize_line
 from forgectl.sanitize import sanitize_text as _sanitize_text
+
+if TYPE_CHECKING:
+    from textual.content import Content
 
 # Bounds that keep a hostile or huge field from freezing the UI. Applied before sanitizing, so
 # the work is bounded too.
@@ -59,4 +62,6 @@ def block(value: str) -> str:
 
 def plain(value: str) -> Content:
     """``value`` as display content with no markup parsing."""
+    from textual.content import Content  # here: the CLI uses ``line`` and ``text`` without Textual
+
     return Content(value)

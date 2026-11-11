@@ -144,6 +144,22 @@ def dedupe_key(value: str) -> str:
     return value
 
 
+class Implicit(str):
+    """The default of ``--state``: told from the same word given on the command line, since a
+    query may supply the state only when the flag was not given."""
+
+
+def query_text(value: str) -> str:
+    """A browse query (filter and ORDER BY) that parses; the error names the column. The text is
+    returned as given."""
+    from .tui import query  # here: the parser has no dependencies of its own
+
+    result = query.parse(value)
+    if isinstance(result, query.ParseError):
+        _bad(f"not a valid query: {result}")
+    return value
+
+
 def limit(value: str) -> int:
     if not _LIMIT_RE.fullmatch(value) or not 1 <= int(value) <= 1000:
         _bad(f"must be a whole number from 1 to 1000: {value!r}")
@@ -364,12 +380,25 @@ def build_parser() -> argparse.ArgumentParser:
         type=parse_login,
         metavar="me|USER",
     )
-    _once(p, "--state", choices=["open", "closed", "merged", "all"], default="open")
+    _once(p, "--state", choices=["open", "closed", "merged", "all"], default=Implicit("open"))
     draft = p.add_mutually_exclusive_group()
     draft.add_argument("--draft", dest="draft", action=_OnceConst, const=True, default=None)
     draft.add_argument("--no-draft", dest="draft", action=_OnceConst, const=False)
     _once(p, "--updated-since", dest="updated_since", type=time_or_duration, metavar="TIME")
     _once(p, "--limit", type=limit, default=100, metavar="N")
+    _once(
+        p,
+        "--query",
+        type=query_text,
+        metavar="TEXT",
+        help="filter and order the list with a browse query (a filter and ORDER BY)",
+    )
+    p.add_argument(
+        "--default-query",
+        dest="default_query",
+        action=_OnceFlag,
+        help="use the browse.query of the config as the query (not with --query)",
+    )
 
     for name, summary in (
         ("show", "the normalized PR object"),
@@ -516,6 +545,10 @@ def _check_combinations(args: Namespace) -> Namespace:
     if args.command == "prs":
         if args.repo and args.host:
             raise usage("--repo and --host cannot be combined")
-        if not args.repo and not (args.author or args.review_requested_from):
+        query_given = args.query is not None or args.default_query
+        # a query may supply the role or the repo (`authored`, `repo = ...`): checked in the handler
+        if not (args.repo or args.author or args.review_requested_from or query_given):
             raise usage("without --repo, prs needs --author or --review-requested-from")
+        if args.query is not None and args.default_query:
+            raise usage("--query and --default-query cannot be combined")
     return args
