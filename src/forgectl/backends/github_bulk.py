@@ -183,7 +183,7 @@ def bulk_query(count: int) -> str:
     declared = ", ".join(f"$o{i}: String!, $n{i}: String!, $k{i}: Int!" for i in range(count))
     fields = "\n".join(
         f"  p{i}: repository(owner: $o{i}, name: $n{i}) {{"
-        " nameWithOwner defaultBranchRef { name }"
+        " id nameWithOwner defaultBranchRef { name }"
         " squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed"
         f" pullRequest(number: $k{i}) {{ ...BulkPr }} }}"
         for i in range(count)

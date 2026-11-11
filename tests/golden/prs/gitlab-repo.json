@@ -14,6 +14,7 @@
       "base": {
         "ref": "main"
       },
+      "created_at": "2026-09-01T09:00:00.000Z",
       "draft": false,
       "head": {
         "is_fork": false,
@@ -29,6 +30,7 @@
       "pr": "gitlab.com/user-9/proj#31",
       "pr_id": "gid://gitlab/MergeRequest/90031",
       "repo": "gitlab.com/user-9/proj",
+      "repo_id": "gid://gitlab/Project/101",
       "state": "open",
       "title": "Change 31",
       "updated_at": "2026-10-05T12:30:00.000Z",
@@ -43,6 +45,7 @@
       "base": {
         "ref": "main"
       },
+      "created_at": "2026-09-01T09:00:00.000Z",
       "draft": true,
       "head": {
         "is_fork": true,
@@ -55,6 +58,7 @@
       "pr": "gitlab.com/user-9/proj#29",
       "pr_id": "gid://gitlab/MergeRequest/90029",
       "repo": "gitlab.com/user-9/proj",
+      "repo_id": "gid://gitlab/Project/101",
       "state": "open",
       "title": "Change 29",
       "updated_at": "2026-10-04T08:00:00.000Z",
@@ -69,6 +73,7 @@
       "base": {
         "ref": "main"
       },
+      "created_at": "2026-09-01T09:00:00.000Z",
       "draft": false,
       "head": {
         "is_fork": true,
@@ -81,6 +86,7 @@
       "pr": "gitlab.com/user-9/proj#12",
       "pr_id": "gid://gitlab/MergeRequest/90012",
       "repo": "gitlab.com/user-9/proj",
+      "repo_id": "gid://gitlab/Project/101",
       "state": "open",
       "title": "Change 12",
       "updated_at": "2026-10-02T07:15:00.000Z",
@@ -95,6 +101,7 @@
       "base": {
         "ref": "main"
       },
+      "created_at": "2026-09-01T09:00:00.000Z",
       "draft": false,
       "head": {
         "is_fork": null,
@@ -107,6 +114,7 @@
       "pr": "gitlab.com/user-9/proj#5",
       "pr_id": "gid://gitlab/MergeRequest/90005",
       "repo": "gitlab.com/user-9/proj",
+      "repo_id": "gid://gitlab/Project/101",
       "state": "merged",
       "title": "Change 5",
       "updated_at": "2026-10-01T06:00:00.000Z",

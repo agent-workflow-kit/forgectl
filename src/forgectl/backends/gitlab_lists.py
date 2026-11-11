@@ -51,6 +51,7 @@ from .gitlab import (
     _list,
     _obj,
     _opt_int_id,
+    _project_gid,
     _project_path,
     _req_line,
     _required_time,
@@ -246,7 +247,9 @@ def _parse(backend: GitLabBackend, target: Target, raw: Any) -> _Parsed:
             is_fork=None,
         ),
         base_ref=_req_line(mr.get("target_branch"), "target_branch"),
+        created_at=_required_time(mr.get("created_at"), "created_at"),
         updated_at=_required_time(mr.get("updated_at"), "updated_at"),
+        repo_id=_project_gid(project_id),
     )
     return _Parsed(
         item,

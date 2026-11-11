@@ -693,6 +693,7 @@ class RateLimit:
 class PR:
     pr: str
     repo: str
+    repo_id: str | None
     pr_id: str
     number: int
     url: str
@@ -758,6 +759,7 @@ class PR:
         return {
             "pr": self.pr,
             "repo": self.repo,
+            "repo_id": self.repo_id,
             "pr_id": self.pr_id,
             "number": self.number,
             "url": self.url,
@@ -1228,7 +1230,9 @@ class PrListItem:
     labels: tuple[str, ...]
     head: Head
     base_ref: str
+    created_at: str
     updated_at: str
+    repo_id: str | None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1244,7 +1248,9 @@ class PrListItem:
             "labels": sorted(self.labels),
             "head": self.head.to_dict(),
             "base": {"ref": self.base_ref},
+            "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "repo_id": self.repo_id,
         }
 
 
