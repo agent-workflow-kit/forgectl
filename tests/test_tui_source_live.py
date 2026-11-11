@@ -18,7 +18,7 @@ import pytest
 from forgectl import registry
 from forgectl.errors import ForgectlError
 from forgectl.tui.source import DataSource, load_list
-from forgectl.tui.source_live import Cancelled, LiveSource, in_process_runner
+from forgectl.tui.source_live import Cancelled, HostStopped, LiveSource, in_process_runner
 
 from .tui_fakes import make_diff, make_item, make_snapshot
 
@@ -435,6 +435,62 @@ def test_snapshots_refuses_anything_that_is_not_a_pr_before_any_call(bad: str) -
     with pytest.raises(ForgectlError) as caught:
         LiveSource(run).snapshots([PR1, bad])
     assert caught.value.code == "invalid_pr" and run.calls == []
+
+
+# -- detail (#119) ---------------------------------------------------------------------------------
+
+
+def test_detail_is_one_lookup_read_of_the_pr_and_gives_its_item() -> None:
+    item = make_snapshot(1)
+    run = Recorder(lambda argv: {"items": [item], "failed": [], "complete": True, "errors": []})
+    assert LiveSource(run).detail(PR1) == item
+    assert run.calls == [["snapshots", "--bulk-only", "--lookup", PR1]]
+
+
+def test_detail_of_a_pr_the_bulk_reader_gave_up_raises_and_names_the_reason() -> None:
+    failed = [{"pr": PR1, "error": {"code": "bulk_unavailable", "message": "x\x1b[31m"}}]
+    run = Recorder(lambda argv: {"items": [], "failed": failed, "complete": False, "errors": []})
+    with pytest.raises(ForgectlError) as caught:
+        LiveSource(run).detail(PR1)
+    assert caught.value.code == "upstream_error"
+    assert "bulk_unavailable" in caught.value.message and "\x1b" not in caught.value.message
+
+
+def test_detail_of_a_pr_cut_off_by_a_host_stop_raises_the_stop_for_the_caller() -> None:
+    failed = [{"pr": PR1, "error": {"code": "rate_limited", "message": "x"}}]
+    run = Recorder(lambda argv: {"items": [], "failed": failed, "complete": False, "errors": []})
+    with pytest.raises(HostStopped) as caught:
+        LiveSource(run).detail(PR1)
+    assert caught.value.code == "rate_limited"
+
+
+def test_detail_of_an_item_that_is_not_whole_raises() -> None:
+    item = make_snapshot(1, extra={"complete": False, "incomplete": ["threads"]})
+    run = Recorder(lambda argv: {"items": [item], "failed": [], "complete": False, "errors": []})
+    with pytest.raises(ForgectlError):
+        LiveSource(run).detail(PR1)
+
+
+def test_detail_ignores_an_item_for_another_pr() -> None:
+    other = make_snapshot(5)
+    run = Recorder(lambda argv: {"items": [other], "failed": [], "complete": True, "errors": []})
+    with pytest.raises(ForgectlError):
+        LiveSource(run).detail(PR1)
+
+
+@pytest.mark.parametrize("bad", ["--help", "-", "not a pr"])
+def test_detail_refuses_anything_that_is_not_a_pr_before_any_call(bad: str) -> None:
+    run = Recorder()
+    with pytest.raises(ForgectlError) as caught:
+        LiveSource(run).detail(bad)
+    assert caught.value.code == "invalid_pr" and run.calls == []
+
+
+def test_a_cancelled_detail_raises_cancelled_without_a_call() -> None:
+    run = Recorder()
+    with pytest.raises(Cancelled):
+        LiveSource(run).detail(PR1, cancelled=lambda: True)
+    assert run.calls == []
 
 
 def test_a_cancelled_batch_raises_cancelled_without_a_call() -> None:

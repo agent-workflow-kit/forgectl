@@ -195,6 +195,20 @@ def test_snapshot_and_diff_of_one_pr_through_the_handlers(forged: FakeForges, co
     json.dumps(snap)
 
 
+def test_detail_of_one_pr_is_one_bulk_request_through_the_handlers(
+    forged: FakeForges, config: Path
+) -> None:
+    snapshot_and_diff_fakes(forged)
+    source = LiveSource(config_path=str(config))
+    detail = source.detail(PR)
+    assert detail["pr"] == PR and detail["complete"] is True
+    json.dumps(detail)
+    asked = [c.stdin or "" for c in forged.calls("gh")]
+    assert len([a for a in asked if "query ForgectlBulk" in a]) == 1  # the one bulk request
+    assert not [a for a in asked if "ForgectlShow" in a or "ForgectlParts" in a]  # no snapshot
+    assert len(asked) == 1  # and nothing else (no REST read)
+
+
 def test_a_failing_snapshot_is_a_forgectl_error_and_the_next_call_works(
     forged: FakeForges, config: Path
 ) -> None:
@@ -283,6 +297,7 @@ def test_one_pr_failing_to_load_leaves_the_next_one_working(
 ) -> None:
     two_hosts_one_failing(forged)
     snapshot_and_diff_fakes(forged)
+    forged.allow_unmatched = True  # the failing PR's other reads (bulk, diff) get no answer
     bad: list[str] = []
     app = BrowseApp(FailsFor(bad, config_path=str(config)), FakeOpener(), focus=None)
 
@@ -295,8 +310,10 @@ def test_one_pr_failing_to_load_leaves_the_next_one_working(
             await _settle(app, pilot)
             status = str(app.query_one("#status", Static).content)
             assert "not_found" in status
-            assert app.query_one("#detail").display is False
-            await pilot.press("up", "enter")
+            # the pane opened on the list's facts; the failed read shows in its sections
+            assert app.query_one("#detail").display is True
+            assert "failed: not_found" in str(app.query_one("#description", Static).content)
+            await pilot.press("escape", "up", "enter")
             await _settle(app, pilot)
             assert app.query_one("#detail").display is True
             assert "user-7/example-repo#7" in str(app.query_one("#facts", Static).content)

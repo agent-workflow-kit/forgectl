@@ -56,6 +56,7 @@ async def run(app: Any, token: int, order: list[str]) -> list[str]:
                 app._rates.observe(snap.get("rate_limit"), app.clock())
             except Exception:  # bad data: this row is left to the per-row pool
                 continue
+            app._keep_snapshot(pr, snap)
             app._snapshot_arrived(pr, state)
             if snap.get("complete") is True:
                 settled.add(pr)
