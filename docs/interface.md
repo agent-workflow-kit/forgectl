@@ -637,9 +637,13 @@ Output: `{pr, action, ids, thread_ids, review_id, already_posted, follow_up_done
 
 `comment <pr> --body-file <path|-> [--dedupe-key K] [--yes] [--dry-run] [--actor A] [--decision-id D]... [--override-escalation]`
 
+Posts one general comment (GitHub: an issue comment; GitLab: a note). It follows [Post order](#post-order): there is no head check, and a closed PR is allowed. Output: `{pr, action, ids, thread_ids, review_id, already_posted, follow_up_done, neutralized_lines, markers_removed, warnings, head_sha, dry_run}`. `ids` holds the new comment's id, `thread_ids` is `[]` (the note answer of GitLab and the comment answer of GitHub name no thread), `review_id` is null. An empty body, or one with only whitespace, exits 2 (`usage`). `--body-file -` reads the inherited stdin to EOF, in a real run and under `--dry-run`; the regular-file check applies only to a path.
+
 ### `reply`
 
 `reply <pr> --to <id> --body-file <path|-> [--dedupe-key K] [--yes] [--dry-run] [--actor A] [--decision-id D]... [--override-escalation]`
+
+Output: as for `comment`, plus `threaded`. `thread_ids` holds the thread the reply joined: the `gh:rt:` id on GitHub when `--to` is a thread (`[]` for a review comment, whose thread is not read), and the discussion on GitLab. A `--to` that is a reply goes to the thread's root on GitHub. On GitLab a `gl:n:` id is found by walking the MR's discussions, and a system note is not a comment (exit 10).
 
 `--to` takes a comment, thread or review id ([Identifiers](#identifiers)). A reply to a GitHub review comment joins its thread; GitHub normalizes a reply-to-a-reply to the root. GitHub has no threads on general comments or review bodies, so a reply to a `gh:ic:` or `gh:r:` id posts a new general comment and reports `threaded: false`. `threaded` is always in the output. An unknown id exits 10.
 
