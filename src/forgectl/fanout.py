@@ -9,10 +9,11 @@ The contract a backend meets:
   ``YYYY-MM-DDTHH:MM:SSZ``), returns at most ``query.limit`` items newest first, and sets
   ``complete`` false when older items were cut or the host capped the list. It raises a
   ``ForgectlError`` for a failed read; it never returns a partial list as complete.
-- This module asks hosts one after the other (one budget, one credential selection), keeps each
-  host's failure as ``{host, code, message}`` (message redacted of tokens, one line), merges the
-  items (``updated_at`` descending, then ``pr``), cuts to ``limit`` and sets ``complete`` (false
-  when any host failed). ``rate_limit`` is the lowest ``remaining`` in the headers of every answer
+- This module asks hosts one after the other (one budget, one credential selection; ``prs
+  --query`` gives the snapshots it reads a second budget, D-43), keeps each host's failure as
+  ``{host, code, message}`` (message redacted of tokens, one line), merges the items
+  (``updated_at`` descending, then ``pr``), cuts to ``limit`` and sets ``complete`` (false when
+  any host failed). ``rate_limit`` is the lowest ``remaining`` in the headers of every answer
   the command received from a host in ``hosts_queried`` (``Gateway.rate_readings``), whatever
   the call and whether it failed; a skipped host's probe does not count.
 - A failure with several hosts asked is ``ForgectlError("partial_results", output=...)``: the

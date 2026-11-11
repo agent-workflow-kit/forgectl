@@ -236,21 +236,24 @@ def _states(
     return states, messages, list(result.get("errors") or [])
 
 
-def _budget_note(env: ReadEnv, count: int) -> str:
+def _budget_note(env: ReadEnv, rows: list[Row]) -> str:
     """When the budget of the snapshot phase is spent, what a failed read needs to be understood:
-    the phase, the number of PRs it was asked for and the budget it had (empty otherwise)."""
+    the phase (the identity lookup and the snapshots), the number of PRs and of projects it was
+    asked for and the budget it had (empty otherwise)."""
     budget = getattr(env.gateway, "budget", None)
     if not isinstance(budget, Budget) or budget.remaining() > 0:
         return ""
+    projects = len({str(r.item.get("repo") or r.pr.rsplit("#", 1)[0]) for r in rows})
     return (
-        f"the snapshot phase of {count} PRs used its whole {budget.total:g}s budget; "
+        f"the snapshot phase (identity and snapshots) of {len(rows)} PRs in {projects} "
+        f"{'project' if projects == 1 else 'projects'} used its whole {budget.total:g}s budget; "
         "a larger --timeout reads the rest"
     )
 
 
 def _with_note(message: str, note: str) -> str:
     """``message`` with ``note`` after it, for a read that ended on the time budget only."""
-    return f"{message} ({note})" if "time budget" in message else message
+    return f"{message} ({note})" if note and "time budget" in message else message
 
 
 def _without_times(states: dict[str, columns.RowState]) -> dict[str, columns.RowState]:
@@ -311,10 +314,12 @@ def apply(
     read_snapshots = bool(survivors) and needs_snapshots(q)
     if read_snapshots:
         states, messages, stopped = _states(env, survivors, read)
-        note = _budget_note(env, len(survivors))
+        note = _budget_note(env, survivors)
         if note:  # a read that ran out of time says in which phase and how much it had
             messages = {pr: _with_note(message, note) for pr, message in messages.items()}
-        host_errors += [host_error(e["host"], entry_error(e)) for e in stopped]
+        for entry in stopped:
+            error = host_error(entry["host"], entry_error(entry))
+            host_errors.append({**error, "message": _with_note(error["message"], note)})
     kept = [r for r in survivors if decide(q.where, r, states.get(r.pr) or unloaded, now) is True]
     if q.order:
         kept = columns.order(
@@ -475,9 +480,15 @@ def run(
     listed = len(output["errors"])  # the hosts that failed to list
     # the snapshot phase has a budget of its own, as long as --timeout: a slow list cannot leave
     # the reads after it without time (D-43)
-    if needs_snapshots(q) and isinstance(env.gateway.budget, Budget):
-        env.gateway.budget = Budget(env.gateway.budget.total)
-    output = apply(env, output, q, scope, now=now, read=read)
+    current = getattr(env.gateway, "budget", None)
+    original = current if needs_snapshots(q) and isinstance(current, Budget) else None
+    if original is not None:
+        env.gateway.budget = Budget(original.total)
+    try:
+        output = apply(env, output, q, scope, now=now, read=read)
+    finally:
+        if original is not None:  # the command's own budget is back, whatever happened
+            env.gateway.budget = original
     failed = output["errors"]
     if failed:  # a host failed to list, or the read of its snapshots stopped
         shown = ", ".join(f"{e['host']} ({e['code']})" for e in failed)

@@ -1166,7 +1166,30 @@ def test_hostile_snapshot_data_is_null_or_bounded_in_the_summary() -> None:
         and "\n" not in s["blocked_by"][0]
     )
     assert len(s["blocked_by"]) <= columns.MAX_CODES
-    assert all(len(c) < 100 for c in s["blocked_by"])  # cut before it is sanitized
+    assert all(len(c) <= 40 for c in s["blocked_by"])  # bounded after it is sanitized
+    assert len(s["ci_state"]) <= 40
+    assert s["complete"] is True  # only a `false` says the snapshot is partial
+    # an entry without a readable code stays in the list, as a placeholder
+    assert s["blocked_by"][1:4] == ["unknown"] * 3
+    schemas.validate(s, "forgectl/defs.json#/$defs/pr_list_item/properties/snapshot")
+
+
+def test_the_counts_of_the_summary_are_clamped() -> None:
+    big = {
+        **snap(1),
+        "approvals": 10**30,
+        "approvals_left": 10**30,
+        "activity": {
+            "others_since_push": 10**30,
+            "awaiting_my_reply": 10**30,
+            "unresolved_threads": 10**30,
+        },
+    }
+    out = run("ORDER BY ready", listing(item(1)), reader([big]))
+    s = out["items"][0]["snapshot"]
+    counts = ("approvals", "approvals_left", "others_since_push", "awaiting_my_reply", "unresolved")
+    assert [s[k] for k in counts] == [1_000_000] * 5
+    schemas.validate(s, "forgectl/defs.json#/$defs/pr_list_item/properties/snapshot")
 
 
 def test_a_summary_of_a_non_list_blocked_by_is_null() -> None:
@@ -1282,7 +1305,70 @@ def test_a_read_that_ran_out_of_time_says_the_phase_the_count_and_the_budget() -
     )
     by_pr = {f["pr"][-1]: f["error"] for f in out["snapshot_failures"]}
     assert by_pr["2"]["code"] == "network_error"
-    assert (
-        "snapshot phase of 3 PRs" in by_pr["2"]["message"] and "30s budget" in by_pr["2"]["message"]
-    )
+    message = by_pr["2"]["message"]
+    assert "snapshot phase" in message and "3 PRs in 1 project" in message
+    assert "30s budget" in message
     assert by_pr["3"]["message"] == "no such PR"  # only a time-budget failure is annotated
+
+
+def test_the_note_counts_the_projects_and_marks_a_stopped_host_too() -> None:
+    env = budgeted_env(30)
+    other = {**item(2), "repo": "github.com/acme/other", "pr": "github.com/acme/other#2"}
+    gone = "no answer within the time budget"
+
+    def read(e: Any, refs: list[Any]) -> dict[str, Any]:
+        e.gateway.budget.spent = 30.0
+        return {
+            "items": [],
+            "failed": [],
+            "errors": [{"host": "github.com", "code": "network_error", "message": gone}],
+        }
+
+    with pytest.raises(ForgectlError) as err:
+        prsquery.run(
+            env,
+            replace(BASE, author="carol"),
+            prsquery.compile_query("ci = passing"),
+            state_given=True,
+            now=NOW,
+            lister=lambda e, a: listing(item(1), other),
+            read=read,
+        )
+    message = err.value.output["errors"][0]["message"]  # type: ignore[index]
+    assert message.startswith(gone) and "2 PRs in 2 projects" in message
+
+
+def test_a_gateway_without_a_budget_is_left_alone() -> None:
+    env = Env()
+    del env.gateway.budget  # a fake gateway that has none
+    out = prsquery.run(
+        env,  # type: ignore[arg-type]
+        replace(BASE, author="carol"),
+        prsquery.compile_query("ci = passing"),
+        state_given=True,
+        now=NOW,
+        lister=lambda e, a: listing(item(1)),
+        read=reader([snap(1)]),
+    )
+    assert numbers(out) == [1] and not hasattr(env.gateway, "budget")
+
+
+def test_the_original_budget_is_back_when_the_snapshot_read_raises() -> None:
+    env = budgeted_env(30)
+    before = env.gateway.budget
+
+    def read(e: Any, refs: list[Any]) -> dict[str, Any]:
+        assert e.gateway.budget is not before  # the phase had its own
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        prsquery.run(
+            env,
+            replace(BASE, author="carol"),
+            prsquery.compile_query("ci = passing"),
+            state_given=True,
+            now=NOW,
+            lister=lambda e, a: listing(item(1)),
+            read=read,
+        )
+    assert env.gateway.budget is before
