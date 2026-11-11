@@ -2,6 +2,7 @@
   "additions": 120,
   "approvals": 1,
   "approvals_at_head": 1,
+  "approvals_left": null,
   "author": {
     "id": "1001",
     "is_bot": false,

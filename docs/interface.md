@@ -87,6 +87,7 @@ Every text field that comes from a forge is untrusted (`x-untrusted` in the sche
 | `review_decision` | `approved`, `changes_requested`, `review_required` or `none` |
 | `approvals` | number of accounts whose `latest_by_reviewer` state is `approved`, at any head, other than the author and with `can_push` not false |
 | `approvals_at_head` | those at the current head, with `can_push: true`, or null; **`null` is not approved** |
+| `approvals_left` | GitLab: the approvals the approval rules still need (`approvals_left`), a non-negative integer; null on GitHub, which reports no required count in the model, and on GitLab when the host does not say or reports a negative number. It is 0 once the rules are met, however many approvals there are |
 
 Field rules:
 
@@ -883,7 +884,7 @@ The default list is the union of requested-from-you and authored-by-you, as two 
 | note | `note` | 12 | `[refreshing]`, `[stale: code]` or `[changed]`; the cell is cut to 12 cells, and the detail pane does not repeat a stale reason |
 | badge | `badge` | 26 | state, draft and the first blocker |
 | CI glyph | `CI` | 4 | `ci.state` |
-| approvals | `appr` | 6 | the bare `approvals` count on both hosts; the `1/2` form over the required count (on GitLab `approvals` plus the `approvals_left` of the approval rule) arrives with #86, because the snapshot does not expose the required count yet |
+| approvals | `appr` | 6 | `approvals`, or `approvals/required` where `approvals_left` is not null (GitLab: `required` is `approvals` plus `approvals_left`, so `1/2` is one approval of two needed; an over-approved MR shows `3/3`). The bare count on GitHub, and when `approvals_left` is null or there is nothing required (`0` and `approvals_left` 0). `?` when `approvals` is unknown |
 | review | `rev` | 5 | `review_decision` |
 | comments | `comments` | 20 | `activity`: `comments_total`, `unresolved_threads`, `others_since_push` (new since push) and `awaiting_my_reply` |
 | age | `age` | 9 | since `head.pushed_at` (blank when it is null) and since `updated_at` |

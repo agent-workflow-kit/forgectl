@@ -1268,6 +1268,14 @@
           ],
           "minimum": 0,
           "description": "Those at the current head, with can_push true, and not older than the PR's latest retarget. null is not approved."
+        },
+        "approvals_left": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "GitLab: the approvals the approval rules still need (`approvals_left`). null on GitHub, which reports no required count in the model, and on GitLab when the host does not say."
         }
       },
       "allOf": [

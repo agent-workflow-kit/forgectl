@@ -45,6 +45,7 @@ class Summary:
 
     ci_state: str | None = None
     approvals: int | None = None
+    approvals_left: int | None = None  # GitLab: approvals still needed; null on GitHub
     review_decision: str | None = None
     blocker: str | None = None
     pushed_at: str | None = None
@@ -86,6 +87,7 @@ def summarize(snap: dict[str, Any]) -> Summary:
     return Summary(
         ci_state=_word(_d(snap.get("ci")).get("state")),
         approvals=_count(snap.get("approvals")),
+        approvals_left=_count(snap.get("approvals_left")),
         review_decision=_word(snap.get("review_decision")),
         blocker=_word(_d(first).get("code")),
         pushed_at=_word(_d(snap.get("head")).get("pushed_at")),
@@ -126,9 +128,13 @@ def age(value: Any, now: datetime) -> str:
 
 
 def approvals_cell(s: Summary) -> str:
-    """The bare ``approvals`` count on both hosts; ``?`` when the snapshot has none."""
-    # todo(#86): render approvals/required once the snapshot exposes the required count
-    return "?" if s.approvals is None else str(s.approvals)
+    """``approvals/required`` where the snapshot gives ``approvals_left`` (GitLab: the required
+    count is ``approvals`` plus what is still needed), else the bare ``approvals`` count;
+    ``?`` when the snapshot has no count."""
+    if s.approvals is None:
+        return "?"
+    required = None if s.approvals_left is None else s.approvals + s.approvals_left
+    return str(s.approvals) if not required else f"{s.approvals}/{required}"
 
 
 def ci_cell(s: Summary) -> str:

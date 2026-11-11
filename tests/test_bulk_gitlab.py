@@ -344,6 +344,8 @@ def test_bulk_item_equals_the_per_pr_snapshot_on_the_same_facts(tmp_path: Path) 
     bulk = got.snapshots[ref()].to_dict()
     assert neutral(bulk) == neutral(per_pr)
     schemas.validate_cli_output("snapshot", bulk)
+    expected = recording("approvals")["approvals_left"]
+    assert bulk["approvals_left"] == per_pr["approvals_left"] == expected
 
 
 def test_bulk_gives_real_additions_and_deletions(tmp_path: Path) -> None:

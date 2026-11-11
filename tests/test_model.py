@@ -119,6 +119,7 @@ def make_pr(**over: Any) -> m.PR:
         review_decision="none",
         approvals=0,
         approvals_at_head=None,
+        approvals_left=None,
     )
     base.update(over)
     return m.PR(**base)
@@ -904,6 +905,7 @@ def test_pr_with_unknowns_validates() -> None:
         deletions=None,
         changed_files=None,
         approvals_at_head=None,
+        approvals_left=None,
         author=m.Author(login=None, id=None, is_bot=None),
         head=m.Head(sha=H, ref="x", repo=None, is_fork=None),
         base=m.Base(ref="main", sha=None, is_default=None),

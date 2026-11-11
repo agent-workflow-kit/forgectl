@@ -570,6 +570,7 @@ class GitLabBackend:
             review_decision=m.gitlab_review_decision(entries, approvals_left, approvals),
             approvals=approvals,
             approvals_at_head=at_head,
+            approvals_left=approvals_left,
         )
         parts = PrParts(
             project_id=project_id,

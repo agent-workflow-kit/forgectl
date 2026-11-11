@@ -279,7 +279,7 @@ class LiveSource:
             if isinstance(item, dict) and item.get("pr") == pr:
                 if item.get("complete") is not True:
                     raise ForgectlError("upstream_error", "detail: the bulk read is not whole")
-                # todo(#86): a GitHub check's `required` is null in a bulk item (D-37)
+                # TODO(#136): a GitHub check's `required` is null in a bulk item (D-37)
                 return item
         reason = "no item"
         for entry in answer.get("failed") or []:

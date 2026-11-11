@@ -725,6 +725,7 @@ class PR:
     review_decision: ReviewDecision
     approvals: int
     approvals_at_head: int | None
+    approvals_left: int | None
 
     def __post_init__(self) -> None:
         if any(b.code is BlockerCode.CHECKS_ABSENT for b in self.blocked_by):
@@ -791,6 +792,7 @@ class PR:
             "review_decision": self.review_decision,
             "approvals": self.approvals,
             "approvals_at_head": self.approvals_at_head,
+            "approvals_left": self.approvals_left,
         }
 
 
