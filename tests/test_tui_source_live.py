@@ -18,7 +18,7 @@ import pytest
 from forgectl import registry
 from forgectl.errors import ForgectlError
 from forgectl.tui.source import DataSource, load_list
-from forgectl.tui.source_live import Cancelled, LiveSource, in_process_runner
+from forgectl.tui.source_live import Cancelled, HostStopped, LiveSource, in_process_runner
 
 from .tui_fakes import make_diff, make_item, make_snapshot
 
@@ -454,6 +454,14 @@ def test_detail_of_a_pr_the_bulk_reader_gave_up_raises_and_names_the_reason() ->
         LiveSource(run).detail(PR1)
     assert caught.value.code == "upstream_error"
     assert "bulk_unavailable" in caught.value.message and "\x1b" not in caught.value.message
+
+
+def test_detail_of_a_pr_cut_off_by_a_host_stop_raises_the_stop_for_the_caller() -> None:
+    failed = [{"pr": PR1, "error": {"code": "rate_limited", "message": "x"}}]
+    run = Recorder(lambda argv: {"items": [], "failed": failed, "complete": False, "errors": []})
+    with pytest.raises(HostStopped) as caught:
+        LiveSource(run).detail(PR1)
+    assert caught.value.code == "rate_limited"
 
 
 def test_detail_of_an_item_that_is_not_whole_raises() -> None:

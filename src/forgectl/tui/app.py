@@ -36,7 +36,7 @@ from .query_screen import PanelActions, QueryScreen
 from .query_store import QueryStore
 from .refresh import BACKOFF_FACTOR, RateLimits, host_of, needs_snapshot
 from .source import DataSource, Listing, Row, load_list
-from .source_live import Cancelled
+from .source_live import Cancelled, HostStopped
 
 DEFAULT_CONCURRENCY = 4  # snapshots in flight at once; `browse.concurrency` sets it
 DEFAULT_FULL_REFRESH_EVERY = 5  # `browse.full_refresh_every`
@@ -263,6 +263,16 @@ class RowList(OptionList):
         self.app.relayout()  # type: ignore[attr-defined]
 
 
+def _older(new: dict[str, Any], held: dict[str, Any]) -> bool:
+    """Whether ``new`` was fetched before ``held`` (both ``fetched_at`` must parse)."""
+    try:
+        return datetime.fromisoformat(str(new["fetched_at"])) < datetime.fromisoformat(
+            str(held["fetched_at"])
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 class BrowseApp(App[None]):
     ENABLE_COMMAND_PALETTE = False  # its screenshot command would write forge text to a file
     CSS = """
@@ -392,6 +402,7 @@ class BrowseApp(App[None]):
         self._detail_url: str | None = None
         self._detail_checks: list[dict[str, Any]] = []
         self._detail_token = 0
+        self._detail_closed = -1  # the load (token) whose pane the user closed with esc
         # Which detail sections are open: kept for the session, across PRs and refreshes.
         self._open_sections = sections.initial_open(detail_collapsed)
         self._detail: render.Detail | None = None
@@ -542,6 +553,8 @@ class BrowseApp(App[None]):
                 self._added |= {r.pr for r in rows if r.pr not in previous}
             self._rows = rows
             self._row_by_pr = {r.pr: r for r in rows}
+            # a PR that left the list keeps no snapshot: coming back, it must not paint old data
+            self._snaps = {pr: snap for pr, snap in self._snaps.items() if pr in self._row_by_pr}
             # A row that is still listed keeps its last good data while it reloads.
             self._states = {r.pr: self._states.get(r.pr) or columns.RowState() for r in rows}
             self._deferred &= set(self._row_by_pr)
@@ -1087,7 +1100,8 @@ class BrowseApp(App[None]):
         return bool(self.query_one("#detail", VerticalScroll).display)
 
     def _start_detail(self, pr: str) -> None:
-        if pr == self._detail_loading:  # the same PR is already on its way
+        if pr == self._detail_loading and self._detail_closed != self._detail_token:
+            # the same PR is already on its way, for an open pane
             self._status(f"already loading {pr}")
             return
         self._detail_token += 1
@@ -1096,7 +1110,7 @@ class BrowseApp(App[None]):
 
     async def _load_detail(self, pr: str, token: int) -> None:
         """Open the pane at once from the data the list holds, then fill it in as the detail read
-        and the diff, started together, arrive (D-36). Every arrival repaints the pane; a read that
+        and the diff, started together, arrive (D-37). Every arrival repaints the pane; a read that
         failed marks its own sections only. A newer request (``token``) discards this one."""
         self._status("loading detail...")
 
@@ -1117,7 +1131,10 @@ class BrowseApp(App[None]):
             first = await in_thread(self._frame, item, snap, snap_note, diff, diff_note)
             if token != self._detail_token:
                 return
-            self._show_detail(pr, first, "loading detail...", seen=snap is not None)
+            state = self._states.get(pr)
+            marker = f" [stale: {state.error or 'refresh failed'}]" if state and state.stale else ""
+            if token != self._detail_closed:
+                self._show_detail(pr, first, f"loading detail...{marker}", seen=snap is not None)
             while reads:
                 done, _ = await asyncio.wait(list(reads), return_when=asyncio.FIRST_COMPLETED)
                 for future in done:
@@ -1133,9 +1150,13 @@ class BrowseApp(App[None]):
                         failure = code = self._internal(exc)
                     else:
                         if kind == "snapshot":
-                            snap, snap_note = result, None
-                            self._keep_snapshot(pr, result)
-                            self._row_refreshed(pr, result)
+                            held = self._snaps.get(pr)
+                            if held is not None and _older(result, held):
+                                snap, snap_note = held, None  # a newer read landed meanwhile
+                            else:
+                                snap, snap_note = result, None
+                                self._keep_snapshot(pr, result)
+                                self._row_refreshed(pr, result)
                         else:
                             diff, diff_note = result, None
                         continue
@@ -1154,7 +1175,8 @@ class BrowseApp(App[None]):
                 status = "loading detail..." if reads else f"{len(detail.checks)} checks"
                 if not reads and errors:
                     status = "; ".join([status, *errors]) if snap is not None else errors[0]
-                self._show_detail(pr, detail, status, seen=snap is not None)
+                if token != self._detail_closed:  # the user closed the pane: do not reopen it
+                    self._show_detail(pr, detail, status, seen=snap is not None)
         except Exception as exc:  # a paint bug must not take the UI down
             if token == self._detail_token:
                 self._detail_note = self._internal(exc)
@@ -1176,19 +1198,19 @@ class BrowseApp(App[None]):
         """The pane for what has arrived. Runs on a worker thread (sanitizing and laying out a
         large pane stays off the event loop). Without a snapshot only the list's facts show."""
         if snap is None:
-            return render.stub_of(item, snap_note or render.LOADING, diff_note)
+            return render.stub_of(item, snap_note or render.LOADING, diff_note, diff)
         return render.detail_of(snap, diff, diff_note)
 
     def _read_detail(self, pr: str, cancelled: Callable[[], bool]) -> dict[str, Any]:
         """Runs on a worker thread: the PR's snapshot data for the pane. The source's ``detail``
         (one bulk read) when it has one; a ``detail`` that fails, or a source without one, falls
-        back to ``snapshot``, the source of truth."""
+        back to ``snapshot``, the source of truth, except when the host stopped the bulk read."""
         read = getattr(self.source, "detail", None)
         if read is not None:
             try:
                 return read(pr, cancelled=cancelled) if self._detail_cancels else read(pr)  # type: ignore[no-any-return]
-            except Cancelled:
-                raise
+            except (Cancelled, HostStopped):
+                raise  # a stopped host is not asked again (D-36): the failure is shown
             except Exception:  # noqa: BLE001 - any failure of the fast read: ask the full one
                 if cancelled():
                     raise Cancelled(pr) from None
@@ -1352,6 +1374,7 @@ class BrowseApp(App[None]):
         detail = self.query_one("#detail", VerticalScroll)
         if detail.display:
             detail.display = False
+            self._detail_closed = self._detail_token  # a load on its way must not reopen it
             self.query_one("#list", OptionList).focus()
 
     def action_refresh_selected(self) -> None:

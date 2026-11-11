@@ -48,6 +48,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from forgectl import cli, registry
+from forgectl.backends.bulk_common import HOST_STOPS
 from forgectl.browse import is_pr
 from forgectl.config import load_config
 from forgectl.errors import Cancelled, ForgectlError
@@ -166,6 +167,12 @@ class _Call:
         self.groups: set[tuple[int, int]] = set()
 
 
+class HostStopped(ForgectlError):
+    """The bulk reader was stopped by its host (a ``HOST_STOPS`` code, such as a rate limit):
+    another read of that host would meet the same answer, so ``detail`` raises this and the
+    caller does not fall back to ``snapshot``."""
+
+
 class LiveSource:
     """``DataSource`` over a runner. ``LiveSource()`` uses the in-process handlers."""
 
@@ -261,6 +268,7 @@ class LiveSource:
             if isinstance(item, dict) and item.get("pr") == pr:
                 if item.get("complete") is not True:
                     raise ForgectlError("upstream_error", "detail: the bulk read is not whole")
+                # todo(#86): a GitHub check's `required` is null in a bulk item (D-37)
                 return item
         reason = "no item"
         for entry in answer.get("failed") or []:
@@ -268,6 +276,8 @@ class LiveSource:
             code = error.get("code") if isinstance(error, dict) else None
             if isinstance(code, str) and code.replace("_", "").isalnum() and len(code) <= 40:
                 reason = code
+        if reason in HOST_STOPS:  # the code of the stop itself: a stopped host is not asked again
+            raise HostStopped(reason, f"detail: the host stopped the bulk read ({reason})")
         raise ForgectlError("upstream_error", f"detail: the bulk read failed ({reason})")
 
     def _one(self, command: str, pr: str, cancelled: Callable[[], bool] | None) -> dict[str, Any]:

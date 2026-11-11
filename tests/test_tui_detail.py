@@ -15,10 +15,16 @@ import pytest
 from textual.pilot import Pilot
 from textual.widgets import Static
 
+from forgectl.backends.github_bulk import read_bulk
 from forgectl.errors import ForgectlError
 from forgectl.tui import render
 from forgectl.tui.app import BrowseApp
+from forgectl.tui.source_live import HostStopped
 
+from .bulk_support import BulkRouter
+from .harness.forges import FakeForges
+from .test_bulk_github import per_pr_without_required, rig
+from .test_github_snapshot import NOW, REF
 from .test_tui_app import settle, status_of, wait_until
 from .tui_fakes import FakeOpener, FakeSource, make_diff, make_item, make_snapshot
 
@@ -211,20 +217,30 @@ def test_a_row_without_a_snapshot_opens_on_the_lists_facts_with_loading_markers(
     drive(source, script, concurrency=0)
 
 
-def test_the_detail_result_equals_what_snapshot_plus_diff_gives_for_the_same_pr() -> None:
-    body = "text \x1b[31mred\x1b[0m and ‮ reversed"
-    snap = make_snapshot(1, title="Mine", body=body)
-    diff = make_diff(PR1, "@@ -1 +1 @@\n-a\x1b[2J\n+b\n")
-    source = source_of()
-    source.snapshots[PR1] = snap
-    source.diffs[PR1] = diff
+def test_the_pane_from_a_real_bulk_item_equals_the_pane_from_the_real_snapshot(
+    fake_forges: FakeForges,
+) -> None:
+    per_pr = per_pr_without_required(fake_forges)  # the real per-PR snapshot of the recordings
+    bulk = (
+        read_bulk(rig(fake_forges, BulkRouter()).env, "github.com", [REF], now=lambda: NOW)
+        .snapshots[REF]
+        .to_dict()
+    )  # the real bulk item of the same facts
+    pr = per_pr["pr"]
+    diff = make_diff(pr, "@@ -1 +1 @@\n-a\x1b[2J\n+b\n")
+    source = DetailSource(
+        authored=[make_item(7, repo="github.com/user-7/example-repo")],
+        snapshots={pr: per_pr},
+        diffs={pr: diff},
+    )
+    source.fresh[pr] = bulk
 
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         await pilot.press("down", "enter")
         await settle(app, pilot)
         shown = app._detail
         assert shown is not None
-        wanted = render.detail_of(snap, diff)
+        wanted = render.detail_of(per_pr, diff)
         assert shown.texts == wanted.texts
         assert shown.counts == wanted.counts
         assert "\x1b" not in "".join(shown.texts.values())
@@ -359,3 +375,128 @@ def test_a_source_without_a_detail_read_uses_snapshot_and_diff_together() -> Non
 
 def ForgeError(code: str, message: str) -> ForgectlError:  # noqa: N802 - reads as a constructor
     return ForgectlError(code, message)
+
+
+# -- round 1 of the review of #119 ---------------------------------------------------------
+
+
+def test_a_diff_that_arrives_before_any_snapshot_shows_in_the_changes_section() -> None:
+    source = source_of()
+    hold(source, "detail")
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down", "enter")
+        await wait_until(pilot, lambda: "old line" in text_of(app, "changes"))
+        assert "loading" in text_of(app, "description")
+        release(source, "detail")
+        await settle(app, pilot)
+
+    drive(source, script, concurrency=0)
+
+
+def test_a_diff_that_arrives_when_the_snapshot_half_failed_is_not_marked_failed() -> None:
+    source = source_of()
+    source.fail["detail:" + PR1] = ForgeError("upstream_error", "x")
+    source.fail["snapshot:" + PR1] = ForgeError("network_error", "down")
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down", "enter")
+        await settle(app, pilot)
+        assert "old line" in text_of(app, "changes")
+        assert "failed: network_error" in text_of(app, "description")
+
+    drive(source, script, concurrency=0)
+
+
+def test_a_pr_that_leaves_the_list_loses_its_held_snapshot() -> None:
+    source = source_of()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down", "enter")
+        await settle(app, pilot)
+        assert PR1 in app._snaps
+        source.authored = []
+        await pilot.press("escape", "R")
+        await settle(app, pilot)
+        assert PR1 not in app._snaps
+
+    drive(source, script)
+
+
+def test_a_row_whose_last_refresh_failed_opens_with_the_stale_marker_on_the_first_frame() -> None:
+    source = source_of()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        app._states[PR1] = app._failed_state(app._states[PR1], "network_error")
+        hold(source, "detail", "diff")
+        await pilot.press("down", "enter")
+        await wait_until(pilot, lambda: ("detail", PR1) in source.calls)
+        await pilot.pause()
+        assert "old body" in text_of(app, "description")
+        assert "stale: network_error" in status_of(app)
+        release(source, "detail", "diff")
+        await settle(app, pilot)
+
+    drive(source, script)
+
+
+def test_escape_during_a_load_keeps_the_pane_closed_when_the_reads_arrive() -> None:
+    source = source_of()
+    source.fresh[PR1] = make_snapshot(1, title="Mine", body="fresh body")
+    hold(source, "detail", "diff")
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down", "enter")
+        await wait_until(pilot, lambda: ("detail", PR1) in source.calls)
+        await pilot.press("escape")
+        assert app.query_one("#detail").display is False
+        release(source, "detail", "diff")
+        await settle(app, pilot)
+        await asyncio.sleep(0.2)
+        await settle(app, pilot)
+        assert app.query_one("#detail").display is False
+        assert app.focused is not None and app.focused.id == "list"
+        await pilot.press("enter")  # a new Enter still loads
+        await settle(app, pilot)
+        assert app.query_one("#detail").display is True
+        assert "fresh body" in text_of(app, "description")
+
+    drive(source, script)
+
+
+def test_a_stop_code_from_the_bulk_reader_is_shown_and_never_asked_again_by_snapshot() -> None:
+    source = source_of()
+    source.fail["detail:" + PR1] = HostStopped("rate_limited", "the host is out of calls")
+    seen: dict[str, Any] = {}
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        seen["mark"] = len(source.calls)
+        await pilot.press("down", "enter")
+        await settle(app, pilot)
+        assert "rate_limited" in status_of(app)
+        assert "old body" in text_of(app, "description")  # the held data stays
+        assert app._states[PR1].stale is True
+
+    drive(source, script)
+    assert ("snapshot", PR1) not in calls_after(source, seen["mark"])
+
+
+def test_a_detail_result_older_than_the_held_snapshot_does_not_replace_it() -> None:
+    source = source_of()
+    older = make_snapshot(1, title="Mine", body="older body")
+    older["fetched_at"] = "2026-01-01T00:00:00Z"
+    source.fresh[PR1] = older
+    hold(source, "detail")
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down", "enter")
+        await wait_until(pilot, lambda: ("detail", PR1) in source.calls)
+        newer = make_snapshot(1, title="Mine", body="newest body")
+        newer["fetched_at"] = "2026-12-31T00:00:00Z"
+        app._snaps[PR1] = newer  # a refresh of the row landed while the detail read was out
+        release(source, "detail")
+        await settle(app, pilot)
+        assert app._snaps[PR1]["body"] == "newest body"
+        assert "newest body" in text_of(app, "description")
+
+    drive(source, script)

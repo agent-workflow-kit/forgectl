@@ -293,9 +293,15 @@ def check_labels_of(checks: list[dict[str, Any]]) -> tuple[list[dict[str, Any]],
     return shown, labels
 
 
-def stub_of(item: dict[str, Any], note: str, changes_note: str | None = None) -> Detail:
+def stub_of(
+    item: dict[str, Any],
+    note: str,
+    changes_note: str | None = None,
+    diff: dict[str, Any] | None = None,
+) -> Detail:
     """The pane for a PR with no snapshot yet: the facts the list holds, and ``note`` in the
-    sections that need the snapshot (``changes_note``: in the changes section)."""
+    sections that need the snapshot. The changes section shows ``diff`` when it has arrived,
+    else ``changes_note`` (default: ``note``)."""
     url = item.get("url")
     body = note_text(note)
     return Detail(
@@ -305,7 +311,7 @@ def stub_of(item: dict[str, Any], note: str, changes_note: str | None = None) ->
         texts={
             "facts": facts_text(item),
             "description": body,
-            "changes": changes_text(None, changes_note or note),
+            "changes": changes_text(diff, changes_note or note),
             "ci": body,
             "comments": body,
             "reviews": body,
