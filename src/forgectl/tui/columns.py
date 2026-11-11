@@ -667,7 +667,9 @@ def is_ready(s: Summary) -> bool | None:
     if s.mergeable is False:
         return False
     if s.ci_state in CI_RANK and s.ci_state != "passing":
-        return False
+        # a "none" from an incomplete snapshot is not "no CI": unknown, as the ``ci`` field has it
+        if s.ci_state != "none" or s.complete:
+            return False
     if s.review_decision in ("changes_requested", "review_required"):
         return False
     known = (

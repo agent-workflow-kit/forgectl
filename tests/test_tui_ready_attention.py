@@ -62,6 +62,13 @@ def test_summarize_carries_mergeable_and_the_blocker_count() -> None:
     assert (s.mergeable, s.blocked_count) == (None, None)
 
 
+def test_summarize_counts_each_malformed_blocker_entry_as_one() -> None:
+    s = columns.summarize({"mergeable": True, "blocked_by": [1, {}]})
+    assert s.blocked_count == 2
+    s = ready_summary(blocked_count=s.blocked_count)
+    assert columns.is_ready(s) is False
+
+
 # -- ready -------------------------------------------------------------------------------------
 
 
@@ -77,7 +84,6 @@ def test_ready_is_true_only_when_every_input_is_reported_and_ready() -> None:
         {"mergeable": False},
         {"ci_state": "failing"},
         {"ci_state": "pending"},
-        {"ci_state": "none"},
         {"review_decision": "changes_requested"},
         {"review_decision": "review_required"},
     ],
@@ -102,6 +108,12 @@ def test_ready_is_false_when_a_reported_input_rules_it_out(changes: dict[str, An
 )
 def test_ready_is_unknown_never_true_when_an_input_is_missing(changes: dict[str, Any]) -> None:
     assert columns.is_ready(ready_summary(**changes)) is None
+
+
+def test_ready_ci_none_is_false_only_on_a_complete_snapshot() -> None:
+    # as the ``ci`` field: a "none" from an incomplete snapshot is unknown, not "no CI"
+    assert columns.is_ready(ready_summary(ci_state="none")) is False
+    assert columns.is_ready(ready_summary(ci_state="none", complete=False)) is None
 
 
 def test_ready_is_unknown_without_a_loaded_snapshot() -> None:
@@ -287,3 +299,36 @@ def test_the_new_keys_are_not_header_columns() -> None:
 )
 def test_hostile_uses_are_parse_errors(text: str) -> None:
     assert isinstance(parse(text), ParseError)
+
+
+def test_unknown_count_counts_an_unloaded_row_for_ready_but_not_for_attention() -> None:
+    rows = [mkrow(n) for n in (1, 2, 3)]
+    states = {
+        rows[0].pr: loaded(),
+        rows[1].pr: loaded(complete=False),  # loaded, ready unknown: its answer, not hidden
+        # rows[2] never started
+    }
+    count = filtering.unknown_count
+    assert count(ok("ready").where, rows, states, NOW) == 1
+    assert count(ok("NOT ready").where, rows, states, NOW) == 1
+    assert count(ok("attention > 0").where, rows, states, NOW) == 0
+    loaded_row = rows[1]
+    assert not filtering.matches(ok("ready").where, loaded_row, states[loaded_row.pr], NOW)
+    assert not filtering.matches(ok("NOT ready").where, loaded_row, states[loaded_row.pr], NOW)
+    assert filtering.matches(ok("ready IS NULL").where, loaded_row, states[loaded_row.pr], NOW)
+
+
+def test_a_loading_state_with_a_stale_failing_summary_has_attention_zero() -> None:
+    state = RowState(columns.LOADING, ready_summary(ci_state="failing"))
+    assert get(state, "attention") == 0
+    assert not filtering.matches(ok("attention IS NULL").where, mkrow(1), state, NOW)
+    assert not filtering.matches(ok("attention > 0").where, mkrow(1), state, NOW)
+
+
+@pytest.mark.parametrize("direction", ["ASC", "DESC"])
+def test_equal_ready_rows_tie_on_the_pr_in_both_directions(direction: str) -> None:
+    rows = [mkrow(n) for n in (3, 1, 2)]
+    states = {r.pr: loaded() for r in rows}
+    sort = filtering.sort_of(ok(f"ORDER BY ready {direction}").order)
+    ordered = columns.order(rows, states, columns.SORT_REPO, sort)
+    assert [r.pr for r in ordered] == sorted(r.pr for r in rows)
