@@ -65,7 +65,7 @@ Every text field that comes from a forge is untrusted (`x-untrusted` in the sche
 |---|---|
 | `pr`, `repo`, `number`, `url`, `backend` | identity |
 | `pr_id` | opaque, stable across renames: GitHub node id, GitLab global id |
-| `repo_id` | opaque id of the repository, stable across renames and moves: GitHub repository node id, GitLab project global id (`gid://gitlab/Project/N`); null when a host does not provide it. `repo` is the path, `repo_id` is the repository; the same `repo_id` under another `repo` is a rename |
+| `repo_id` | opaque id of the repository, stable across renames and moves: GitHub repository node id, GitLab project global id (`gid://gitlab/Project/N`); never null. `repo` is the path, `repo_id` is the repository; the same `repo_id` under another `repo` is a rename |
 | `title`, `body` | text |
 | `author` | `{login, id, is_bot}` ([Logins](#logins), [Bot detection](#bot-detection)) |
 | `state` | `open`, `closed` or `merged` |
@@ -93,7 +93,7 @@ Every text field that comes from a forge is untrusted (`x-untrusted` in the sche
 Field rules:
 
 - **`state`.** GitLab's `locked` is reported as `open`, with `{code: "other", detail: "locked"}` in `blocked_by`. Readiness is computed only for open PRs. A closed or merged PR has `blocked_by: []` and `mergeable: null` and gets no readiness retry.
-- **Renames and absence.** A repo rename changes `pr` and `repo`; `pr_id` and `repo_id` stay. A caller that keeps `repo_id` next to a repo path detects a rename when a PR it knows turns up under the same `repo_id` with another `repo`; `prs` items carry it too. `not_found` on a PR you watched means unknown, not closed.
+- **Renames and absence.** A repo rename changes `pr` and `repo`; `pr_id` and `repo_id` stay. A per-repo listing of the old path stays empty after a rename; a caller that keeps `repo_id` next to a repo path detects the rename when a PR it knows turns up, in a listing not keyed on the old path (for example `--author me`), under the same `repo_id` with another `repo`; `prs` items carry it too. `not_found` on a PR you watched means unknown, not closed.
 - **`url`** is built by forgectl as `https://<host><prefix>/<path>/...`, never taken from the host.
 - **`base.sha`:** GitHub `baseRefOid`, GitLab `diff_refs.base_sha`; it is not the merge base, which is in [`diff`](#diff). **`base.is_default`:** GitHub GraphQL `repository.defaultBranchRef`; GitLab project read.
 - **`merged_head_sha` on GitLab** is the MR's `sha`, which stays the pre-merge head after every merge type on every method. **`merge_commit_sha` on GitLab** is the host's `merge_commit_sha`, else `squash_commit_sha`, else `sha`.

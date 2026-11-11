@@ -693,7 +693,7 @@ class RateLimit:
 class PR:
     pr: str
     repo: str
-    repo_id: str | None
+    repo_id: str
     pr_id: str
     number: int
     url: str
@@ -1232,7 +1232,7 @@ class PrListItem:
     base_ref: str
     created_at: str
     updated_at: str
-    repo_id: str | None
+    repo_id: str
 
     def to_dict(self) -> dict[str, Any]:
         return {

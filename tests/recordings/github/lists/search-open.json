@@ -2,6 +2,10 @@
   "data": {
     "search": {
       "issueCount": 3,
+      "pageInfo": {
+        "endCursor": "Y3Vyc29yOjM=",
+        "hasNextPage": false
+      },
       "nodes": [
         {
           "__typename": "PullRequest",
@@ -106,11 +110,7 @@
           "updatedAt": "2026-09-20T07:15:00Z",
           "url": "https://github.com/user-7/other-repo/pull/12"
         }
-      ],
-      "pageInfo": {
-        "endCursor": "Y3Vyc29yOjM=",
-        "hasNextPage": false
-      }
+      ]
     }
   }
 }

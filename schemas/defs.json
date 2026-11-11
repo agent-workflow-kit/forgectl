@@ -10,12 +10,9 @@
       "description": "Lowercase host, with an optional :port only for a non-default port."
     },
     "repository_id": {
-      "type": [
-        "string",
-        "null"
-      ],
+      "type": "string",
       "pattern": "^[A-Za-z0-9:/_=-]{1,128}$",
-      "description": "Opaque, stable across renames and moves of the repository: GitHub repository node id, GitLab project global id (gid://gitlab/Project/N). A caller that sees the same repo_id under another repo path knows the repository was renamed. null when a host does not provide it."
+      "description": "Opaque, stable across renames and moves of the repository: GitHub repository node id, GitLab project global id (gid://gitlab/Project/N). A caller that sees the same repo_id under another repo path knows the repository was renamed. This is the host's stable repository id, not the host/path form of $defs/repo_id."
     },
     "repo_id": {
       "type": "string",
@@ -981,7 +978,8 @@
           "$ref": "#/$defs/repo_id"
         },
         "repo_id": {
-          "$ref": "#/$defs/repository_id"
+          "$ref": "#/$defs/repository_id",
+          "description": "The host's stable repository id (survives renames and moves), not the host/path form of $defs/repo_id; that form is in repo."
         },
         "pr_id": {
           "type": "string",
@@ -1467,7 +1465,8 @@
           "$ref": "#/$defs/ts"
         },
         "repo_id": {
-          "$ref": "#/$defs/repository_id"
+          "$ref": "#/$defs/repository_id",
+          "description": "The host's stable repository id (survives renames and moves), not the host/path form of $defs/repo_id; that form is in repo."
         },
         "snapshot": {
           "type": [

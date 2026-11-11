@@ -220,7 +220,7 @@ _ABSENT = object()
 #: Fields of the answer that may be null but must be there: a reader that sees none of them has
 #: read an answer that is not the one it asked for.
 _REQUIRED_PR = ("additions", "deletions", "changedFiles", "author")
-_REQUIRED_REPO = ("squashMergeAllowed", "mergeCommitAllowed", "rebaseMergeAllowed")
+_REQUIRED_REPO = ("id", "squashMergeAllowed", "mergeCommitAllowed", "rebaseMergeAllowed")
 
 _ALIAS = re.compile(r"p([0-9]{1,4})")
 
