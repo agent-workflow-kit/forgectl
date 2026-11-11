@@ -38,7 +38,7 @@ Status: planned, 2026-11-03. Implements [interface.md](interface.md) (normative)
 | `hooks.py` | 3 | hook processes, payloads, outcomes, decision ids, the async watchdog |
 | `merge.py` | 3 | Merge order, method resolution, verification |
 | `post.py` | 4 | Post order, position validation, dedupe, draft handling, read-back, state steps |
-| `tui/` | 6 | `browse`, imported only with the extra |
+| `tui/` | 6 | `browse`; only `tui.run` and the Textual widgets need the extra, the query engine modules import without it |
 
 ## Stage 0: Foundations
 

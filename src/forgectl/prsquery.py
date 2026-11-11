@@ -7,7 +7,7 @@ them without the ``tui`` extra.
 
 What the CLI adds is only what the TUI gets elsewhere: the rows (the items ``prs`` listed), the
 snapshots (read through ``run_snapshots``, and only when the query needs one) and the viewer
-(``me``). See interface: ``prs``, "Applying a query".
+(``me``). See interface: ``prs``, the Query, Narrowing, Roles, Snapshots and Viewer bullets.
 """
 
 from __future__ import annotations
@@ -49,8 +49,8 @@ LIST_FIELDS = frozenset(
     | {"text"}
 )
 #: The sort columns whose key comes from the snapshot (``badge`` adds the blocker to the state).
-#: ``age`` is not one: its key is the update time of the item (the push time, which only breaks a
-#: tie between equal update times, is read when the snapshot is there for another reason).
+#: ``age`` is not one: its key is the update time of the item, never the snapshot's times
+#: (``apply`` leaves them out), so the order does not depend on a snapshot being read.
 SNAPSHOT_COLUMNS = frozenset({"badge", "ci", "approvals", "review", "comments"})
 LIST_COLUMNS = frozenset({"pr", "age", "title", "author", "roles"})
 
@@ -221,6 +221,20 @@ def _states(
     return states, messages, list(result.get("errors") or [])
 
 
+def _without_times(states: dict[str, columns.RowState]) -> dict[str, columns.RowState]:
+    """``states`` with the update and push time of every snapshot left out, so that ``ORDER BY
+    age`` sorts on the time of the list item whether or not a snapshot was read (the TUI prefers
+    the fresher snapshot time, which would make the order depend on the query's other terms)."""
+    return {
+        pr: (
+            replace(state, summary=replace(state.summary, updated_at=None, pushed_at=None))
+            if state.summary is not None
+            else state
+        )
+        for pr, state in states.items()
+    }
+
+
 def apply(
     env: ReadEnv,
     output: dict[str, Any],
@@ -232,19 +246,29 @@ def apply(
 ) -> dict[str, Any]:
     """``output`` of ``run_prs`` with the query applied: ``items`` are the rows the filter makes
     true, in the order of ``ORDER BY`` (the list's order without one). Never raises for a row:
-    the snapshot of a row that could not be read is reported in ``snapshot_failures``."""
+    the snapshot of a row that could not be read is reported in ``snapshot_failures``, and a host
+    whose ``me`` could not be resolved (when the query needs it) is an ``errors`` entry whose rows
+    are left out of the result."""
     now = now or columns.utc_now()
     me_cache: dict[str, str | None] = {}
+    me_failed: dict[str, dict[str, str]] = {}  # lowercase host -> its `errors` entry
 
     def me_of(host: str) -> str | None:
         if host not in me_cache:
             queried = {h.lower(): h for h in output["hosts_queried"]}
-            me_cache[host] = resolve_me(env, queried[host]) if host in queried else None
+            me_cache[host] = None
+            if host in queried:
+                try:
+                    me_cache[host] = resolve_me(env, queried[host])
+                except ForgectlError as err:  # asked once; the host's rows are left out below
+                    me_failed[host] = host_error(queried[host], err)
         return me_cache[host]
 
     rows = rows_of(output["items"], scope, me_of, want_me=needs_me(q))
+    # a row whose `authored` cannot be told is not decided false: its host is an error instead
+    rows = [r for r in rows if _host_of(r.item) not in me_failed]
     states: dict[str, columns.RowState] = {}
-    host_errors: list[dict[str, str]] = []
+    host_errors: list[dict[str, str]] = list(me_failed.values())
     messages: dict[str, str] = {}
     failures: list[dict[str, Any]] = []
     # the cheap pass: what the list alone decides. A row the filter makes false without a
@@ -254,10 +278,12 @@ def apply(
     survivors = [r for r in rows if decide(cheap, r, unloaded, now) is not False]
     if survivors and needs_snapshots(q):
         states, messages, stopped = _states(env, survivors, read)
-        host_errors = [host_error(e["host"], entry_error(e)) for e in stopped]
+        host_errors += [host_error(e["host"], entry_error(e)) for e in stopped]
     kept = [r for r in survivors if decide(q.where, r, states.get(r.pr) or unloaded, now) is True]
     if q.order:
-        kept = columns.order(kept, states, columns.SORT_REPO, filtering.sort_of(q.order))
+        kept = columns.order(
+            kept, _without_times(states), columns.SORT_REPO, filtering.sort_of(q.order)
+        )
     shown = {r.pr for r in kept}
     for row in survivors:  # in the list's order
         state = states.get(row.pr)
@@ -388,11 +414,7 @@ def run(
     cannot supply, and ``partial_results`` (with the query applied to what was listed) when a
     host failed to list or its snapshots stopped."""
     asked = narrow(q, args, env.gateway.config.config, state_given=state_given) if push else args
-    if (
-        asked.repo is None
-        and asked.host is None
-        and not (asked.author or asked.review_requested_from)
-    ):
+    if asked.repo is None and not (asked.author or asked.review_requested_from):
         raise usage(
             "without --repo, prs needs --author or --review-requested-from, "
             "or a query with a top-level `authored`, `requested`, `author = ...` or `repo = ...`"
