@@ -19,7 +19,7 @@ from forgectl.tui import columns
 from forgectl.tui.app import BrowseApp
 from forgectl.tui.source import Row
 
-from .test_tui_app import content_of, list_prompts, settle
+from .test_tui_app import content_of, list_prompts, settle, wait_until
 from .test_tui_columns import GH, GL, activity, snap
 from .tui_fakes import FakeOpener, FakeSource, make_item
 
@@ -515,14 +515,16 @@ def test_the_header_cursor_is_drawn_only_while_the_header_has_focus() -> None:
 
         assert reversed_cells() == []
         await pilot.press("H")
-        await pilot.pause()
         span = columns.column_span("pr", app._pr_width, app._hoffset, app._view_width())
+        # the cursor is painted from a call_after_refresh once the header has focus
+        await wait_until(pilot, lambda: reversed_cells() == [span])
         assert reversed_cells() == [span]
         await pilot.press("right")
         span = columns.column_span("badge", app._pr_width, app._hoffset, app._view_width())
         assert reversed_cells() == [span]
         await pilot.press("escape")
-        await pilot.pause()
+        # the list takes focus later, so the cursor is cleared by the blur's repaint
+        await wait_until(pilot, lambda: reversed_cells() == [])
         assert reversed_cells() == []
 
     run(script)
@@ -704,7 +706,15 @@ def test_reaching_the_header_by_focus_scrolls_the_cursor_column_into_view() -> N
         await pilot.pause()
         assert columns.column_span("author", app._pr_width, 0, app._view_width()) is None
         app.query_one("#header").focus()  # what tab does
-        await pilot.pause()
+        # the header's on_focus reveals the column from a call_after_refresh, which one pause
+        # does not always wait for: wait for its effect instead
+        await wait_until(
+            pilot,
+            lambda: (
+                columns.column_span("author", app._pr_width, app._hoffset, app._view_width())
+                is not None
+            ),
+        )
         span = columns.column_span("author", app._pr_width, app._hoffset, app._view_width())
         assert span is not None and span[0] < span[1]
 
