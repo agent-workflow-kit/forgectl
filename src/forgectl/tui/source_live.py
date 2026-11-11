@@ -66,7 +66,7 @@ __all__ = ["Cancelled", "LiveSource", "in_process_runner"]
 CLOSE_WAIT = 5.0
 """Seconds ``LiveSource.close`` waits for the calls in flight to return after their groups died."""
 
-READ_COMMANDS = frozenset({"prs", "snapshot", "snapshots", "diff"})
+READ_COMMANDS = frozenset({"prs", "snapshot", "snapshots", "poll", "diff"})
 
 # Guards the once-only config load of a runner (``registry.load_handlers`` locks itself).
 _LOAD_LOCK = threading.Lock()
@@ -219,6 +219,17 @@ class LiveSource:
         argv += [f"--state={state}", f"--limit={limit}"]
         try:
             return self._tracked(argv, None, "prs")
+        except ForgectlError as err:
+            if err.code == "partial_results" and isinstance(err.output, dict):
+                return {**err.output, "complete": False}
+            raise
+
+    def light(self) -> dict[str, Any]:
+        """The ``poll`` output over every configured host (#118): the change-detection tuple of
+        each PR of mine. Like ``prs``, exit 12 ``partial_results`` is returned as the answer it
+        carries with ``complete`` false; any other failure raises ``ForgectlError``."""
+        try:
+            return self._tracked(["poll"], None, "poll")
         except ForgectlError as err:
             if err.code == "partial_results" and isinstance(err.output, dict):
                 return {**err.output, "complete": False}

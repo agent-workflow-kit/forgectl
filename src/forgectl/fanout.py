@@ -23,7 +23,7 @@ The contract a backend meets:
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -195,6 +195,35 @@ def list_visible(backend: Any, query: m.PrQuery, hidden: tuple[str, ...]) -> m.P
     )
 
 
+def is_probed(config: Config, host: str, single_target: bool) -> bool:
+    """An undeclared built-in host that no one named: asked only when the account can be told to
+    exist there."""
+    return not single_target and host in BUILT_IN_HOSTS and host not in config.hosts
+
+
+def host_scope(
+    env: ReadEnv,
+    hosts: list[str],
+    *,
+    single_target: bool,
+    check: Callable[[str], None] | None = None,
+) -> list[tuple[str, Identity | None]]:
+    """The hosts to ask, with the identity read for a probed one. A probed host with no
+    credential is left out; ``check(host)`` runs for a probed host once it is in scope."""
+    config = env.gateway.config.config
+    scope: list[tuple[str, Identity | None]] = []
+    for host in hosts:
+        known: Identity | None = None
+        if is_probed(config, host, single_target):
+            known = env.hosts.identity(host, call=env.call)
+            if known.error is None and known.token_source == "none":
+                continue
+            if check is not None:
+                check(host)
+        scope.append((host, known))
+    return scope
+
+
 @dataclass(frozen=True)
 class PrsArgs:
     repo: Any  # a bound RepoRef or None
@@ -221,7 +250,7 @@ def run_prs(env: ReadEnv, args: PrsArgs, *, now: datetime | None = None) -> dict
     single_target = args.repo is not None or args.host is not None
 
     def probed(host: str) -> bool:
-        return not single_target and host in BUILT_IN_HOSTS and host not in config.hosts
+        return is_probed(config, host, single_target)
 
     # A login that does not fit a declared or named host's backend is refused (exit 2) before
     # any call; an undeclared built-in is checked only once its probe puts it in scope.
@@ -230,16 +259,9 @@ def run_prs(env: ReadEnv, args: PrsArgs, *, now: datetime | None = None) -> dict
             _check_logins(env, host, args)
     since = None if args.updated_since is None else resolve_since(args.updated_since, now)
 
-    # Scope first: an undeclared built-in is asked only when the account can be told to exist.
-    scope: list[tuple[str, Identity | None]] = []
-    for host in hosts:
-        known: Identity | None = None
-        if probed(host):
-            known = env.hosts.identity(host, call=env.call)
-            if known.error is None and known.token_source == "none":
-                continue
-            _check_logins(env, host, args)
-        scope.append((host, known))
+    scope = host_scope(
+        env, hosts, single_target=single_target, check=lambda host: _check_logins(env, host, args)
+    )
 
     queried = [host for host, _ in scope]
     failures: list[tuple[str, ForgectlError]] = []

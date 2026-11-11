@@ -39,6 +39,7 @@ READ_COMMANDS = (
     "show",
     "snapshot",
     "snapshots",
+    "poll",
     "diff",
     "compare",
     "files",
@@ -395,6 +396,8 @@ def build_parser() -> argparse.ArgumentParser:
         action=_OnceFlag,
         help="read only through the bulk path; list a PR it cannot read whole in failed",
     )
+
+    add("poll", "the change-detection tuple of every PR of mine, in a few requests")
 
     p = add("compare", "compare two commits of a PR")
     _pr(p)

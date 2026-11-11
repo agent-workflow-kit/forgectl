@@ -50,6 +50,7 @@ forgectl merge github.com/org/repo#42 --expected-head <sha> --expected-base main
 | `prs` | list PRs |
 | `show`, `snapshot` | PR facts; facts plus requests, reviews, threads and CI |
 | `snapshots` | `snapshot` of many PRs from a few bulk GraphQL requests per host, falling back to `snapshot` per PR |
+| `poll` | the change-detection tuple of every PR of mine in a few requests, for a cheap `browse` refresh |
 | `diff`, `files` | diff (refused rather than cut off); changed paths |
 | `compare` | how two commits of a PR relate, with their diff when `to` is ahead of `from` |
 | `comments`, `reviews`, `ci` | threads, reviews, checks |
