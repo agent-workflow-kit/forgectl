@@ -49,6 +49,8 @@ class Listing:
     answered: int = 0  # how many of the ``prs`` calls returned an answer at all
     failed_hosts: set[str] = field(default_factory=set)  # hosts named by the errors
     hosts_unknown: bool = False  # a failure that names no host: any host may be hiding PRs
+    light_items: list[dict[str, Any]] = field(default_factory=list)  # a light poll's tuples (#118)
+    light_moved: set[str] = field(default_factory=set)  # listed rows whose update time moved
 
     def may_hide(self, host: str) -> bool:
         """Whether a PR on ``host`` missing from this incomplete listing may only be hidden by

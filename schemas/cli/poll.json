@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/cli/poll.json",
+  "title": "poll output",
+  "description": "The change-detection tuple of every open PR the account authored or was asked to review, over every host in scope. A caller compares the tuple with the one it kept and reads only the PRs that differ. Printed on exit 0, or with `errors` on exit 12 (partial_results).",
+  "type": "object",
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "pr": { "$ref": "../defs.json#/$defs/pr" },
+          "pr_id": { "type": "string", "minLength": 1 },
+          "repo": { "type": "string" },
+          "number": { "type": "integer", "minimum": 1 },
+          "url": { "type": "string" },
+          "title": { "type": "string", "x-untrusted": true },
+          "author": { "type": ["string", "null"], "x-untrusted": true },
+          "draft": { "type": "boolean" },
+          "head_sha": { "type": "string", "description": "The head commit; the empty string for a GitLab merge request with no diff yet." },
+          "updated_at": { "type": "string" },
+          "ci_state": {
+            "type": ["string", "null"],
+            "x-untrusted": true,
+            "description": "The host's own word for the head's CI state (GitHub `statusCheckRollup.state`, GitLab `headPipeline.status`), not the normalized `ci.state`. Null: none. It is compared for equality only."
+          },
+          "review_decision": {
+            "type": ["string", "null"],
+            "x-untrusted": true,
+            "description": "GitHub `reviewDecision`; null on GitLab."
+          },
+          "approvals_left": { "type": ["integer", "null"], "description": "GitLab `approvalsLeft`; null on GitHub." },
+          "approved": { "type": ["boolean", "null"], "description": "GitLab `approved`; null on GitHub." },
+          "merge_status": {
+            "type": ["string", "null"],
+            "x-untrusted": true,
+            "description": "GitLab `detailedMergeStatus`; null on GitHub, where `mergeStateStatus` is not polled."
+          },
+          "notes_count": { "type": ["integer", "null"], "description": "GitLab `userNotesCount`; null on GitHub." },
+          "roles": {
+            "type": "array",
+            "items": { "enum": ["authored", "requested"] },
+            "minItems": 1,
+            "uniqueItems": true
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "pr", "pr_id", "repo", "number", "url", "title", "author", "draft", "head_sha",
+          "updated_at", "ci_state", "review_decision", "approvals_left", "approved",
+          "merge_status", "notes_count", "roles"
+        ]
+      }
+    },
+    "complete": {
+      "type": "boolean",
+      "description": "false when a host failed, a host cannot be polled lightly (`unsupported`), or a list was cut (`truncated`: more pages than the poll reads, or fewer results than the host counted)."
+    },
+    "errors": {
+      "type": "array",
+      "items": { "$ref": "../defs.json#/$defs/host_error" }
+    },
+    "hosts_queried": {
+      "type": "array",
+      "items": { "$ref": "../defs.json#/$defs/host" }
+    },
+    "unsupported": {
+      "type": "array",
+      "description": "Hosts that failed the capability probe (an older GitLab). Nothing was read from them; list them with `prs`.",
+      "items": { "$ref": "../defs.json#/$defs/host" }
+    },
+    "truncated": {
+      "type": "array",
+      "description": "Hosts whose list was cut (more pages than the poll reads, a result the host counted but did not return, or an unusable entry the poll skipped). Their items are there but may be missing some; list them with `prs`.",
+      "items": { "$ref": "../defs.json#/$defs/host" }
+    },
+    "rate_limit": { "$ref": "../defs.json#/$defs/rate_limit" }
+  },
+  "additionalProperties": false,
+  "required": ["items", "complete", "errors", "hosts_queried", "unsupported", "truncated", "rate_limit"]
+}

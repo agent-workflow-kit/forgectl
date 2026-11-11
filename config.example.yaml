@@ -79,7 +79,7 @@ activity: {}
 
 # `browse`. refresh_interval: seconds between automatic refreshes (a duration of at least 1s; the
 # number 0 turns them off); the flag --interval wins. full_refresh_every: every Nth automatic refresh
-# re-snapshots every PR, the others only those that may have changed (1 to 1000).
+# reads every PR the old way (prs and a snapshot of each row), the others poll lightly (1 to 1000).
 # concurrency: snapshot reads at once (1 to 16). detail_collapsed: the detail pane sections that
 # start collapsed, from facts, description, changes, ci, comments, reviews (default [changes]).
 # query: the filter and order the list starts with, in the query language of `browse` (default

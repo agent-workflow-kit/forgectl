@@ -507,3 +507,38 @@ def test_snapshots_errors_are_forgectl_errors() -> None:
     with pytest.raises(ForgectlError) as caught:
         LiveSource(boom).snapshots([PR1])
     assert caught.value.code == "internal"
+
+
+# -- poll (#118) ------------------------------------------------------------------------------
+
+
+def test_light_runs_the_poll_command() -> None:
+    run = Recorder(lambda argv: {"items": [], "complete": True, "errors": []})
+    assert LiveSource(run).light()["complete"] is True
+    assert run.calls == [["poll"]]
+
+
+def test_light_returns_a_partial_poll_as_an_incomplete_answer() -> None:
+    carried = {"items": [], "complete": True, "errors": [{"host": "h"}]}
+
+    def partial(argv: list[str]) -> dict[str, Any]:
+        raise ForgectlError("partial_results", "1 of 2 hosts failed", output=carried)
+
+    answer = LiveSource(Recorder(partial)).light()
+    assert answer["complete"] is False and answer["errors"] == [{"host": "h"}]
+
+
+def test_light_raises_any_other_failure() -> None:
+    def failing(argv: list[str]) -> dict[str, Any]:
+        raise ForgectlError("auth_required", "no token")
+
+    with pytest.raises(ForgectlError) as caught:
+        LiveSource(Recorder(failing)).light()
+    assert caught.value.code == "auth_required"
+
+
+def test_light_after_close_is_cancelled() -> None:
+    source = LiveSource(Recorder())
+    source.close()
+    with pytest.raises(Cancelled):
+        source.light()
