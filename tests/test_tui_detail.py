@@ -17,6 +17,7 @@ from textual.widgets import Static
 
 from forgectl.backends.github_bulk import read_bulk
 from forgectl.errors import ForgectlError
+from forgectl.tui import app as app_module
 from forgectl.tui import render
 from forgectl.tui.app import BrowseApp
 from forgectl.tui.source_live import HostStopped
@@ -39,6 +40,13 @@ def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(home / ".local" / "share"))
+
+
+@pytest.fixture(autouse=True)
+def _no_prefetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests count the reads of the PR they open: no read ahead of its neighbors (#120's
+    own tests are in test_tui_lazy_diff.py)."""
+    monkeypatch.setattr(app_module, "PREFETCH_MAX", 0)
 
 
 class DetailSource(FakeSource):

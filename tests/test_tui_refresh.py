@@ -116,11 +116,13 @@ def run(
     clock: Callable[[], datetime] | None = None,
     size: tuple[int, int] = (140, 50),
     wait: bool = True,
+    detail_collapsed: tuple[str, ...] = ("changes",),
 ) -> BrowseApp:
     extra: dict[str, Any] = {"clock": clock} if clock else {}
     app = BrowseApp(
         source,
         FakeOpener(),
+        detail_collapsed=detail_collapsed,
         concurrency=concurrency,
         refresh_interval=interval,
         full_refresh_every=full_every,
@@ -663,7 +665,7 @@ def test_a_changed_row_stays_highlighted_while_its_detail_is_open_and_is_read_on
         assert source.snapshotted() == [prefix(GH, 1)]  # one read serves the row and the detail
         assert [c for c in source.calls if c[0] == "diff"]  # the detail still gets its diff
 
-    run(source, script, interval=1000)
+    run(source, script, interval=1000, detail_collapsed=())
 
 
 def test_a_keypress_clears_the_highlight() -> None:
@@ -769,7 +771,7 @@ def test_a_superseded_detail_load_passes_a_cancel_check_to_both_reads() -> None:
         assert source.diff_probes[a]() is True
         assert source.diff_probes[b]() is False
 
-    run(source, script)
+    run(source, script, detail_collapsed=())
 
 
 def test_a_detail_read_that_fails_on_a_still_loading_row_marks_it_failed() -> None:

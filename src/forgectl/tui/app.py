@@ -29,7 +29,7 @@ from textual.widgets.option_list import Option
 
 from forgectl.errors import ForgectlError
 
-from . import bulk_load, columns, filtering, render, safe, sections, style
+from . import bulk_load, columns, detail_cache, filtering, render, safe, sections, style
 from . import light as lightpoll
 from . import query as ql
 from .opener import Opener, OpenRefused, is_openable
@@ -41,6 +41,8 @@ from .source_live import Cancelled, HostStopped
 
 DEFAULT_CONCURRENCY = 4  # snapshots in flight at once; `browse.concurrency` sets it
 DEFAULT_FULL_REFRESH_EVERY = 5  # `browse.full_refresh_every`
+PREFETCH_MAX = 2  # detail reads ahead in flight at once (D-40)
+PREFETCH_KEEP = 3  # a read ahead is cancelled when its row is further than this from the highlight
 
 # The help is data, one logical line per entry; the widgets wrap it to the terminal width. Adding a
 # key is one new row here (and its Binding). A test compares these keys with BrowseApp.BINDINGS;
@@ -417,6 +419,21 @@ class BrowseApp(App[None]):
         self._detail: render.Detail | None = None
         self._painted: set[str] = set()  # sections whose body shows the current detail
         self._detail_loading: str | None = None  # the PR whose detail load is in flight
+        # D-40: what was read stays for the session, bounded; the diff is read only when the
+        # Changes section is open, and the detail of a neighbor row may be read ahead.
+        self._detail_cache: detail_cache.BoundedCache[detail_cache.DetailKey, dict[str, Any]] = (
+            detail_cache.BoundedCache(detail_cache.DETAIL_ENTRIES)
+        )
+        self._diff_cache: detail_cache.BoundedCache[detail_cache.DiffKey, dict[str, Any]] = (
+            detail_cache.BoundedCache(detail_cache.DIFF_ENTRIES)
+        )
+        self._diff_in_pane = False  # the pane holds the diff of its PR
+        self._detail_wake: asyncio.Future[None] | None = None  # Changes opened mid-load
+        self._prefetching: set[str] = set()
+        self._prefetch_keep: set[str] = set()  # the rows near the highlight; others are cancelled
+        self._stopped_hosts: set[str] = set()  # hosts that stopped a prefetch (limit, auth)
+        # the key each PR was last read ahead under: one try per key until the next refresh cycle
+        self._prefetch_tried: dict[str, detail_cache.DetailKey] = {}
 
     def result(self) -> dict[str, Any]:
         """The ``--result-file`` content."""
@@ -609,7 +626,11 @@ class BrowseApp(App[None]):
             self._paint(self._list_note or f"{len(self._rows)} PRs", self._detail_note)
             # a manual refresh reads the open detail whatever the poll found
             detail_pr = self._detail_to_refresh(refresh_detail, wanted if auto else None)
+            if auto and not use_light and detail_pr is not None:
+                if self._cached_detail(detail_pr) is not None:
+                    detail_pr = None  # unchanged since it was read: the timed cycle keeps it
             if use_light:
+                # the poll found this PR changed: its cached read is not trusted
                 self._poll_batch = (wanted or set()) | ({detail_pr} if detail_pr else set())
             # The detail load reads the PR's snapshot, which also refreshes its row: the batch
             # skips it, so one read serves both.
@@ -618,7 +639,7 @@ class BrowseApp(App[None]):
             if not started:
                 self._finish_refresh(listed=listed)
         if detail_pr is not None:
-            self._start_detail(detail_pr)
+            self._start_detail(detail_pr, force=True)
 
     def _expire_poll_batch(self) -> None:
         """The rows the last poll asked to be read that never arrived (their round was replaced,
@@ -726,6 +747,8 @@ class BrowseApp(App[None]):
         self._busy = False
         if self._cycle_listed if listed is None else listed:
             self._last_refresh = self.clock()
+        self._stopped_hosts.clear()  # an explicit or timed cycle may ask a stopped host again
+        self._prefetch_tried.clear()  # ...and a read ahead that failed again
         flagged = any(state.refreshing for state in self._states.values())
         for state in self._states.values():
             state.refreshing = False
@@ -734,6 +757,7 @@ class BrowseApp(App[None]):
                 self._apply_filter()  # also paints the bar
             else:
                 self._paint_bar()
+            self._maybe_prefetch()  # the list has settled
 
     def _state(self, row: Row) -> columns.RowState:
         return self._states.get(row.pr) or columns.RowState()
@@ -1233,7 +1257,9 @@ class BrowseApp(App[None]):
     def _detail_shown(self) -> bool:
         return bool(self.query_one("#detail", VerticalScroll).display)
 
-    def _start_detail(self, pr: str) -> None:
+    def _start_detail(self, pr: str, *, force: bool = False) -> None:
+        """Open or reload the pane for ``pr``. ``force`` (the refresh keys) reads again whatever
+        the caches hold."""
         if pr == self._detail_loading and self._detail_closed != self._detail_token:
             # the same PR is already on its way, for an open pane
             self._poll_batch.discard(pr)  # a load that began before the poll does not settle it
@@ -1243,12 +1269,16 @@ class BrowseApp(App[None]):
             return
         self._detail_token += 1
         self._detail_loading = pr
-        self.run_worker(self._load_detail(pr, self._detail_token), group="detail")
+        self.run_worker(self._load_detail(pr, self._detail_token, force), group="detail")
 
-    async def _load_detail(self, pr: str, token: int) -> None:
+    async def _load_detail(self, pr: str, token: int, force: bool = False) -> None:
         """Open the pane at once from the data the list holds, then fill it in as the detail read
         and the diff, started together, arrive (D-37). Every arrival repaints the pane; a read that
-        failed marks its own sections only. A newer request (``token``) discards this one."""
+        failed marks its own sections only. A newer request (``token``) discards this one.
+
+        D-40: a detail read that the cache holds for the row's current version is not repeated;
+        the diff is read only while the Changes section is open (opening it mid-load starts it)
+        and is cached by head sha. ``force`` skips both caches."""
         self._status("loading detail...")
 
         def stale() -> bool:  # a newer request replaced this one: no further host call
@@ -1262,20 +1292,78 @@ class BrowseApp(App[None]):
         diff_note: str | None = render.LOADING
         errors: list[str] = []
         reads: dict[asyncio.Future[Any], str] = {}
-        try:
-            reads[in_thread(self._read_detail, pr, stale)] = "snapshot"
+        detail_key = detail_cache.detail_key(pr, item)
+        diff_key = detail_cache.diff_key(pr, item)
+        diff_started = False
+
+        def start_diff() -> None:
+            nonlocal diff_started
+            diff_started = True
             reads[in_thread(self._detail_read, "diff", pr, stale)] = "diff"
+
+        def await_changes() -> None:  # the Changes section opening starts the diff
+            wake: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            self._detail_wake = wake
+            reads[wake] = "wake"
+
+        def pending() -> bool:
+            return any(kind != "wake" for kind in reads.values())
+
+        try:
+            cached = None if force else self._cached_detail(pr)
+            if cached is not None:
+                snap, snap_note = cached, None
+                self._keep_snapshot(pr, cached)
+                state = self._states.get(pr)
+                if state is None or state.status != columns.LOADED:
+                    self._snapshot_arrived(
+                        pr, columns.RowState(columns.LOADED, columns.summarize(cached))
+                    )
+            else:
+                reads[in_thread(self._read_detail, pr, stale)] = "snapshot"
+            held_diff = None if force or diff_key is None else self._diff_cache.get(diff_key)
+            if held_diff is not None:
+                diff, diff_note = held_diff, None
+            elif "changes" in self._open_sections:
+                start_diff()
+            else:
+                await_changes()
             first = await in_thread(self._frame, item, snap, snap_note, diff, diff_note)
             if token != self._detail_token:
                 return
             state = self._states.get(pr)
             marker = f" [stale: {state.error or 'refresh failed'}]" if state and state.stale else ""
+            first_status = (
+                f"loading detail...{marker}" if pending() else f"{len(first.checks)} checks"
+            )
             if token != self._detail_closed:
-                self._show_detail(pr, first, f"loading detail...{marker}", seen=snap is not None)
-            while reads:
+                self._show_detail(
+                    pr, first, first_status, seen=snap is not None, has_diff=diff is not None
+                )
+            else:
+                self._detail_note = first_status
+                self._status(first_status)
+            while True:
+                if "changes" in self._open_sections and diff is None and not diff_started:
+                    # Changes opened while nothing woke this load (the first frame was painting,
+                    # or the last read had just arrived): the wake would be lost, so start now
+                    for future in [f for f, k in reads.items() if k == "wake"]:
+                        future.cancel()
+                        del reads[future]
+                    self._detail_wake = None
+                    start_diff()
+                if not pending():
+                    break
                 done, _ = await asyncio.wait(list(reads), return_when=asyncio.FIRST_COMPLETED)
                 for future in done:
                     kind = reads.pop(future)
+                    if kind == "wake":
+                        self._detail_wake = None
+                        if "changes" in self._open_sections and not diff_started:
+                            start_diff()
+                        elif not diff_started:
+                            await_changes()
+                        continue
                     try:
                         result = future.result()
                     except Cancelled:
@@ -1294,8 +1382,26 @@ class BrowseApp(App[None]):
                                 snap, snap_note = result, None
                                 self._keep_snapshot(pr, result)
                                 self._row_refreshed(pr, result)
+                                if result.get("complete") is not False:
+                                    # The key names the content of this very read: in light mode
+                                    # the list item it carries (a poll may have moved the row's
+                                    # item on meanwhile, so that is never read here); otherwise
+                                    # the key from before the read.
+                                    read_item = (
+                                        lightpoll.item_of_snapshot(pr, result)
+                                        if self._light
+                                        else None
+                                    )
+                                    put_key = (
+                                        detail_cache.detail_key(pr, read_item)
+                                        if read_item is not None
+                                        else detail_key
+                                    )
+                                    self._detail_cache.put(put_key, result)
                         else:
                             diff, diff_note = result, None
+                            if diff_key is not None:
+                                self._diff_cache.put(diff_key, result)
                         continue
                     if kind == "snapshot":
                         snap_note = render.failed_note(code)
@@ -1309,11 +1415,13 @@ class BrowseApp(App[None]):
                 detail = await in_thread(self._frame, item, snap, snap_note, diff, diff_note)
                 if token != self._detail_token:
                     return
-                status = "loading detail..." if reads else f"{len(detail.checks)} checks"
-                if not reads and errors:
+                status = "loading detail..." if pending() else f"{len(detail.checks)} checks"
+                if not pending() and errors:
                     status = "; ".join([status, *errors]) if snap is not None else errors[0]
                 if token != self._detail_closed:
-                    self._show_detail(pr, detail, status, seen=snap is not None)
+                    self._show_detail(
+                        pr, detail, status, seen=snap is not None, has_diff=diff is not None
+                    )
                 else:  # the user closed the pane: do not reopen it, but the status still ends
                     self._detail_note = status
                     self._status(status)
@@ -1322,10 +1430,16 @@ class BrowseApp(App[None]):
                 self._detail_note = self._internal(exc)
                 self._status(self._detail_note)
         finally:
-            for future in reads:  # a read left behind (stale): nobody awaits its outcome
-                future.add_done_callback(_discard_outcome)
+            for future, kind in reads.items():  # a read left behind (stale): nobody awaits it
+                if kind == "wake":
+                    future.cancel()
+                else:
+                    future.add_done_callback(_discard_outcome)
+            if self._detail_wake is not None and self._detail_wake.done():
+                self._detail_wake = None
             if token == self._detail_token:
                 self._detail_loading = None
+                self._detail_wake = None
 
     @staticmethod
     def _frame(
@@ -1362,6 +1476,95 @@ class BrowseApp(App[None]):
         accepts = self._source_cancels if what == "snapshot" else self._diff_cancels
         return read(pr, cancelled=cancelled) if accepts else read(pr)  # type: ignore[no-any-return]
 
+    def _cached_detail(self, pr: str) -> dict[str, Any] | None:
+        """The cached detail read of a listed PR when it is still the row's version: same head
+        sha and update time, and a CI state and review decision that match the row's."""
+        row = self._row_by_pr.get(pr)
+        if row is None:
+            return None
+        snap = self._detail_cache.get(detail_cache.detail_key(pr, row.item))
+        if snap is None:
+            return None
+        state = self._states.get(pr)
+        held = state.summary if state is not None else None
+        if held is not None:
+            cached = columns.summarize(snap)
+            if (cached.ci_state, cached.review_decision) != (held.ci_state, held.review_decision):
+                return None
+        return snap
+
+    # -- prefetch (D-40) --------------------------------------------------------------------
+
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        if event.option_list.id == "list":
+            self._maybe_prefetch()
+
+    def _maybe_prefetch(self) -> None:
+        """Read ahead the detail (never the diff) of the rows next to the highlighted one: at most
+        ``PREFETCH_MAX`` in flight, only once the list has settled, never from a host that is
+        rate-limited, backing off or stopped a read. A read for a row the highlight has since left
+        by more than ``PREFETCH_KEEP`` rows is cancelled before its next host call."""
+        if not self.is_running:
+            return
+        index = self.query_one("#list", OptionList).highlighted
+        if index is None or not 0 <= index < len(self._visible):
+            self._prefetch_keep = set()
+            return
+        low, high = max(0, index - PREFETCH_KEEP), index + PREFETCH_KEEP + 1
+        self._prefetch_keep = {r.pr for r in self._visible[low:high]}
+        if not self._loaded_once or self._busy or getattr(self.source, "detail", None) is None:
+            return
+        neighbors = [
+            *self._visible[index + 1 : index + 2],
+            *self._visible[max(0, index - 1) : index],
+        ]
+        now = self.clock()
+        for row in neighbors:
+            if len(self._prefetching) >= PREFETCH_MAX:
+                return
+            host = host_of(row.pr)
+            if (
+                row.pr in self._prefetching
+                or self._prefetch_tried.get(row.pr) == detail_cache.detail_key(row.pr, row.item)
+                or row.pr == self._detail_loading
+                or row.pr in self._unlisted
+                or host in self._stopped_hosts
+                or self._rates.low(host, now)
+                or self._cached_detail(row.pr) is not None
+            ):
+                continue
+            self._prefetching.add(row.pr)
+            self._prefetch_tried[row.pr] = detail_cache.detail_key(row.pr, row.item)
+            self.run_worker(self._prefetch(row), group="prefetch", exclusive=False)
+
+    async def _prefetch(self, row: Row) -> None:
+        pr = row.pr
+        key = detail_cache.detail_key(pr, row.item)
+
+        def cancelled() -> bool:
+            return pr not in self._prefetch_keep or self._busy
+
+        read = self.source.detail  # type: ignore[attr-defined]
+        try:
+            if self._detail_cancels:
+                result = await in_thread(lambda: read(pr, cancelled=cancelled))
+            else:
+                result = await in_thread(lambda: read(pr))
+        except HostStopped:
+            self._stopped_hosts.add(host_of(pr))
+        except Cancelled:
+            # the highlight left it: nothing was tried, a later visit may read it
+            self._prefetch_tried.pop(pr, None)
+        except Exception:  # noqa: BLE001 - a read ahead that failed shows nothing; opening reads again
+            pass
+        else:
+            if isinstance(result, dict) and result.get("complete") is not False:
+                self._rates.observe(result.get("rate_limit"), self.clock())
+                self._detail_cache.put(key, result)
+        finally:
+            self._prefetching.discard(pr)
+            self.call_after_refresh(self._maybe_prefetch)
+
     def _keep_snapshot(self, pr: str, snap: dict[str, Any]) -> None:
         """Remember the last full snapshot of a listed row: the pane opens from it. Only rows
         that are listed keep one."""
@@ -1386,13 +1589,20 @@ class BrowseApp(App[None]):
             self._snapshot_arrived(pr, self._failed_state(self._states.get(pr), error))
 
     def _show_detail(
-        self, pr: str, detail: render.Detail, status: str, *, seen: bool = True
+        self,
+        pr: str,
+        detail: render.Detail,
+        status: str,
+        *,
+        seen: bool = True,
+        has_diff: bool = False,
     ) -> None:
         """Paint the pane. ``seen``: the PR's own data is on it (not only the list's facts), so the
         PR counts as viewed in the result."""
         if pr != self._detail_pr:  # another PR starts on its first check
             self.query_one("#checks", OptionList).highlighted = None
         self._detail_pr = pr
+        self._diff_in_pane = has_diff
         self._detail_url = detail.url
         self._detail_checks = detail.checks
         if seen and not self._opened:
@@ -1471,6 +1681,23 @@ class BrowseApp(App[None]):
         else:
             self._open_sections.add(name)
         self._paint_section(name)
+        if name == "changes" and name in self._open_sections:
+            self._changes_opened()
+
+    def _changes_opened(self) -> None:
+        """The diff is read when the Changes section is opened (D-40), once: an open section that
+        holds it, or one whose read is on its way, reads nothing."""
+        pr = self._detail_loading or self._detail_pr  # a load for another PR may be on its way
+        if pr is None or not self._detail_shown():
+            return
+        if pr == self._detail_pr and self._diff_in_pane:
+            return  # the pane holds this PR's diff (a load for another PR is not this case)
+        if pr == self._detail_loading:  # a load is on its way: it starts the diff itself
+            wake = self._detail_wake
+            if wake is not None and not wake.done():
+                wake.set_result(None)
+            return
+        self._start_detail(pr)  # the detail read is cached: only the diff is read
 
     # -- actions --------------------------------------------------------------------------
 
@@ -1522,7 +1749,7 @@ class BrowseApp(App[None]):
         """The PR in the visible detail pane (row and detail), else only the highlighted row.
         With the pane closed it never opens it."""
         if self._detail_pr is not None and self._detail_shown():
-            self._start_detail(self._detail_pr)
+            self._start_detail(self._detail_pr, force=True)
             return
         row = self._highlighted_row()
         if row is None:

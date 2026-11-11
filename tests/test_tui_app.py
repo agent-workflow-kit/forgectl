@@ -866,7 +866,7 @@ def test_a_diff_error_stays_in_the_final_status() -> None:
         assert "1 checks" in status and "diff: not_found: no diff" in status
         assert "\x1b" not in status
 
-    drive(source, script)
+    drive(source, script, detail_collapsed=())  # the diff is read only with Changes open
 
 
 def test_a_list_error_survives_the_detail_load() -> None:
@@ -1090,7 +1090,7 @@ def test_r_with_the_pane_open_reloads_the_row_and_the_detail() -> None:
         seen["after"] = list(source.calls[seen["mark"] :])
         seen["shown"] = app.query_one("#detail").display
 
-    drive(source, script, concurrency=2)
+    drive(source, script, concurrency=2, detail_collapsed=())  # Changes open: the diff is read
     assert sorted(seen["after"]) == [("diff", PR1), ("snapshot", PR1)]  # read together
     assert seen["shown"] is True
 

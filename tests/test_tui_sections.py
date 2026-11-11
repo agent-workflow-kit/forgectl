@@ -138,7 +138,7 @@ def test_toggling_never_reads_the_forge_again() -> None:
         assert source.calls == calls
         assert [c for c in calls if c[0] == "diff"] == [("diff", PR1)]
 
-    drive(source, script)
+    drive(source, script, detail_collapsed=())  # Changes open at the start: the diff read on open
 
 
 def test_the_collapsed_config_decides_what_starts_open() -> None:
