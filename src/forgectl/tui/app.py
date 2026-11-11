@@ -432,6 +432,8 @@ class BrowseApp(App[None]):
         self._prefetching: set[str] = set()
         self._prefetch_keep: set[str] = set()  # the rows near the highlight; others are cancelled
         self._stopped_hosts: set[str] = set()  # hosts that stopped a prefetch (limit, auth)
+        # the key each PR was last read ahead under: one try per key until the next refresh cycle
+        self._prefetch_tried: dict[str, detail_cache.DetailKey] = {}
 
     def result(self) -> dict[str, Any]:
         """The ``--result-file`` content."""
@@ -746,6 +748,7 @@ class BrowseApp(App[None]):
         if self._cycle_listed if listed is None else listed:
             self._last_refresh = self.clock()
         self._stopped_hosts.clear()  # an explicit or timed cycle may ask a stopped host again
+        self._prefetch_tried.clear()  # ...and a read ahead that failed again
         flagged = any(state.refreshing for state in self._states.values())
         for state in self._states.values():
             state.refreshing = False
@@ -1340,7 +1343,17 @@ class BrowseApp(App[None]):
             else:
                 self._detail_note = first_status
                 self._status(first_status)
-            while pending():
+            while True:
+                if "changes" in self._open_sections and diff is None and not diff_started:
+                    # Changes opened while nothing woke this load (the first frame was painting,
+                    # or the last read had just arrived): the wake would be lost, so start now
+                    for future in [f for f, k in reads.items() if k == "wake"]:
+                        future.cancel()
+                        del reads[future]
+                    self._detail_wake = None
+                    start_diff()
+                if not pending():
+                    break
                 done, _ = await asyncio.wait(list(reads), return_when=asyncio.FIRST_COMPLETED)
                 for future in done:
                     kind = reads.pop(future)
@@ -1370,7 +1383,18 @@ class BrowseApp(App[None]):
                                 self._keep_snapshot(pr, result)
                                 self._row_refreshed(pr, result)
                                 if result.get("complete") is not False:
-                                    self._detail_cache.put(detail_key, result)
+                                    # In light mode the row has just adopted the list item of
+                                    # this very read, so its key now names this content (never a
+                                    # newer one); the key from before the read would never match
+                                    # a later lookup. Without the light poll nothing was adopted
+                                    # and both keys are the same.
+                                    current = self._row_by_pr.get(pr)
+                                    put_key = (
+                                        detail_cache.detail_key(pr, current.item)
+                                        if current is not None
+                                        else detail_key
+                                    )
+                                    self._detail_cache.put(put_key, result)
                         else:
                             diff, diff_note = result, None
                             if diff_key is not None:
@@ -1498,6 +1522,7 @@ class BrowseApp(App[None]):
             host = host_of(row.pr)
             if (
                 row.pr in self._prefetching
+                or self._prefetch_tried.get(row.pr) == detail_cache.detail_key(row.pr, row.item)
                 or row.pr == self._detail_loading
                 or row.pr in self._unlisted
                 or host in self._stopped_hosts
@@ -1506,6 +1531,7 @@ class BrowseApp(App[None]):
             ):
                 continue
             self._prefetching.add(row.pr)
+            self._prefetch_tried[row.pr] = detail_cache.detail_key(row.pr, row.item)
             self.run_worker(self._prefetch(row), group="prefetch", exclusive=False)
 
     async def _prefetch(self, row: Row) -> None:
@@ -1523,6 +1549,9 @@ class BrowseApp(App[None]):
                 result = await in_thread(lambda: read(pr))
         except HostStopped:
             self._stopped_hosts.add(host_of(pr))
+        except Cancelled:
+            # the highlight left it: nothing was tried, a later visit may read it
+            self._prefetch_tried.pop(pr, None)
         except Exception:  # noqa: BLE001 - a read ahead that failed shows nothing; opening reads again
             pass
         else:
@@ -1655,7 +1684,7 @@ class BrowseApp(App[None]):
     def _changes_opened(self) -> None:
         """The diff is read when the Changes section is opened (D-39), once: an open section that
         holds it, or one whose read is on its way, reads nothing."""
-        pr = self._detail_pr
+        pr = self._detail_loading or self._detail_pr  # a load for another PR may be on its way
         if pr is None or not self._detail_shown() or self._diff_in_pane:
             return
         if pr == self._detail_loading:  # a load is on its way: it starts the diff itself
