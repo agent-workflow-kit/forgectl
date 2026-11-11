@@ -7,8 +7,10 @@ fire to show that the interval starts it and that 0 does not.
 from __future__ import annotations
 
 import asyncio
+import gc
 import threading
 import time
+import warnings
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -17,6 +19,7 @@ from typing import Any
 import pytest
 from textual.pilot import Pilot
 from textual.widgets import OptionList
+from textual.worker import WorkerCancelled
 
 from forgectl.errors import ForgectlError
 from forgectl.tui import columns
@@ -145,7 +148,12 @@ async def quiesce(app: BrowseApp, source: FakeSource) -> None:
         app.refresh_timer.stop()
     if isinstance(source, RefreshSource):
         source.gate.set()
-    await app.workers.wait_for_complete()
+    try:
+        await app.workers.wait_for_complete()
+    except (
+        WorkerCancelled
+    ):  # a worker that shutdown cancelled before it started: nothing to wait for
+        pass
 
 
 async def until(pilot: Pilot[None], cond: Callable[[], bool], tries: int = 200) -> None:
@@ -406,6 +414,42 @@ def test_quit_stops_the_timer() -> None:
         assert app.refresh_timer is None
 
     run(source, script, interval=0.1)
+
+
+@pytest.mark.parametrize("how", ["ctrl+q", "exit"])
+def test_every_exit_path_stops_the_timer_and_a_late_tick_starts_nothing(how: str) -> None:
+    source = three()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        assert app.refresh_timer is not None  # armed, but 1000s out: no tick can interleave
+        base = source.count("prs")
+        if how == "exit":
+            app.exit()  # the path `q`, ctrl+q and explicit exit() callers take
+        else:
+            await pilot.press("ctrl+q")
+        assert app.refresh_timer is None
+        app._tick()  # a tick that was already due when the exit began
+        assert not app._busy
+        await pilot.pause()
+        assert source.count("prs") == base
+
+    run(source, script, interval=1000)
+
+
+def test_a_tick_just_before_exit_leaves_no_coroutine_never_awaited() -> None:
+    source = three()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await settle(app, pilot)
+        app._tick()  # a tick that ran just before the exit began
+        assert app._busy
+        app.exit()  # no await between: shutdown cancels the worker before it starts
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        run(source, script, interval=0.1)
+        gc.collect()
+    assert [str(w.message) for w in caught if "never awaited" in str(w.message)] == []
 
 
 # -- automatic refresh: what it re-reads -------------------------------------------------------
