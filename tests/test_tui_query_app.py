@@ -471,7 +471,18 @@ def test_a_row_without_a_snapshot_matches_no_value_filter_and_the_panel_counts_i
             lambda r: r == "0 of 4 PRs match; 4 hidden because their snapshot has not loaded"
         )
         await type_line(app, pilot, "NOT ci = failing")  # unknown stays unknown under NOT
-        await report_is(lambda r: "4 hidden because" in r)
+
+        # the NOT report reads the same as the line before it, so the text alone cannot tell the
+        # new line was handled: also wait for the panel's parsed filter to be the negated condition
+        def negated_and_reported() -> bool:
+            where = panel(app).where
+            return (
+                isinstance(where, query.Cond)
+                and where.op == "!="
+                and "4 hidden because" in content_of_screen(app, "#q-report")
+            )
+
+        await wait_until(pilot, negated_and_reported)
         await type_line(app, pilot, "ci IS NULL")
         await report_is(lambda r: r == "4 of 4 PRs match")
         await type_line(app, pilot, "title LIKE '*e*' AND ci = failing")  # the list data is known

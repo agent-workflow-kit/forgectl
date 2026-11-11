@@ -523,7 +523,8 @@ def test_the_header_cursor_is_drawn_only_while_the_header_has_focus() -> None:
         span = columns.column_span("badge", app._pr_width, app._hoffset, app._view_width())
         assert reversed_cells() == [span]
         await pilot.press("escape")
-        await pilot.pause()
+        # the list takes focus later, so the cursor is cleared by the blur's repaint
+        await wait_until(pilot, lambda: reversed_cells() == [])
         assert reversed_cells() == []
 
     run(script)
