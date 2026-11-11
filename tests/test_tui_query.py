@@ -536,8 +536,9 @@ def test_evaluating_a_huge_flat_query_is_bounded() -> None:
 # -- the sort keys are the columns' ------------------------------------------------------------
 
 
-def test_order_by_names_exactly_the_sortable_columns() -> None:
-    assert query.ORDER_COLUMNS == columns.SORTABLE
+def test_order_by_names_exactly_the_sortable_columns_and_the_sort_only_keys() -> None:
+    assert query.ORDER_COLUMNS == columns.ORDER_KEYS
+    assert columns.ORDER_KEYS == (*columns.SORTABLE, "ready", "attention")
 
 
 # -- the form ----------------------------------------------------------------------------------

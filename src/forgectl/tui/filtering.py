@@ -88,11 +88,15 @@ def getter(row: Row, state: columns.RowState, now: datetime) -> query.Getter:
             return ci()
         if name == "review":
             return review()
+        if name == "attention":
+            return columns.attention_level(state)
         if name == "blocker":
             # a loaded snapshot with no blocker is known-empty ("" and IS NULL), not unknown
             return None if s is None else (s.blocker or "")
         if s is None:
             return None
+        if name == "ready":
+            return columns.is_ready(s)
         return {
             "approvals": s.approvals,
             "comments": s.comments_total,

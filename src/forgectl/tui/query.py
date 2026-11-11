@@ -62,10 +62,13 @@ FIELDS: dict[str, str] = {
     "draft": BOOL,
     "authored": BOOL,
     "requested": BOOL,
+    "ready": BOOL,
+    "attention": COUNT,
     "text": SEARCH,
 }
 
-# The columns ``ORDER BY`` takes: ``columns.SORTABLE`` (a test keeps the two equal).
+# The keys ``ORDER BY`` takes: ``columns.ORDER_KEYS``, the sortable columns plus the sort-only
+# ``ready`` and ``attention`` (a test keeps the two equal).
 ORDER_COLUMNS = (
     "pr",
     "badge",
@@ -77,6 +80,8 @@ ORDER_COLUMNS = (
     "title",
     "author",
     "roles",
+    "ready",
+    "attention",
 )
 
 VALUES: dict[str, tuple[str, ...]] = {
