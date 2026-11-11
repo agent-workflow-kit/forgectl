@@ -283,7 +283,7 @@ def test_a_host_that_stopped_a_prefetch_is_not_asked_again_until_the_next_cycle(
         await pilot.press("down")
         await settle(app, pilot)
         await pilot.pause(0.3)
-        assert "github.com" in app._stopped_hosts
+        assert app._stopped_hosts == {"github.com"}
 
     run(source, script)
     assert len([c for c in source.calls if c[0] == "detail"]) <= 2
