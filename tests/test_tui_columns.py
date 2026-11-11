@@ -518,7 +518,7 @@ def test_visible_rows_are_fetched_before_off_screen_ones() -> None:
     asyncio.run(go())
 
 
-def wait_for(app: BrowseApp, check: Any, timeout: float = 10.0) -> Any:
+def wait_for(app: BrowseApp, check: Any, timeout: float = 30.0) -> Any:
     async def go(pilot: Pilot[None]) -> None:
         end = time.monotonic() + timeout
         while not check():

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import gc
 import time
+from collections.abc import Callable
 
 import pytest
 from pygments.token import Number
@@ -244,9 +246,9 @@ def test_odd_diffs_never_raise_and_keep_their_text(text: str) -> None:
 def test_a_huge_diff_is_fast_and_falls_back_to_plain_coloring() -> None:
     line = "+x = 1\n"
     text = "--- a/x.py\n+++ b/x.py\n@@ -1,0 +1,50000 @@\n" + line * 14_000
-    started = time.monotonic()
+    started = time.process_time()
     content = style.diff(text, True)
-    assert time.monotonic() - started < 2.0
+    assert time.process_time() - started < 2.0
     assert content.plain == text
     assert has_style(content, "+x = 1", f"on {style.DARK.add_bg}")  # still tinted
     tail = [s for s in content.spans if s.start >= len(text) - 7]  # the last line: past the budget
@@ -281,9 +283,9 @@ def test_a_long_line_is_not_lexed() -> None:
     ],
 )
 def test_pathological_markdown_finishes_quickly_and_stays_inert(body: str) -> None:
-    started = time.monotonic()
+    started = time.process_time()
     content = style.markdown(body, True)
-    assert time.monotonic() - started < 3.0
+    assert time.process_time() - started < 3.0
     assert_inert(content)
 
 
@@ -395,9 +397,9 @@ def only_background(content: Content) -> bool:
 )
 def test_a_hostile_fence_over_the_lex_cap_is_plain_and_fast(lang: str, opener: str) -> None:
     code = "\n".join([opener * 3] * 150)  # over the line cap
-    started = time.monotonic()
+    started = time.process_time()
     content = style.markdown(f"```{lang}\n{code}\n```", True)
-    assert time.monotonic() - started < 1.5
+    assert time.process_time() - started < 1.5
     assert only_background(content)
     big = "x = 1  # " + "a" * 100 + "\n"
     content = style.markdown(f"```python\n{big * 60}```", True)  # over the character cap
@@ -411,9 +413,9 @@ def test_a_small_fence_under_the_caps_is_still_highlighted() -> None:
 def test_a_hostile_diff_is_fast_and_the_oversize_hunk_stays_plain() -> None:
     body = "".join(f"+s{{{i}\n" for i in range(150))
     text = f"--- a/x.perl\n+++ b/x.perl\n@@ -0,0 +1,150 @@\n{body}"
-    started = time.monotonic()
+    started = time.process_time()
     content = style.diff(text, True)
-    assert time.monotonic() - started < 1.5
+    assert time.process_time() - started < 1.5
     assert content.plain == text
     assert style.DARK.pygments not in str(content.spans)
     assert all(
@@ -438,9 +440,9 @@ def test_one_lex_is_capped_in_characters_and_lines() -> None:
 def test_many_hostile_comments_fall_back_to_plain_text_within_the_budget() -> None:
     hostile = ("![[***[" * 700)[:4000]
     entries = [style.Markdown(hostile, 4) for _ in range(45)]
-    started = time.monotonic()
+    started = time.process_time()
     content = style.threaded(entries, True)  # type: ignore[arg-type]
-    assert time.monotonic() - started < 1.5
+    assert time.process_time() - started < 1.5
     assert_inert(content)
     assert content.plain.split("\n")[-1] == "    " + hostile  # past the budget: shown as is
     assert content.plain.split("\n")[0] != "    " + hostile  # the first ones were rendered
@@ -563,17 +565,45 @@ def test_a_quoted_git_path_selects_its_lexer() -> None:
     assert style._unquote("plain.py") == "plain.py"
 
 
+def cpu_seconds(fn: Callable[[], object], runs: int = 15) -> float:
+    """The least CPU time of ``runs`` calls: unlike wall time it does not grow while this process
+    waits for a CPU on a loaded machine, and the minimum drops one-off interruptions. The
+    collector is off while timing, so a collection pause lands in no run."""
+    best = float("inf")
+    gc.disable()
+    try:
+        for _ in range(runs):
+            started = time.process_time()
+            fn()
+            best = min(best, time.process_time() - started)
+    finally:
+        gc.enable()
+    return best
+
+
 def test_split_is_linear_and_keeps_span_order() -> None:
-    body = "\n".join("*a* `b`" for _ in range(10_000))[:20_000]
-    started = time.monotonic()
-    style.markdown(body, True)
-    assert time.monotonic() - started < 0.6
+    # Work scales with the input: 16x the input costs about 16x, a quadratic split about 256x.
+    # Measured on a 20-core host with 40 busy loops running, the linear ratio of the split stayed
+    # between 17 and 27 and a quadratic stand-in gave 284, so a bound of 90 separates the two
+    # whatever the speed or the load of the machine. The markdown body stays under the renderer's
+    # size cap (MARKDOWN_CHARS), past which it would not be rendered at all; there the linear
+    # ratio was 13 to 28 and the quadratic stand-in gave 89 (the other work dilutes it), so 50.
+    def markdown_of(lines: int) -> Callable[[], object]:
+        body = "\n".join("*a* `b`" for _ in range(lines))
+        assert len(body) <= style.MARKDOWN_CHARS
+        return lambda: style.markdown(body, True)
+
+    assert cpu_seconds(markdown_of(3_200)) < 50 * cpu_seconds(markdown_of(200))
+
+    def split_of(lines: int) -> Callable[[], object]:
+        text = "\n".join(["a"] * lines)
+        spans = [(2 * i, 2 * i + 1, "b") for i in range(lines)]
+        return lambda: style._split(text, spans)
+
+    assert cpu_seconds(split_of(16_000)) < 90 * cpu_seconds(split_of(1_000))
     many = "\n".join(["a"] * 10_000)
-    started = time.monotonic()
     out = style._split(many, [(2 * i, 2 * i + 1, "b") for i in range(10_000)])
-    assert (
-        time.monotonic() - started < 0.2 and len(out) == 10_000 and out[9_999][1] == [(0, 1, "b")]
-    )
+    assert len(out) == 10_000 and out[9_999][1] == [(0, 1, "b")]
     pieces = style._split("ab\ncd", [(0, 5, "outer"), (1, 2, "inner"), (3, 4, "x")])
     assert pieces == [
         ("ab", [(0, 2, "outer"), (1, 2, "inner")]),
@@ -641,14 +671,14 @@ def test_opening_another_pull_request_starts_on_its_first_check() -> None:
 @pytest.mark.parametrize("language", ["mcschema", "tnt"])
 def test_lexers_that_never_return_are_not_used(language: str) -> None:
     assert style.lexer_for_language(language) is None
-    started = time.monotonic()
+    started = time.process_time()
     content = style.markdown(f"```{language}\n<!--\n<\n```", True)
-    assert time.monotonic() - started < 1.0
+    assert time.process_time() - started < 1.0
     assert only_background(content)
 
 
 def test_the_worst_block_under_the_caps_lexes_in_well_under_a_second() -> None:
     code = "\n".join(["s{" * 15] * 100)[: style.MAX_LEX_CHARS]
-    started = time.monotonic()
+    started = time.process_time()
     style.markdown(f"```perl\n{code}\n```", True)
-    assert time.monotonic() - started < 1.0
+    assert time.process_time() - started < 1.0

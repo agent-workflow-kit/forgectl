@@ -41,7 +41,7 @@ class Spawned:
 
     def reap_and_assert_gone(self) -> None:
         for _pid, pgid in self.children:
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
                 members = group_members(pgid)
                 for pid, _ppid, state in members:

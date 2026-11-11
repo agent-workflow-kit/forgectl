@@ -129,9 +129,23 @@ def run(
             if wait:
                 await settle(app, pilot)
             await script(app, pilot)
+            await quiesce(app, source)
 
     asyncio.run(go())
     return app
+
+
+async def quiesce(app: BrowseApp, source: FakeSource) -> None:
+    """Leave no refresh behind: a timer tick that starts a worker just as the test app closes
+    would paint onto a torn-down screen (`quit` stops the timer first; leaving the test context
+    does not). Stop the timer, release any held snapshot, and wait the workers out.
+
+    The timer is stopped explicitly here, so exit paths other than `q` are not covered here."""
+    if app.refresh_timer is not None:
+        app.refresh_timer.stop()
+    if isinstance(source, RefreshSource):
+        source.gate.set()
+    await app.workers.wait_for_complete()
 
 
 async def until(pilot: Pilot[None], cond: Callable[[], bool], tries: int = 200) -> None:
@@ -354,6 +368,8 @@ def test_ticks_wait_while_a_modal_is_open_and_resume_after() -> None:
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         await pilot.press("question_mark")
         await pilot.pause()
+        await until(pilot, lambda: source.running == 0, tries=400)
+        await settle_prs(source)  # a cycle that began before the modal is allowed to end
         base = source.count("prs")
         await pilot.pause(0.4)
         assert source.count("prs") == base
@@ -676,6 +692,37 @@ def test_a_superseded_detail_read_that_fails_marks_its_row_stale() -> None:
         source.gate.set()
         await settle(app, pilot)
         assert "[stale: ups…" in prompt_of(app, a)
+
+    run(source, script)
+
+
+def test_a_superseded_detail_load_passes_a_cancel_check_to_both_reads() -> None:
+    class DetailSource(RefreshSource):
+        def __init__(self, **kw: Any) -> None:
+            super().__init__(**kw)
+            self.diff_probes: dict[str, Callable[[], bool]] = {}
+
+        def diff(self, pr: str, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
+            assert cancelled is not None
+            self.diff_probes[pr] = cancelled
+            if cancelled():
+                raise Cancelled(pr)
+            return super().diff(pr)
+
+    items = [make_item(n, title=f"pr {n}") for n in (1, 2, 3)]
+    source = DetailSource(authored=items, snapshots={i["pr"]: snap(i["number"]) for i in items})
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        a, b = prefix(GH, 1), prefix(GH, 2)
+        source.hold = True
+        app._start_detail(a)
+        await until(pilot, lambda: source.running > 0)
+        app._start_detail(b)  # replaces A's request while its snapshot runs
+        source.gate.set()
+        await settle(app, pilot)
+        assert source.diff_probes[a]() is True  # A's diff was told it was abandoned
+        assert source.diff_probes[b]() is False
+        assert not [c for c in source.calls if c == ("diff", a)]  # and sent nothing
 
     run(source, script)
 
