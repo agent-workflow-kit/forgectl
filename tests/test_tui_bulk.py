@@ -252,7 +252,7 @@ def test_a_stopped_host_sends_the_rest_of_its_rows_to_the_pool() -> None:
     source = BulkSource(rows(GH, 4) + rows(GL, 2))
 
     def answer(batch: list[str]) -> dict[str, Any]:
-        if batch[0].startswith("github.com") and batch[0].endswith("#1"):
+        if batch[0].split("/", 1)[0] == "github.com" and batch[0].endswith("#1"):
             return {
                 "items": [],
                 "failed": [
@@ -265,7 +265,9 @@ def test_a_stopped_host_sends_the_rest_of_its_rows_to_the_pool() -> None:
 
     source.answer = answer
     app = drive(source, nothing)
-    assert [b for b in source.batches if b[0].startswith("github.com")] == [[pr(GH, 1), pr(GH, 2)]]
+    assert [b for b in source.batches if b[0].split("/", 1)[0] == "github.com"] == [
+        [pr(GH, 1), pr(GH, 2)]
+    ]
     assert source.per_row() == [pr(GH, n) for n in range(1, 5)]
     assert len(loaded(app)) == 6
 
