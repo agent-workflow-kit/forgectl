@@ -10,12 +10,12 @@ What is read, over the project id the merge request's own answer gives:
 - `/reviewers` (request states) and `/notes` (the newest `requested review from` system note per
   reviewer: its id is the request's `instance`, its time `requested_at`);
 - `/approvals` and the project's approval settings, through the backend's own `_reviewers`, so the
-  table of `latest_by_reviewer` is built by the same code as in `show` and compared with `show`'s;
+  table of `latest_by_reviewer` is `show`'s single reading, not read or compared again (#117);
 - `/discussions` (threads and general comments; system notes and drafts left out);
 - `/versions`, else the head commit, for `head.pushed_at`.
 
 The merge request is read once more after the parts: its head must still be the one `show` read.
-A difference (head, identity, reviewer table, a repeated discussion) means the MR moved while it
+A difference (head, identity, a repeated discussion) means the MR moved while it
 was read; the whole reading is repeated once, then `upstream_error`.
 
 Every GitLab behavior assumed here that no real host has confirmed is marked `UNVERIFIED`.
@@ -126,8 +126,9 @@ def _parse(text: str) -> datetime:
 @dataclass
 class Limits:
     """The lowest `ratelimit-remaining` seen across this module's own reads (UNVERIFIED header
-    names: GitLab documents `RateLimit-Remaining` and `RateLimit-Reset`, an epoch time). Reads
-    that go through `show` or the backend's table code are not counted.
+    names: GitLab documents `RateLimit-Remaining` and `RateLimit-Reset`, an epoch time). The
+    headers of `show`'s MR and /reviewers reads are counted (via `adopt`); its approvals and
+    project approvals reads are not.
     TODO(#9): count every read of the command once the gateway records response headers."""
 
     host: str
@@ -215,19 +216,19 @@ class _Reader:
         self.head = gl._sha(mr.get("sha"), "sha")
         return mr
 
-    def expect(self, read: m.PrRead) -> None:
-        """What `show` read must still be what this MR says."""
-        pr = read.pr
-        same = (
-            pr.pr_id == f"gid://gitlab/MergeRequest/{self.mr_id}"
-            and pr.repo == f"{self.ref.host}/{self.canonical}"
-            and pr.head.sha == self.head
-        )
-        if not same:
-            raise _Moved
+    def adopt(self, parts: gl.PrParts) -> None:
+        """Take the identity of the MR that `show` just read (#117): the MR is not read again."""
+        self.project_id = parts.project_id
+        self.mr_id = parts.mr_id
+        self.canonical = parts.canonical
+        self.head = parts.head
+        for headers in parts.headers:
+            self.limits.note_headers(headers)
 
     def check_head(self, head: str) -> None:
-        """The head is still the one the parts were read for."""
+        """The head is still the one the parts were read for. This second read of the MR is kept
+        on purpose: it is the one that tells a push (or another MR) that landed while the pages
+        were read, so it must be fresh."""
         before = (self.project_id, self.mr_id, self.canonical)
         self.read_mr()
         if (self.project_id, self.mr_id, self.canonical) != before or self.head != head:
@@ -273,25 +274,6 @@ def _reader(backend: GitLabBackend, ref: PrRef, now: Now) -> _Reader:
 
 
 # -- reviewer table ----------------------------------------------------------------------------
-
-
-def _table_key(entry: m.LatestByReviewer) -> tuple[object, ...]:
-    return (entry.login, entry.id, entry.state, entry.commit_sha, entry.can_push)
-
-
-def _same_table(
-    ours: tuple[m.LatestByReviewer, ...], shown: tuple[m.LatestByReviewer, ...]
-) -> bool:
-    """Whether two tables agree on every account, state and push right (the time is not
-    compared: both come from the same `approved_by` rows, so a change shows in the others)."""
-    return sorted(map(_table_key, ours), key=repr) == sorted(map(_table_key, shown), key=repr)
-
-
-def _own_table(r: _Reader, author: m.Author) -> tuple[m.LatestByReviewer, ...]:
-    """The table again, by the code `show` uses, from fresh reads."""
-    entries, _left = r.backend._reviewers(r.target, r.project_id, r.ref.number)
-    reset = r.backend._reset_on_push(r.target, r.project_id)
-    return r.backend._with_can_push(r.target, r.project_id, entries, author, reset)
 
 
 # -- review requests ---------------------------------------------------------------------------
@@ -345,15 +327,9 @@ class RequestsRead:
     complete: bool
 
 
-def _read_reviewers(r: _Reader) -> list[_Reviewer]:
-    rows = gl._list(r.get([*r.base(), "reviewers"], shape="list").data, "reviewers")
-    seen: dict[int, _Reviewer] = {}
-    for item in rows:
-        entry = gl._obj(item, "reviewer")
-        user = gl._user(entry.get("user"), "reviewer")
-        raw = entry.get("state")
-        seen[user.id] = _Reviewer(user, raw if isinstance(raw, str) else "")
-    return list(seen.values())
+def _reviewers_of(parts: gl.PrParts) -> list[_Reviewer]:
+    """The reviewer rows `show` already read, not read again."""
+    return [_Reviewer(user, state) for user, state in parts.reviewers]
 
 
 def _request_state(r: _Reader, raw: str) -> Literal["outstanding", "reviewed"]:
@@ -719,15 +695,14 @@ def snapshot(backend: GitLabBackend, ref: PrRef, now: Now | None = None) -> m.Sn
     clock = now or utc_now
 
     def once() -> m.Snapshot:
-        read = backend.get_pr(ref)
+        # the reviewer table is show's single reading (#117): an approvals/reviewer change at the
+        # same head after it is not re-read or retried; check_head still catches a head or
+        # identity move
+        read, parts = backend._read_pr(ref)
         r = _reader(backend, ref, clock)
-        r.read_mr()
-        r.expect(read)
+        r.adopt(parts)
         head = read.pr.head.sha
-        reviewers = _read_reviewers(r)
-        if not _same_table(_own_table(r, read.pr.author), read.latest_by_reviewer):
-            raise _Moved
-        requests = _read_requests(r, reviewers)
+        requests = _read_requests(r, _reviewers_of(parts))
         threads = _read_threads(r)
         head_push = read_head_push(r, head)
         r.check_head(head)
@@ -785,23 +760,22 @@ def comments(backend: GitLabBackend, ref: PrRef, now: Now | None = None) -> m.Co
 
 def reviews(backend: GitLabBackend, ref: PrRef, now: Now | None = None) -> m.ReviewsResult:
     """GitLab has no review objects: `reviews` is empty by decision (D-25), and the table is
-    `show`'s, confirmed by a second reading."""
+    `show`'s."""
     clock = now or utc_now
 
     def once() -> m.ReviewsResult:
-        read = backend.get_pr(ref)
+        # the reviewer table is show's single reading (#117): an approvals/reviewer change at the
+        # same head after it is not re-read or retried; check_head still catches a head or
+        # identity move
+        read, parts = backend._read_pr(ref)
         r = _reader(backend, ref, clock)
-        r.read_mr()
-        r.expect(read)
-        table = _own_table(r, read.pr.author)
-        if not _same_table(table, read.latest_by_reviewer):
-            raise _Moved
+        r.adopt(parts)
         r.check_head(read.pr.head.sha)
         return m.ReviewsResult(
             pr=read.pr.pr,
             head_sha=read.pr.head.sha,
             reviews=(),
-            latest_by_reviewer=table,
+            latest_by_reviewer=read.latest_by_reviewer,
             review_decision=read.pr.review_decision,
             approvals=read.pr.approvals,
             approvals_at_head=read.pr.approvals_at_head,

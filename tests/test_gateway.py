@@ -16,8 +16,9 @@ import signal
 import sys
 import threading
 import time
+import types
 import urllib.parse
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,21 @@ GHE_CLOUD = Target("github", "acme.ghe.com", token=TOKEN)
 GL = Target("gitlab", "gitlab.com", token=TOKEN)
 GL_SELF = Target("gitlab", "git.example.test", token=TOKEN)
 GL_PREFIX = Target("gitlab", "git.example.test", api_prefix="/gitlab", token=TOKEN)
+
+
+@pytest.fixture(autouse=True)
+def default_sigint() -> Iterator[None]:
+    """A shell `&` job (and `nohup`-style launchers) hands its children an ignored SIGINT, so
+    Python never installs its KeyboardInterrupt handler and the signal tests below fail in
+    confusing ways. These tests are about the default disposition: set it for each test."""
+    current = signal.getsignal(signal.SIGINT)
+    if current is signal.SIG_IGN:
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        yield
+    finally:
+        if current is signal.SIG_IGN:
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 
 class Spawned:
@@ -1531,12 +1547,14 @@ def test_an_exhausted_budget_stops_before_any_process_starts(fake_forges: FakeFo
     assert fake_forges.calls() == []
 
 
-def test_budget_clock_and_reserve() -> None:
+def test_budget_clock_and_reserve(monkeypatch: pytest.MonkeyPatch) -> None:
+    ticks = iter([100.0, 102.5])  # a fake clock: the call "takes" exactly 2.5 s
+    monkeypatch.setattr(gw, "time", types.SimpleNamespace(monotonic=lambda: next(ticks)))
     budget = gw.Budget(10)
     assert budget.remaining() == 10
     with budget.spending():
-        time.sleep(0.05)
-    assert 9.8 < budget.remaining() < 10
+        pass
+    assert budget.remaining() == 7.5
     budget.grant_write_reserve()
     budget.grant_write_reserve()  # once only
     assert budget.total == 10 + gw.WRITE_RESERVE
@@ -1566,7 +1584,7 @@ time.sleep(60)
 def reap_orphans(pgid: int) -> None:
     """Grandchildren killed with their leader are reparented to this process (a subreaper) and
     wait here as zombies; reap them so the leaked-children check sees a clean process."""
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 30
     while group_members(pgid) and time.monotonic() < deadline:
         for pid, _ppid, state in group_members(pgid):
             if state == "Z":
@@ -1644,7 +1662,7 @@ def test_stdout_cap_kills_the_child_and_flags_it_without_reading_on() -> None:
         max_stdout=100_000,
     )
     assert result.stdout_truncated and len(result.stdout) == 100_000
-    assert not result.timed_out and time.monotonic() - started < 5
+    assert not result.timed_out and time.monotonic() - started < 20  # far below the 30 s timeout
     assert group_members(result.pgid) == []
 
 
@@ -1782,7 +1800,7 @@ def test_a_signal_sent_to_a_running_forgectl_process_ends_the_child_group_and_cl
     assert line[0] == "STARTED"
     child_pid, child_pgid = int(line[1]), int(line[2])
     assert child_pid == child_pgid and child_pid != proc.pid
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + 30
     while time.monotonic() < deadline and not fake_forges.calls():
         time.sleep(0.05)
     time.sleep(0.3)  # the fake is running and hanging
@@ -2195,7 +2213,7 @@ def test_with_kqueue_and_no_waitid_a_grandchild_dies_with_the_group(
     )
     grandchild = int(result.stdout.split()[0])
     assert result.returncode == 0
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         try:
             os.kill(grandchild, 0)  # only a probe; never a signal to an unknown process

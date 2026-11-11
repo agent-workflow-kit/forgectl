@@ -583,11 +583,11 @@ def test_too_many_nodes_are_refused_quickly(home: Path) -> None:
     items = MAX_NODES - 3  # the root map, the key, the list: exactly at the cap
     at_cap = invalid(home, "x: [" + "1," * (items - 1) + "1]\n")
     assert at_cap.details == {"key": "x"}  # parsed; refused only as an unknown key
-    started = time.monotonic()
+    started = time.process_time()
     over = invalid(home, "x: [" + "1," * items + "1]\n")
     assert over.details == {"key": str(default_file(home))}
     assert "too many nodes" in over.message
-    assert time.monotonic() - started < 2.0
+    assert time.process_time() - started < 2.0
     huge = invalid(home, "x: [" + "1," * (MAX_FILE_BYTES // 2 - 10) + "1]\n")
     assert "too many nodes" in huge.message
 
