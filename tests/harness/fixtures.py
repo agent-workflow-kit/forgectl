@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 
+from . import golden
 from .forges import FakeForges
 from .procs import ProcessRegistry
 from .safety import AMBIENT_SENTINELS, AMBIENT_TOKEN_VARS
@@ -63,6 +64,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="run tests marked live (needs real hosts and credentials; refused in CI)",
     )
+    parser.addoption(
+        "--update-golden",
+        action="store_true",
+        default=False,
+        help="rewrite tests/golden files from current output (same as FORGECTL_UPDATE_GOLDEN=1; "
+        "refused in CI; review the diff before committing)",
+    )
 
 
 def live_skip_reason(run_live: bool, env: Mapping[str, str]) -> str | None:
@@ -87,8 +95,13 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Make this process a child subreaper (Linux), so an orphan that escaped its process group
-    with setsid becomes our child and the leak check below sees it."""
+    """Record a golden-regeneration request, then make this process a child subreaper (Linux), so
+    an orphan that escaped its process group with setsid becomes our child and the leak check
+    below sees it."""
+    # Read before the per-test fixture clears every FORGECTL_* variable.
+    golden.session_update = bool(
+        config.getoption("--update-golden") or os.environ.get(golden.UPDATE_ENV) == "1"
+    )
     if sys.platform.startswith("linux"):
         with contextlib.suppress(OSError, AttributeError):
             libc = ctypes.CDLL(None, use_errno=True)

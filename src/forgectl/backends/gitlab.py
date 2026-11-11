@@ -235,6 +235,20 @@ def _user(value: Any, what: str) -> _User:
     )
 
 
+@dataclass(frozen=True)
+class PrParts:
+    """What `_read_pr` read that `snapshot` and `reviews` build on, so each is read once."""
+
+    project_id: int
+    mr_id: int
+    canonical: str
+    head: str
+    #: the `/reviewers` rows, one per account: the user and the raw review state
+    reviewers: tuple[tuple[_User, str], ...]
+    #: the headers of the MR and `/reviewers` answers, for the snapshot's `rate_limit`
+    headers: tuple[Mapping[str, str], ...]
+
+
 def _status_unknown(response: Response) -> bool:
     """Whether the MR answer's `detailed_merge_status` is still being computed."""
     data = response.data
@@ -405,6 +419,13 @@ class GitLabBackend:
     # -- show ----------------------------------------------------------------------------------
 
     def get_pr(self, ref: PrRef, readiness: m.Readiness | None = None) -> m.PrRead:
+        return self._read_pr(ref, readiness)[0]
+
+    def _read_pr(
+        self, ref: PrRef, readiness: m.Readiness | None = None
+    ) -> tuple[m.PrRead, PrParts]:
+        """`get_pr`, and the raw reads it made (the MR and its reviewer rows) so `snapshot` and
+        `reviews` use them instead of reading the same resources again (#117)."""
         # ``readiness`` is taken for the protocol and not used yet: the readiness loop is the
         # injected ``until_known`` (show's). TODO(#22): GitLab merge passes its own readiness.
         raw_number: Any = ref.number
@@ -449,7 +470,9 @@ class GitLabBackend:
         )
         draft = _flag(mr.get("draft", mr.get("work_in_progress", False)), "draft")
         ci = self._ci(target, mr, head_sha, project_id)
-        entries, approvals_left = self._reviewers(target, project_id, iid)
+        entries, approvals_left, reviewer_rows, reviewer_headers = self._reviewers(
+            target, project_id, iid
+        )
         reset = self._reset_on_push(target, project_id)
         entries = self._with_can_push(target, project_id, entries, author, reset)
         retarget_at, retarget_known = (None, True)
@@ -548,7 +571,15 @@ class GitLabBackend:
             approvals=approvals,
             approvals_at_head=at_head,
         )
-        return m.PrRead(pr=pr, ci=ci, latest_by_reviewer=entries)
+        parts = PrParts(
+            project_id=project_id,
+            mr_id=_int_id(mr.get("id"), "id"),
+            canonical=canonical,
+            head=head_sha,
+            reviewers=reviewer_rows,
+            headers=(response.headers, reviewer_headers),
+        )
+        return m.PrRead(pr=pr, ci=ci, latest_by_reviewer=entries), parts
 
     # -- identity ------------------------------------------------------------------------------
 
@@ -794,7 +825,9 @@ class GitLabBackend:
 
     def _reviewers(
         self, target: Target, project_id: int, iid: int
-    ) -> tuple[tuple[m.LatestByReviewer, ...], int | None]:
+    ) -> tuple[
+        tuple[m.LatestByReviewer, ...], int | None, tuple[tuple[_User, str], ...], Mapping[str, str]
+    ]:
         base = ["projects", path_int(project_id), "merge_requests", path_int(iid)]
         approvals = _obj(self._get(target, [*base, "approvals"]).data, "approvals")
         left = approvals.get("approvals_left")
@@ -808,8 +841,8 @@ class GitLabBackend:
             approved[user.id] = (user, _rfc3339(entry.get("approved_at")))
         reviewer_states: dict[int, tuple[_User, str]] = {}
         # Required: without the reviewer states a `requested_changes` could read as approved.
-        listed = self._get(target, [*base, "reviewers"], shape="list").data
-        for item in _list(listed, "reviewers"):
+        listed = self._get(target, [*base, "reviewers"], shape="list")
+        for item in _list(listed.data, "reviewers"):
             entry = _obj(item, "reviewer")
             user = _user(entry.get("user"), "reviewer")
             raw = entry.get("state")
@@ -825,7 +858,7 @@ class GitLabBackend:
                 entries.append(self._entry(user, "approved", approved[account][1]))
             elif rstate == "unapproved":
                 entries.append(self._entry(user, "dismissed", None))
-        return tuple(entries), approvals_left
+        return tuple(entries), approvals_left, tuple(reviewer_states.values()), listed.headers
 
     @staticmethod
     def _entry(user: _User, state: m.LatestState, at: str | None) -> m.LatestByReviewer:

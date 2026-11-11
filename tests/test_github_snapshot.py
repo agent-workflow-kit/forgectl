@@ -2085,3 +2085,15 @@ def test_a_failed_identity_read_fails_the_snapshot_and_is_tried_again(
     with pytest.raises(ForgectlError):
         rig.snapshot()
     assert rig.snapshot()["activity"]["comments_total"] == 6
+
+
+def test_a_snapshot_makes_six_reads_and_no_resource_is_read_twice(make: Callable[..., Rig]) -> None:
+    """#117 audit: the GitHub snapshot is 4 GraphQL reads (the PR, its parts, its review requests
+    and the head's push time), the REST `requested_reviewers` (the only source of a team the
+    token cannot see) and me. Each asks for data the others do not carry."""
+    rig = make()
+    rig.snapshot()
+    assert len(rig.router.argvs) == 6
+    assert len(rig.router.ops) == len(set(rig.router.ops))
+    sent = [json.dumps(r, sort_keys=True) for r in rig.router.requests if r]
+    assert len(sent) == len(set(sent))

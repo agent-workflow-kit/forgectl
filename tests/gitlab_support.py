@@ -114,6 +114,7 @@ class FakeGitLab:
         max_stdout: int,
         max_stderr: int,
         on_start: Callable[[int, int], None] | None,
+        on_reap: Callable[[int, int], None] | None = None,
     ) -> ProcessResult:
         endpoint = argv[-1]
         path, _, query_text = endpoint.partition("?")

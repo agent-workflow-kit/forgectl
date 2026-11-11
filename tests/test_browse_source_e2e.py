@@ -9,6 +9,8 @@ import asyncio
 import json
 import subprocess
 import sys
+import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +27,7 @@ from forgectl.tui.source import load_list  # noqa: E402
 from forgectl.tui.source_live import LiveSource  # noqa: E402
 
 from .bulk_support import bulk_answer  # noqa: E402
-from .harness.fixtures import forgectl_env  # noqa: E402
+from .harness.fixtures import direct_children, forgectl_env  # noqa: E402
 from .harness.forges import FakeForges  # noqa: E402
 from .test_github_diff import PR_ENDPOINT, RECORDINGS, pull, recording  # noqa: E402
 from .test_github_lists import recording as list_recording  # noqa: E402
@@ -35,6 +37,20 @@ from .test_snapshot_cli import script as script_snapshot
 from .tui_fakes import FakeOpener  # noqa: E402
 
 FAILED_CODE = "not_found"
+
+
+@pytest.fixture(autouse=True)
+def drained_children() -> Iterator[None]:
+    """The app reads forges on daemon threads (so `q` never waits for a slow read), and leaving
+    the test context can beat a read that a newer round replaced: its fake `gh` is still ending
+    when the leaked-child check runs. Give those reads time to finish and be reaped (their own
+    gateway reaps them) before that check, which runs after this teardown. This cannot tell a child
+    the gateway killed from one that exits on its own within the 30 s: it only waits for both."""
+    before = direct_children()
+    yield
+    deadline = time.monotonic() + 30
+    while direct_children() - before and time.monotonic() < deadline:
+        time.sleep(0.02)
 
 
 @pytest.fixture

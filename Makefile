@@ -1,9 +1,12 @@
-.PHONY: verify test lint fmt fmt-check typecheck mdlint
+.PHONY: verify test golden lint fmt fmt-check typecheck mdlint
 
 verify: lint fmt-check typecheck test mdlint
 
 test:
 	uv run pytest
+
+golden:
+	uv run pytest --update-golden
 
 lint:
 	uv run ruff check .

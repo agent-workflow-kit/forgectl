@@ -8,32 +8,40 @@ itself; the handlers reach the forges through the gateway, as for the CLI.
 
 Only the three read commands can be run from here, so no write handler is reachable.
 
-Thread safety, for the progressive loading of #58: a ``LiveSource`` holds no per-call state.
-``snapshot(pr)`` and ``diff(pr)`` may be called from any number of worker threads at once; each
-call parses its own arguments and builds its own gateway, so one call failing (any exception) does
-not touch another. The config is loaded once, under a lock, and shared read-only.
+Thread safety, for the progressive loading of #58: ``prs``, ``snapshot(pr)`` and ``diff(pr)`` may
+be called from any number of worker threads at once. A ``LiveSource`` keeps only the registry of
+the calls in flight (under one lock, for ``close``) and its closed flag; each call parses its own
+arguments, builds its own gateway and tracks its own process groups, so one call failing (any
+exception) does not touch another. The config is loaded once, under a lock, and shared read-only.
 
-Cancelling: a call that is already running cannot be stopped. ``cancelled`` (a callable the
-caller owns, for example ``lambda: token != self._token``) is checked once before the call
-starts; if it is true the call raises ``Cancelled`` without any host traffic. A finished call
-whose answer is no longer wanted is dropped by the caller's own token, as in ``tui.app``.
+Cancelling: ``cancelled`` (a callable the caller owns, for example
+``lambda: token != self._token``) is checked before the call starts and again before every host
+call (``gh``, ``glab``, a ``token_command``) the handler makes, and between the slices of a retry
+wait, through the gateway. When it is true the call raises ``Cancelled`` and sends nothing more; a
+host call already running is not interrupted, it ends by itself (only ``close`` ends it).
 ``snapshot`` and ``diff`` may therefore raise ``Cancelled``; it is not an error to show, so a
-caller must catch it before it treats an exception as a failure.
+caller must catch it before it treats an exception as a failure. ``prs`` takes no ``cancelled``
+but is refused after ``close`` and ended by it like the others.
+
+Closing: ``close()``, called when the app exits, makes every later and every running call
+cancelled, SIGKILLs the process group of each host call in flight (only groups this source saw
+start and that are still tracked: the gateway runner reports a group untracked, under the same
+lock ``close`` holds while killing, just before it reaps the leader, so a reaped group is never
+signaled; where ``os.waitid`` exists a reaped leader is also checked directly) and waits up to
+``CLOSE_WAIT`` seconds for the calls to return. Only the read paths are tracked: a detached child
+(a hook watchdog) is never started from here and never touched. Each call removes its own private
+temp dir as it unwinds, so no group and no dir is left for the daemon worker threads, which the
+interpreter would otherwise stop mid-call. The app keeps its concurrency slot until the worker
+returned, so a cancelled read still counts toward the bound.
 
 Failures are logged as the CLI logs them (``log.jsonl``), by the in-process runner.
-
-TODO(#93): two lifecycle gaps that need the refresh and cancel work of #59. (1) Quitting while a
-read is in flight leaves the child ``gh``/``glab`` process group and its private temp dir alive:
-the worker is a daemon thread that dies before the gateway cleans up, and a kill only happens
-from the main thread. ``LiveSource`` should track the in-flight process groups, and a
-``close()`` called on app exit should kill them and remove their dirs. (2) ``cancelled`` is
-only checked before a call, not between the handler's host calls; mid-call cancellation needs
-``ReadEnv.call`` (the gateway) to take a cancel check.
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
 import threading
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
@@ -42,7 +50,8 @@ from typing import Any
 from forgectl import cli, registry
 from forgectl.browse import is_pr
 from forgectl.config import load_config
-from forgectl.errors import ForgectlError
+from forgectl.errors import Cancelled, ForgectlError
+from forgectl.gateway import CALL_SCOPE, CallScope
 from forgectl.identifiers import bind_args
 from forgectl.registry import Invocation
 from forgectl.surface import parse
@@ -52,14 +61,10 @@ Runner = Callable[[list[str]], dict[str, Any]]
 ``ForgectlError`` for a failed command, ``partial_results`` carrying ``output``."""
 
 
-class Cancelled(Exception):
-    """The call was cancelled before it started; nothing was sent to any host.
+__all__ = ["Cancelled", "LiveSource", "in_process_runner"]
 
-    It is a plain ``Exception``, not a ``ForgectlError``, and not an error to display: a caller
-    of ``LiveSource.snapshot`` or ``diff`` that passes ``cancelled`` must catch it before it
-    treats an exception as a failure.
-    """
-
+CLOSE_WAIT = 5.0
+"""Seconds ``LiveSource.close`` waits for the calls in flight to return after their groups died."""
 
 READ_COMMANDS = frozenset({"prs", "snapshot", "snapshots", "diff"})
 
@@ -132,6 +137,35 @@ def in_process_runner(
     return run
 
 
+def _kill_group(pid: int, pgid: int) -> None:
+    """SIGKILL the group of a child this process started, if its leader is not reaped yet.
+
+    The caller only passes tracked groups (see ``_Call``), which is what guards a reaped leader
+    where the gateway can observe the leader's exit without reaping it (``waitid`` on Linux,
+    kqueue on macOS); its poll-mode fallback reaps before the group is untracked. Where
+    ``os.waitid`` exists the leader is checked as well: it is ours, so
+    ``waitid(WNOWAIT)`` answers for exactly that PID without reaping it, and
+    ``ChildProcessError`` means it is gone and its number may belong to another process now.
+    """
+    if hasattr(os, "waitid"):
+        try:
+            os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            return
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, signal.SIGKILL)
+
+
+class _Call:
+    """The process groups of one read that are alive now: added at launch, removed (under the
+    source lock) just before the gateway reaps the leader, so a group listed here has an
+    unreaped leader. That holds where the gateway has ``waitid`` or kqueue (Linux and macOS); its
+    poll-mode fallback reaps inside ``proc.poll()``, before the removal runs."""
+
+    def __init__(self) -> None:
+        self.groups: set[tuple[int, int]] = set()
+
+
 class LiveSource:
     """``DataSource`` over a runner. ``LiveSource()`` uses the in-process handlers."""
 
@@ -143,11 +177,23 @@ class LiveSource:
         timeout: float | None = None,
     ) -> None:
         self._runner = runner or in_process_runner(config_path, timeout=timeout)
+        self._cond = threading.Condition()
+        self._closed = False
+        self._calls: list[_Call] = []
+
+    def close(self) -> None:
+        """End every read in flight and refuse later ones (see the module docstring). Idempotent."""
+        with self._cond:
+            self._closed = True
+            for call in self._calls:
+                for pid, pgid in call.groups:
+                    _kill_group(pid, pgid)
+            self._cond.wait_for(lambda: not self._calls, timeout=CLOSE_WAIT)
 
     def _run(self, argv: list[str]) -> dict[str, Any]:
         try:
             return self._runner(argv)
-        except ForgectlError:
+        except (ForgectlError, Cancelled):
             raise
         except Exception as exc:  # a handler bug: the type only, its text may hold anything
             raise ForgectlError("internal", f"{argv[0]}: {type(exc).__name__}") from exc
@@ -172,7 +218,7 @@ class LiveSource:
             argv.append(f"--review-requested-from={review_requested_from}")
         argv += [f"--state={state}", f"--limit={limit}"]
         try:
-            return self._run(argv)
+            return self._tracked(argv, None, "prs")
         except ForgectlError as err:
             if err.code == "partial_results" and isinstance(err.output, dict):
                 return {**err.output, "complete": False}
@@ -191,30 +237,64 @@ class LiveSource:
     ) -> dict[str, Any]:
         """The ``snapshots --bulk-only`` output of ``prs``: what the bulk reader read whole as
         ``items``, the rest in ``failed`` (the caller reads those with ``snapshot``). Thread-safe;
-        ``cancelled`` is checked once before the call, as for ``snapshot``."""
+        like ``snapshot``, the read is cancellable and ``close`` kills it."""
         for pr in prs:
             if not is_pr(pr):  # also keeps an option-looking value out of the argument list
                 raise ForgectlError("invalid_pr", "snapshots: not a PR in the form host/path#N")
         if not prs:
             return {"items": [], "failed": [], "complete": True, "errors": []}
-        self._check_cancelled(prs[0], cancelled)
-        # todo(#93): route through self._tracked(["snapshots", "--bulk-only", *prs], cancelled,
-        # prs[0]) once live-read cancellation lands
-        return self._run(["snapshots", "--bulk-only", *prs])
+        return self._tracked(["snapshots", "--bulk-only", *prs], cancelled, prs[0])
 
     def _one(self, command: str, pr: str, cancelled: Callable[[], bool] | None) -> dict[str, Any]:
-        # `cancelled` is checked here only, before the call: see TODO(#93) in the module docstring.
         if not is_pr(pr):  # also keeps an option-looking value out of the argument list
             raise ForgectlError("invalid_pr", f"{command}: not a PR in the form host/path#N")
-        self._check_cancelled(pr, cancelled)
-        return self._run([command, pr])
+        return self._tracked([command, pr], cancelled, pr)
 
-    @staticmethod
-    def _check_cancelled(pr: str, cancelled: Callable[[], bool] | None) -> None:
-        if cancelled is not None:
+    def _tracked(
+        self, argv: list[str], cancelled: Callable[[], bool] | None, subject: str
+    ) -> dict[str, Any]:
+        """Run one read inside a ``CallScope`` that this source can cancel and kill (``prs``,
+        ``snapshot``, ``diff`` and ``snapshots`` all come through here)."""
+
+        def stop() -> bool:
+            if self._closed:
+                return True
+            if cancelled is None:
+                return False
             try:
-                stop = cancelled()
+                return cancelled()
             except Exception as exc:  # the caller's callable: its text may hold anything
                 raise ForgectlError("internal", f"cancelled: {type(exc).__name__}") from exc
-            if stop:
-                raise Cancelled(pr)
+
+        call = _Call()
+
+        def spawned(pid: int, pgid: int) -> None:
+            with self._cond:
+                call.groups.add((pid, pgid))
+                if self._closed:  # closed between the last check and the start of the child
+                    _kill_group(pid, pgid)
+
+        def reaped(pid: int, pgid: int) -> None:
+            with self._cond:  # close() holds this lock while it signals: never after the reap
+                call.groups.discard((pid, pgid))
+
+        def done() -> None:
+            with self._cond:
+                call.groups.clear()  # the leader is reaped: the numbers may be reused
+
+        with self._cond:
+            if self._closed:
+                raise Cancelled(subject)
+            self._calls.append(call)
+        token = CALL_SCOPE.set(
+            CallScope(cancelled=stop, on_spawn=spawned, on_done=done, on_reap=reaped)
+        )
+        try:
+            if stop():  # before the first host call, whatever the runner is
+                raise Cancelled(subject)
+            return self._run(argv)
+        finally:
+            CALL_SCOPE.reset(token)
+            with self._cond:
+                self._calls.remove(call)
+                self._cond.notify_all()

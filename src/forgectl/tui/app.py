@@ -345,6 +345,7 @@ class BrowseApp(App[None]):
         self._list_complete = True
         self._list_errors = 0
         self._source_cancels = _accepts_cancelled(source)
+        self._diff_cancels = _accepts_cancelled(source, "diff")
         self.concurrency = max(0, concurrency)  # 0: the rows' snapshots are not loaded
         self.clock = clock
         self.source = source
@@ -484,6 +485,8 @@ class BrowseApp(App[None]):
         try:
             try:
                 listing: Listing = await in_thread(load_list, self.source)
+            except Cancelled:
+                return  # the source was closed (quitting): nothing to show
             except Exception as exc:  # a source bug must not take the UI down
                 self._list_note = self._internal(exc)  # the rows on screen stay
                 self._paint(self._list_note, self._detail_note)
@@ -1077,15 +1080,21 @@ class BrowseApp(App[None]):
         diff_note: str | None = None
         outcome = ""
         try:
-            snap = await in_thread(self.source.snapshot, pr)
+
+            def stale() -> bool:  # a newer request replaced this one: no further host call
+                return token != self._detail_token
+
+            snap = await in_thread(self._detail_read, "snapshot", pr, stale)
             self._row_refreshed(pr, snap)
             try:
-                diff: dict[str, Any] | None = await in_thread(self.source.diff, pr)
+                diff: dict[str, Any] | None = await in_thread(self._detail_read, "diff", pr, stale)
             except ForgectlError as err:
                 diff = None
                 diff_note = f"diff: {err.code}: {err.message}"
             # Sanitizing and laying out a large pane happens off the event loop.
             detail = await in_thread(render.detail_of, snap, diff)
+        except Cancelled:
+            return  # a newer request replaced this one before its next host call
         except ForgectlError as err:
             outcome = f"{err.code}: {err.message}"
             self._row_failed(pr, safe.line(err.code, 60))
@@ -1105,6 +1114,12 @@ class BrowseApp(App[None]):
                 outcome = self._internal(exc)
         self._detail_note = outcome
         self._status(outcome)
+
+    def _detail_read(self, what: str, pr: str, cancelled: Callable[[], bool]) -> dict[str, Any]:
+        """Runs on a worker thread: the detail's ``snapshot`` or ``diff``, told when it is stale."""
+        read = getattr(self.source, what)
+        accepts = self._source_cancels if what == "snapshot" else self._diff_cancels
+        return read(pr, cancelled=cancelled) if accepts else read(pr)  # type: ignore[no-any-return]
 
     def _row_refreshed(self, pr: str, snap: dict[str, Any]) -> None:
         """The detail's snapshot is also the row's fresh data."""
@@ -1338,9 +1353,9 @@ class BrowseApp(App[None]):
             pass
 
 
-def _accepts_cancelled(source: object) -> bool:
-    """Whether ``source.snapshot`` takes the ``cancelled`` callable (``LiveSource`` does)."""
+def _accepts_cancelled(source: object, name: str = "snapshot") -> bool:
+    """Whether ``source.snapshot`` (or ``name``) takes the ``cancelled`` callable."""
     try:
-        return "cancelled" in inspect.signature(source.snapshot).parameters  # type: ignore[attr-defined]
+        return "cancelled" in inspect.signature(getattr(source, name)).parameters
     except (TypeError, ValueError, AttributeError):
         return False
