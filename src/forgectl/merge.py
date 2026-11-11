@@ -16,7 +16,9 @@ after it stops the remaining hooks and the run ends with the recorded outcome. N
 
 TODO(#23): ``--auto`` (the GitHub ``enablePullRequestAutoMerge`` mutation, GitLab's flags, the
 ``already armed`` row, the ``--auto`` rows of the checks and the head-match availability step).
-TODO(#22): the GitLab backend's ``merge`` (the method table, ``squash`` only after the checks).
+GitLab (#22) is the same sequence: ``backends/gitlab_merge.py`` owns its write, and a backend may
+offer ``check_method`` (a refusal of a method the read shows it cannot get, applied with the other
+checks) and ``merged_method`` (the method that merged, where the host has none to send).
 """
 
 from __future__ import annotations
@@ -119,14 +121,17 @@ def _still_allowed(pr: PR, method: str) -> None:
         )
 
 
-def resolve_method(inv: registry.Invocation, pr: PR) -> str:
+def resolve_method(inv: registry.Invocation, pr: PR) -> str | None:
     """Merge method (interface: Merge method): ``--method``, else ``repos.<id>.merge_method``,
-    else the only allowed one, else ``method_required``. A method the repo disallows is
-    ``method_not_allowed``; with the allowed list unknown the host decides."""
+    else the only allowed one, else ``method_required``; on GitLab, else none: the project's own
+    setting decides. A method the repo disallows is ``method_not_allowed``; with the allowed list
+    unknown the host decides."""
     allowed = pr.merge_methods_allowed
     listed = _allowed_list(pr)
     chosen = inv.config.merge_method_for(pr.repo, flag=inv.args.method)
     if chosen is None:
+        if allowed is not None and pr.backend == "gitlab":
+            return None
         if allowed is not None and len(listed) == 1:
             return listed[0]
         raise ForgectlError(
@@ -249,6 +254,9 @@ class MergeRun:
             method = resolve_method(self.inv, pr)
         else:
             _still_allowed(pr, method)
+        check = getattr(self.backend, "check_method", None)
+        if check is not None:
+            check(pr, method)
         blockers = self._effective_blockers(read)
         self._remember(read, method)
         if blockers and not self.args.override_blocks:
@@ -291,9 +299,6 @@ class MergeRun:
             raise ForgectlError("internal", "merge --auto: not implemented yet")
         if args.override_blocks and not self.human.is_human:  # the gate already refused it
             raise usage("--override-blocks is human-only")
-        if self.backend.name == "gitlab":
-            # TODO(#22): the GitLab backend's merge; refused before any read, hook or record
-            raise ForgectlError("internal", "gitlab merge is not implemented yet (#22)")
         try:
             return self._run()
         except ForgectlError as err:
@@ -660,9 +665,15 @@ class MergeRun:
             "auto_merge_enabled": False,
             "merged_head_sha": pr.merged_head_sha,
             "merge_commit_sha": pr.merge_commit_sha,
-            "method": None if outcome.already else method,
+            "method": None if outcome.already else self._reported(pr, method),
             "dry_run": False,
         }
+
+    def _reported(self, pr: PR, method: str | None) -> str | None:
+        """What merged: the method sent, or what the backend derives from the merged PR where the
+        host has no per-merge method (GitLab)."""
+        derive = getattr(self.backend, "merged_method", None)
+        return method if derive is None else derive(pr, method)
 
     def _already_merged_output(self, pr: PR) -> dict[str, Any]:
         out: dict[str, Any] = {

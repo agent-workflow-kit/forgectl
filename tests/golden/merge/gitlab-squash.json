@@ -1,0 +1,10 @@
+{
+  "already_merged": false,
+  "auto_merge_enabled": false,
+  "dry_run": false,
+  "merge_commit_sha": "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+  "merged": true,
+  "merged_head_sha": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+  "method": "squash",
+  "pr": "gitlab.com/user-9/proj#7"
+}

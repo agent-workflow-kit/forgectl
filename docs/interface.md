@@ -404,7 +404,7 @@ Every `merge` follows one order:
      |---|---|
      | any 2xx | step 9 |
      | 409 (either host), or GraphQL `expected head oid` | exit 20, `stale_head`, per the [write table](#reliability) |
-     | 405 (either host) | one re-read: merged at the expected head and base: audit `merged`, `post-merge` fires, output `already_merged: true`; merged otherwise: `merge_unverified` as in step 9; open with blockers exits 20 `not_ready`; GitHub wording naming the method exits 20 `method_not_allowed`; else exit 12 `host_rejected`. GitHub's `Base branch was modified` is `host_rejected`, and a caller may retry |
+     | 405 (either host; on GitLab also 406 and 422) | one re-read: merged at the expected head and base: audit `merged`, `post-merge` fires, output `already_merged: true`; merged otherwise: `merge_unverified` as in step 9; open with blockers exits 20 `not_ready`; GitHub wording naming the method exits 20 `method_not_allowed`; else exit 12 `host_rejected`. GitHub's `Base branch was modified` is `host_rejected`, and a caller may retry |
      | 5xx, timeout, no status | step 9 decides; a PR still open exits 12 `outcome_unknown` |
      | anything else | the [write table](#reliability) |
 
@@ -430,7 +430,7 @@ GitLab has no per-merge method; the method is a project setting, and forgectl va
 | `rebase` | `ff` | not `always` | no `squash` | `method_not_allowed` |
 | none | any | any | no `squash` | |
 
-`squash=false` on a merge call does nothing, so forgectl does not send it. `merge` or `rebase` on an MR with `squash_on_merge: true` exits 20 (`method_not_allowed`). forgectl never calls `/rebase`: it would change the head.
+`squash=false` on a merge call does nothing, so forgectl does not send it. `merge` or `rebase` on an MR with `squash_on_merge: true` exits 20 (`method_not_allowed`, `details.allowed: ["squash"]`) before any hook or write. With no method, nothing is sent and the project decides, as long as `merge_methods_allowed` is known. forgectl never calls `/rebase`: it would change the head.
 
 Output `method` is what merged: null when nothing has merged yet, and null for `already_merged`, where someone else merged and what merged is unknown (the `post-merge` payload's `method` too). Audit `inputs.method` is the method sent, if any. On GitLab it is derived from `squash_on_merge` and `squash_commit_sha` (not `squash`) and the project's `merge_method`, so it is reported with no flag as well.
 

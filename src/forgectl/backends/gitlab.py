@@ -28,6 +28,7 @@ from ..hosts import Hosts, User, redact_secrets
 from ..identifiers import PrRef, RepoRef, bind_login
 from ..reads import SHOW_READINESS, ReadEnv
 from ..sanitize import sanitize_line, sanitize_text
+from . import gitlab_merge
 
 T = TypeVar("T")
 
@@ -86,6 +87,10 @@ _MAX_ID = 2**63
 Retry = Callable[[Callable[[], Response]], Response]
 #: `until_known(fetch, is_unknown)` gives the answer and whether it is still unknown.
 UntilKnown = Callable[[Callable[[], Response], Callable[[Response], bool]], tuple[Response, bool]]
+#: `ReadEnv.until_known`: the same loop with the spec (a `Readiness`) as the third argument.
+ReadinessLoop = Callable[
+    [Callable[[], Response], Callable[[Response], bool], m.Readiness], tuple[Response, bool]
+]
 _SUB_FAILURES = frozenset({"not_found", "permission_denied"})
 
 
@@ -285,10 +290,6 @@ def _effect(check: m.Check) -> int:
     return {"failing": 3, "pending": 2}.get(check.state, 0)
 
 
-def _not_yet(command: str, issue: int) -> ForgectlError:
-    return ForgectlError("internal", f"gitlab {command} is not implemented yet (#{issue})")
-
-
 class GitLabBackend:
     """`Backend` for GitLab hosts. One instance per command: it caches the version, bot lookups
     and membership answers per process, as the interface says."""
@@ -304,6 +305,7 @@ class GitLabBackend:
         today: Callable[[], date] | None = None,
         until_known: UntilKnown | None = None,
         call: Callable[[Callable[[], User]], User] | None = None,
+        readiness_loop: ReadinessLoop | None = None,
     ) -> None:
         self._hosts = hosts
         #: retries the one `GET /user` read that names me for `activity` (no retry when omitted)
@@ -312,6 +314,10 @@ class GitLabBackend:
         self._warn_to = warn or _noop
         self._retry: Retry = retry or _direct
         self._until_known: UntilKnown = until_known or _single_read
+        #: the loop with a caller-chosen spec, for a `get_pr` that passes its own readiness
+        self._readiness_loop = readiness_loop
+        #: per merge request (its `pr` id), what the last read showed that `merge` needs (#22)
+        self._merge_facts: dict[str, gitlab_merge.MergeFacts] = {}
         self._today = today or (lambda: datetime.now(UTC).date())
         self._versions: dict[str, tuple[int, int] | None] = {}
         self._bots: dict[tuple[str, int], bool | None] = {}
@@ -327,6 +333,7 @@ class GitLabBackend:
             retry=env.call,
             call=env.call,
             until_known=lambda fetch, unknown: env.until_known(fetch, unknown, SHOW_READINESS),
+            readiness_loop=env.until_known,
         )
 
     # -- plumbing ------------------------------------------------------------------------------
@@ -426,8 +433,12 @@ class GitLabBackend:
     ) -> tuple[m.PrRead, PrParts]:
         """`get_pr`, and the raw reads it made (the MR and its reviewer rows) so `snapshot` and
         `reviews` use them instead of reading the same resources again (#117)."""
-        # ``readiness`` is taken for the protocol and not used yet: the readiness loop is the
-        # injected ``until_known`` (show's). TODO(#22): GitLab merge passes its own readiness.
+        # ``readiness`` (merge's) replaces show's spec for the single-MR GET when the adapter was
+        # built with a loop that takes one; the injected ``until_known`` is show's.
+        until_known: UntilKnown = self._until_known
+        if readiness is not None and self._readiness_loop is not None:
+            loop, spec = self._readiness_loop, readiness
+            until_known = lambda fetch, unknown: loop(fetch, unknown, spec)  # noqa: E731
         raw_number: Any = ref.number
         if (
             isinstance(raw_number, bool)
@@ -441,9 +452,7 @@ class GitLabBackend:
         number = int(path_int(raw_number))
         segments = ["projects", ref.project, "merge_requests", str(number)]
         # Only this GET is rechecked while the readiness is unknown; every other read follows once.
-        response, _ = self._until_known(
-            lambda: self._get(target, segments, sub=False), _status_unknown
-        )
+        response, _ = until_known(lambda: self._get(target, segments, sub=False), _status_unknown)
         mr = _obj(response.data, "merge request")
         canonical = self._canonical_path(mr.get("web_url"), target, number)
         iid = _int_id(mr.get("iid"), "iid")
@@ -572,6 +581,7 @@ class GitLabBackend:
             approvals_at_head=at_head,
             approvals_left=approvals_left,
         )
+        self._merge_facts[pr.pr] = gitlab_merge.facts_from(mr, project, project_id)
         parts = PrParts(
             project_id=project_id,
             mr_id=_int_id(mr.get("id"), "id"),
@@ -1237,7 +1247,25 @@ class GitLabBackend:
         return gitlab_lists.whoami(self, host)
 
     def merge(self, pr: m.PR, *, sha: str, method: str | None) -> m.MergeAnswer:
-        raise _not_yet("merge", 22)  # TODO(#22): GitLab merge
+        host = pr.repo.partition("/")[0]
+        return gitlab_merge.put_merge(
+            self._gateway,
+            self._hosts.target(host),
+            pr,
+            self._merge_facts.get(pr.pr),
+            sha=sha,
+            method=method,
+        )
+
+    def check_method(self, pr: m.PR, method: str | None) -> None:
+        """Refuse a method the MR cannot get (read by `merge.py` before any hook or write)."""
+        facts = self._merge_facts.get(pr.pr)
+        if facts is not None:
+            gitlab_merge.check_method(facts, method)
+
+    def merged_method(self, pr: m.PR, sent: str | None) -> str | None:
+        """The method that merged, derived from the last read (see `gitlab_merge`)."""
+        return gitlab_merge.reported_method(self._merge_facts.get(pr.pr), sent)
 
 
 __all__ = ["MAX_PAGES", "READINESS_UNKNOWN", "GitLabBackend", "UntilKnown"]
