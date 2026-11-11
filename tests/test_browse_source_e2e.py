@@ -9,6 +9,8 @@ import asyncio
 import json
 import subprocess
 import sys
+import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +26,8 @@ from forgectl.tui.app import BrowseApp  # noqa: E402
 from forgectl.tui.source import load_list  # noqa: E402
 from forgectl.tui.source_live import LiveSource  # noqa: E402
 
-from .harness.fixtures import forgectl_env  # noqa: E402
+from .bulk_support import bulk_answer  # noqa: E402
+from .harness.fixtures import direct_children, forgectl_env  # noqa: E402
 from .harness.forges import FakeForges  # noqa: E402
 from .test_github_diff import PR_ENDPOINT, RECORDINGS, pull, recording  # noqa: E402
 from .test_github_lists import recording as list_recording  # noqa: E402
@@ -34,6 +37,20 @@ from .test_snapshot_cli import script as script_snapshot
 from .tui_fakes import FakeOpener  # noqa: E402
 
 FAILED_CODE = "not_found"
+
+
+@pytest.fixture(autouse=True)
+def drained_children() -> Iterator[None]:
+    """The app reads forges on daemon threads (so `q` never waits for a slow read), and leaving
+    the test context can beat a read that a newer round replaced: its fake `gh` is still ending
+    when the leaked-child check runs. Give those reads time to finish and be reaped (their own
+    gateway reaps them) before that check, which runs after this teardown. This cannot tell a child
+    the gateway killed from one that exits on its own within the 30 s: it only waits for both."""
+    before = direct_children()
+    yield
+    deadline = time.monotonic() + 30
+    while direct_children() - before and time.monotonic() < deadline:
+        time.sleep(0.02)
 
 
 @pytest.fixture
@@ -158,6 +175,11 @@ def test_the_filter_reaches_the_host_query(forged: FakeForges, tmp_path: Path) -
 
 def snapshot_and_diff_fakes(forges: FakeForges) -> None:
     script_snapshot(forges)
+    # the first load of `browse` asks `snapshots` first (#116): it answers the first alias only,
+    # so the rows after it are given to the per-row `snapshot` pool, as they were before
+    forges.answer(
+        "gh", "graphql", method="POST", stdin_re=r"query ForgectlBulk\b", body=bulk_answer(7)
+    )
     doc = pull(changed_files=1)  # the `diff` read, as in test_diff_cli
     forges.answer("gh", PR_ENDPOINT, body=doc, times=1)
     forges.answer("gh", PR_ENDPOINT, body_text=(RECORDINGS / "pull.diff").read_text(), times=1)
@@ -365,3 +387,29 @@ def _empty_search() -> dict[str, Any]:
     doc["data"]["search"]["nodes"] = []
     doc["data"]["search"]["issueCount"] = 0
     return doc
+
+
+def test_the_first_load_reads_a_row_through_the_bulk_query_not_one_by_one(
+    forged: FakeForges, config: Path
+) -> None:
+    two_hosts_one_failing(forged)
+    snapshot_and_diff_fakes(forged)
+    app = BrowseApp(
+        LiveSource(config_path=str(config)), FakeOpener(), focus=None, detail_collapsed=()
+    )
+
+    async def go() -> None:
+        async with app.run_test(size=(140, 50)) as pilot:
+            await _settle(app, pilot)
+            for _ in range(300):  # the rows after PR 7 are still read one by one: let them end
+                if not app._busy:
+                    break
+                await pilot.pause(0.1)
+            await _settle(app, pilot)
+            assert app._states[PR].status == "loaded"
+
+    asyncio.run(go())
+    requests = [json.loads(c.stdin) for c in forged.calls("gh") if c.stdin]
+    assert any("ForgectlBulk" in r.get("query", "") for r in requests)
+    shows = [r for r in requests if "ForgectlShow" in r.get("query", "")]
+    assert all(r["variables"]["number"] != 7 for r in shows)  # PR 7 never needed its own read

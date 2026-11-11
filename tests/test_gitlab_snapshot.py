@@ -874,42 +874,28 @@ def approvals_sequence(fake: FakeGitLab, answers: list[Any]) -> dict[str, int]:
     return state
 
 
-def test_a_table_that_changed_between_show_and_the_parts_is_read_again(
+def test_the_table_is_read_once_and_the_snapshot_uses_show_s(
     fake: FakeGitLab, tmp_path: Path
 ) -> None:
+    """#117: the approvals are no longer read a second time to compare with `show`'s table."""
     rig = Rig(fake, tmp_path)
     base = recording("approvals")
     changed = copy.deepcopy(base)
     changed["approved_by"] = []
     changed["approvals_left"] = 1
-    approvals_sequence(fake, [base, changed])  # show sees one, the parts see another, then stable
+    state = approvals_sequence(fake, [base, changed])
     out = rig.snapshot()
-    assert out["latest_by_reviewer"] == []
-    assert out["approvals"] == 0
+    assert state["n"] == 1
+    assert [e["login"] for e in out["latest_by_reviewer"]] == ["user-2"]  # the base table
+    assert out["approvals"] == 1  # `show`'s reading, not the later `changed` one
 
 
-def test_a_table_that_never_settles_is_an_upstream_error(fake: FakeGitLab, tmp_path: Path) -> None:
+def test_reviews_reads_the_table_once_too(fake: FakeGitLab, tmp_path: Path) -> None:
     rig = Rig(fake, tmp_path)
-    base = recording("approvals")
-    changed = copy.deepcopy(base)
-    changed["approved_by"] = []
-    approvals_sequence(fake, [base, changed, base, changed])
-    with pytest.raises(ForgectlError) as raised:
-        rig.snapshot()
-    assert raised.value.code == "upstream_error"
-    assert "changed while" in raised.value.message
-    assert fake.count(mr_path()) >= 2
-
-
-def test_reviews_repeats_once_on_a_moved_table_too(fake: FakeGitLab, tmp_path: Path) -> None:
-    rig = Rig(fake, tmp_path)
-    base = recording("approvals")
-    changed = copy.deepcopy(base)
-    changed["approved_by"] = []
-    approvals_sequence(fake, [base, changed, base, changed])
-    with pytest.raises(ForgectlError) as raised:
-        rig.reviews()
-    assert raised.value.code == "upstream_error"
+    state = approvals_sequence(fake, [recording("approvals"), {"approved_by": []}])
+    out = rig.reviews()
+    assert state["n"] == 1
+    assert out["latest_by_reviewer"] != []
 
 
 def mr_sequence(fake: FakeGitLab, docs: list[dict[str, Any]]) -> None:
@@ -931,8 +917,8 @@ def test_a_head_that_moved_during_the_reading_repeats_it_then_fails(
     moved = copy.deepcopy(first)
     moved["sha"] = "d4" * 20
     moved["head_pipeline"]["sha"] = "d4" * 20
-    # show (1), the parts' read (2), the closing check (3) sees another head: repeat; then again
-    mr_sequence(fake, [first, first, moved, first, first, moved])
+    # show (1), the closing check (2) sees another head: repeat; then again
+    mr_sequence(fake, [first, moved, first, moved])
     with pytest.raises(ForgectlError) as raised:
         rig.snapshot()
     assert raised.value.code == "upstream_error" and "changed while" in raised.value.message
@@ -1249,7 +1235,7 @@ def test_warnings_of_a_discarded_attempt_are_not_written(fake: FakeGitLab, tmp_p
     moved = copy.deepcopy(first)
     moved["sha"] = "d4" * 20
     moved["head_pipeline"]["sha"] = "d4" * 20
-    mr_sequence(fake, [first, first, moved, first, first, first])
+    mr_sequence(fake, [first, moved, first, first])
     out = rig.snapshot()
     assert push_of(out) == ("2026-10-02T11:35:00Z", "push_event")
     assert fake.count(VERSIONS) == 2
@@ -1277,7 +1263,7 @@ def test_reviews_fails_when_the_head_keeps_moving_at_the_closing_check(
     moved = copy.deepcopy(first)
     moved["sha"] = "d4" * 20
     moved["head_pipeline"]["sha"] = "d4" * 20
-    mr_sequence(fake, [first, first, moved, first, first, moved])
+    mr_sequence(fake, [first, moved, first, moved])
     with pytest.raises(ForgectlError) as raised:
         rig.reviews()
     assert raised.value.code == "upstream_error" and "changed while" in raised.value.message
@@ -1291,9 +1277,9 @@ def test_reviews_reads_again_after_one_move_at_the_closing_check(
     moved = copy.deepcopy(first)
     moved["sha"] = "d4" * 20
     moved["head_pipeline"]["sha"] = "d4" * 20
-    mr_sequence(fake, [first, first, moved, first, first, first])
+    mr_sequence(fake, [first, moved, first, first])
     out = rig.reviews()
-    assert out["head_sha"] == HEAD and fake.count(mr_path()) == 6
+    assert out["head_sha"] == HEAD and fake.count(mr_path()) == 4
 
 
 # -- activity (#57) -------------------------------------------------------------------------------
@@ -1479,3 +1465,53 @@ def test_me_is_read_once_for_the_run(rig: Rig) -> None:
     rig.snapshot()
     rig.snapshot()
     assert rig.fake.count("user") == 1
+
+
+# -- one read per resource (#117) ----------------------------------------------------------------
+
+PROJECT_APPROVALS = "projects/101/approvals"
+
+
+def test_a_snapshot_reads_each_resource_once(rig: Rig) -> None:
+    """Before #117 a snapshot made 21 reads: the MR 3 times, its reviewers 3 times and its
+    approvals and the project's approval settings twice each."""
+    rig.snapshot()
+    calls = rig.fake
+    assert calls.count(REVIEWERS) == 1
+    assert calls.count(APPROVALS) == 1
+    assert calls.count(PROJECT_APPROVALS) == 1
+    assert calls.count(NOTES) == 1 and calls.count(DISCUSSIONS) == 1
+    # the MR is read to open the snapshot and once more to close it: the closing read is kept to
+    # catch a push that landed while the pages were read (the documented freshness check)
+    assert calls.count(mr_path()) == 2
+    assert len(calls.calls) == 16
+
+
+def test_reviews_reads_each_resource_once_and_the_mr_twice(rig: Rig) -> None:
+    rig.reviews()
+    assert rig.fake.count(REVIEWERS) == 1
+    assert rig.fake.count(APPROVALS) == 1
+    assert rig.fake.count(PROJECT_APPROVALS) == 1
+    assert rig.fake.count(mr_path()) == 2
+
+
+def test_the_readiness_recheck_still_rereads_the_mr(fake: FakeGitLab, tmp_path: Path) -> None:
+    """The single-MR GET that waits for `detailed_merge_status` is repeated by the readiness loop:
+    that repeat stays, and nothing else is read again because of it."""
+    rig = Rig(fake, tmp_path)
+
+    def until_known(fetch: Any, unknown: Any) -> tuple[Any, bool]:
+        response = fetch()
+        while unknown(response):
+            response = fetch()
+        return response, False
+
+    rig.backend._until_known = until_known
+    computing = recording("mr")
+    computing["detailed_merge_status"] = "checking"
+    ready = recording("mr")
+    mr_sequence(fake, [computing, ready])
+    out = rig.snapshot()
+    assert out["pr"] == "gitlab.com/user-9/proj#7"
+    assert fake.count(REVIEWERS) == 1 and fake.count(APPROVALS) == 1
+    assert fake.count(mr_path()) == 3  # computing read, ready read, closing read
