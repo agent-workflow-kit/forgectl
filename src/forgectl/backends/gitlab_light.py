@@ -2,8 +2,11 @@
 was asked to review, from one GraphQL request for both lists.
 
 ``currentUser`` names the account, so a configured ``me`` is not consulted (as for the bulk
-reader). The query selects ``iid project updatedAt diffHeadSha approvalsLeft approved
-detailedMergeStatus userNotesCount headPipeline { status }`` and the few fields a new row shows.
+reader). The query selects ``id iid webUrl title draft updatedAt diffHeadSha approved
+approvalsLeft detailedMergeStatus userNotesCount author { username } headPipeline { status }``.
+Each value is checked as ``prs`` and ``snapshots`` check it (sha, login, RFC 3339 time), and the
+host's own words are sanitized; a bad value fails the host. A null ``diffHeadSha`` (a merge
+request with no diff yet) is the head sha ``""``; a null node is skipped and the list incomplete.
 The host is probed once per process by ``gitlab_bulk.probe``: a host that fails it is
 ``LightUnsupported`` and the caller reads its lists with ``prs``. A list with another page is read
 page by page, up to ``MAX_PAGES``; beyond that the poll is incomplete.
@@ -19,6 +22,7 @@ from ..errors import ForgectlError
 from ..gateway import Target
 from ..reads import ReadEnv
 from ..sanitize import sanitize_line
+from . import gitlab as gl
 from . import gitlab_bulk
 from .gitlab import GitLabBackend
 from .light_common import LightItem, LightPage, LightUnsupported
@@ -95,6 +99,7 @@ def _item(backend: GitLabBackend, target: Target, node: object, role: str) -> Li
     approved = raw.get("approved")
     status = pipeline.get("status") if pipeline else None
     login = author.get("username") if author else None
+    head = raw.get("diffHeadSha")
     draft = raw.get("draft")
     if not isinstance(draft, bool):
         raise _Bad("draft")
@@ -105,14 +110,14 @@ def _item(backend: GitLabBackend, target: Target, node: object, role: str) -> Li
         number=number,
         url=f"https://{host}{prefix}/{canonical}/-/merge_requests/{number}",
         title=sanitize_line(_text(raw.get("title"), "title")),
-        author=login if isinstance(login, str) else None,
+        author=None if login is None else gl._login(login, "author"),
         draft=draft,
-        head_sha=_text(raw.get("diffHeadSha"), "diffHeadSha"),
-        updated_at=_text(raw.get("updatedAt"), "updatedAt"),
-        ci_state=status if isinstance(status, str) else None,
+        head_sha="" if head is None or head == "" else gl._sha(head, "diffHeadSha"),
+        updated_at=gl._required_time(raw.get("updatedAt"), "updatedAt"),
+        ci_state=sanitize_line(status) if isinstance(status, str) else None,
         approvals_left=_int(raw.get("approvalsLeft")),
         approved=approved if isinstance(approved, bool) else None,
-        merge_status=detailed if isinstance(detailed, str) else None,
+        merge_status=sanitize_line(detailed) if isinstance(detailed, str) else None,
         notes_count=_int(raw.get("userNotesCount")),
         roles=(role,),
     )
@@ -130,6 +135,7 @@ def read_light(
     target = env.hosts.target(host)
     backend = GitLabBackend.from_env(env)
     merged: dict[str, LightItem] = {}
+    whole = True  # false once a null node was skipped
     cursors: dict[str, str | None] = {"a": None, "r": None}
     active = {"a": True, "r": True}
     for _ in range(MAX_PAGES):
@@ -155,13 +161,17 @@ def read_light(
                 raise ForgectlError("upstream_error", "the host gave no merge request list")
             try:
                 for node in nodes:
+                    if node is None:
+                        whole = False
+                        continue
                     item = _item(backend, target, node, role)
                     if skip is not None and skip(item.repo):
                         continue
                     have = merged.get(item.pr)
-                    merged[item.pr] = (
-                        item if have is None else replace(have, roles=(*have.roles, role))
-                    )
+                    if have is None:
+                        merged[item.pr] = item
+                    elif role not in have.roles:
+                        merged[item.pr] = replace(have, roles=(*have.roles, role))
             except _Bad as bad:
                 raise ForgectlError("upstream_error", f"unusable answer: {bad}") from None
             info = _opt(conn.get("pageInfo")) or {}
@@ -177,5 +187,5 @@ def read_light(
                 if info.get("hasNextPage") is True:  # no usable cursor: the list is cut
                     return LightPage(items=list(merged.values()), complete=False)
         if not any(active.values()):
-            return LightPage(items=list(merged.values()), complete=True)
+            return LightPage(items=list(merged.values()), complete=whole)
     return LightPage(items=list(merged.values()), complete=False)

@@ -127,6 +127,7 @@ def _read_list(
     items: list[LightItem] = []
     complete = True
     skipped = 0
+    seen: set[str] = set()  # a PR listed twice (a page shifted) counts once
     after: str | None = None
     for _ in range(MAX_PAGES):
 
@@ -164,6 +165,9 @@ def _read_list(
         if dropped:
             complete = False
         for item in found:
+            if item.pr in seen:
+                continue
+            seen.add(item.pr)
             if skip is not None and skip(item.repo):
                 skipped += 1
             else:
@@ -198,5 +202,6 @@ def read_light(
             if have is None:
                 merged[item.pr] = item
             else:
-                merged[item.pr] = replace(have, roles=(*have.roles, role))
+                if role not in have.roles:
+                    merged[item.pr] = replace(have, roles=(*have.roles, role))
     return LightPage(items=list(merged.values()), complete=complete)

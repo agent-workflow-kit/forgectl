@@ -4,11 +4,13 @@
 tuple that tells whether the PR changed. ``browse`` keeps the tuple of each row it read; a refresh
 polls, compares, and reads only the rows whose tuple differs, through the bulk reader. A source
 without ``light``, a poll that fails, a host that cannot be polled and a list the poll cut are all
-read the old way (``prs``, then the per-row snapshots): ``LightFallback`` says why.
+read the old way (``prs``, then the per-row snapshots): ``LightFallback`` says why. A poll that
+failed on every host for a rate limit is not followed by ``prs`` (``LightHeld``).
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from . import columns, safe
@@ -33,9 +35,26 @@ LIST_KEYS = (
 
 Key = tuple[Any, ...]
 
+#: A kept tuple that must not be trusted (its row was read outside the poll, or its read never
+#: arrived): it equals no real tuple, so the next poll reads the row.
+STALE: Key = ()
+
 
 class LightFallback(Exception):
     """The poll cannot stand in for ``prs`` this time; the text is the reason (status line)."""
+
+
+class LightUnsupportedHost(LightFallback):
+    """A host cannot be polled lightly: the source stays on the old path for the session."""
+
+
+class LightHeld(Exception):
+    """The poll failed on every host for a rate limit: ``prs`` would fail the same way, so the
+    refresh ends. ``rate_limit`` is the poll's own reading (None when the error carried none)."""
+
+    def __init__(self, text: str, rate_limit: Any = None) -> None:
+        super().__init__(text)
+        self.rate_limit = rate_limit
 
 
 def key_of(item: dict[str, Any]) -> Key:
@@ -99,12 +118,17 @@ def load_light(source: DataSource, current: dict[str, Row]) -> Listing:
     errors_raw = answer.get("errors") or []
     queried = answer.get("hosts_queried") or []
     if answer.get("unsupported"):
-        raise LightFallback("a host cannot be polled lightly")
+        raise LightUnsupportedHost("a host cannot be polled lightly")
+    if answer.get("truncated"):
+        raise LightFallback("the light poll was cut")  # whatever else failed: rows would be lost
     if not answer.get("complete", False) and not errors_raw:
         raise LightFallback("the light poll was cut")
     if errors_raw and len(errors_raw) >= max(1, len(queried)):
+        if all(isinstance(e, dict) and e.get("code") == "rate_limited" for e in errors_raw):
+            raise LightHeld("rate_limited", answer.get("rate_limit"))
         raise LightFallback("the light poll failed on every host")
     rows: list[Row] = []
+    moved: set[str] = set()
     failed_hosts: set[str] = set()
     hosts_unknown = False
     errors: list[str] = []
@@ -127,8 +151,14 @@ def load_light(source: DataSource, current: dict[str, Row]) -> Listing:
         row = current.get(item["pr"])
         if row is None:
             row = Row(item=placeholder(item), roles=roles)
-        elif row.roles != roles:
-            row.roles = roles
+        else:
+            if row.roles != roles:
+                row.roles = roles
+            fresh = {k: item[k] for k in ("updated_at", "draft", "title") if k in item}
+            if any(row.item.get(k) != v for k, v in fresh.items()):
+                if row.item.get("updated_at") != fresh.get("updated_at"):
+                    moved.add(item["pr"])
+                row.item = {**row.item, **fresh}  # the order and the title follow the poll
         rows.append(row)
     rows.sort(key=lambda r: r.pr)
     rows.sort(key=lambda r: str(r.item.get("updated_at", "")), reverse=True)
@@ -141,6 +171,7 @@ def load_light(source: DataSource, current: dict[str, Row]) -> Listing:
         failed_hosts=failed_hosts,
         hosts_unknown=hosts_unknown,
         light_items=list(answer["items"]),
+        light_moved=moved,
     )
 
 
@@ -150,11 +181,15 @@ def changed(
     states: dict[str, columns.RowState],
     keys: dict[str, Key],
     known: set[str],
+    moved: frozenset[str] | set[str] = frozenset(),
+    keep: Callable[[str], bool] = lambda pr: False,
 ) -> set[str]:
     """The PRs to read: new to the list (not in ``known``), not loaded, stale or incomplete, or
-    whose tuple differs from the one kept. ``keys`` is updated to this poll. A PR with no kept
-    tuple (the first poll after a full read) is changed only when its update time or head sha
-    differ from its list item: the tuple cannot be compared with what the snapshot summarized."""
+    whose tuple differs from the one kept (``STALE`` differs from every tuple). ``keys`` is
+    updated to this poll. A PR with no kept tuple (the first poll after a full read) has nothing
+    to compare: it is read when its update time moved (``moved``) or its head sha differs from
+    its list item, or when its snapshot shows pending CI, as the old path reads it. The kept
+    tuples of the PRs ``keep`` names (those of a failed host) survive a poll that lacks them."""
     wanted: set[str] = set()
     for item in items:
         pr = item["pr"]
@@ -170,12 +205,16 @@ def changed(
         elif state.stale or not state.summary.complete:
             wanted.add(pr)
         elif old is None:
-            if row.item.get("updated_at") != item.get("updated_at") or head_sha(
-                row.item
-            ) != item.get("head_sha"):
+            if (
+                pr in moved
+                or head_sha(row.item) != item.get("head_sha")
+                or state.summary.ci_state == "pending"
+            ):
                 wanted.add(pr)
         elif old != key:
             wanted.add(pr)
-    for gone in set(keys) - {i["pr"] for i in items}:
-        del keys[gone]
+    listed = {i["pr"] for i in items}
+    for gone in set(keys) - listed:
+        if not keep(gone):
+            del keys[gone]
     return wanted

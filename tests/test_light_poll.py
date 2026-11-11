@@ -334,8 +334,10 @@ def test_gitlab_hidden_repos_are_dropped(probed: None) -> None:
     [
         lambda n: n.update(iid="x1"),
         lambda n: n.update(webUrl="https://evil.example/team/proj/-/merge_requests/1"),
-        lambda n: n.update(diffHeadSha=None),
+        lambda n: n.update(diffHeadSha="zz"),
         lambda n: n.update(draft="no"),
+        lambda n: n.update(updatedAt="yesterday"),
+        lambda n: n.update(author={"username": "a b"}),
     ],
 )
 def test_gitlab_a_malformed_node_is_an_error(
@@ -345,6 +347,54 @@ def test_gitlab_a_malformed_node_is_an_error(
     mutate(node)
     with pytest.raises(ForgectlError):
         gitlab_light.read_light(Stub(gl_route([node], []), "gitlab"), "gitlab.example.test")  # type: ignore[arg-type]
+
+
+def test_gitlab_a_merge_request_without_a_diff_yet_has_an_empty_head_sha(probed: None) -> None:
+    nodes = [gl_node(1), gl_node(2)]
+    nodes[0]["diffHeadSha"] = None
+    nodes[1]["diffHeadSha"] = ""
+    page = gitlab_light.read_light(Stub(gl_route(nodes, []), "gitlab"), "gitlab.example.test")  # type: ignore[arg-type]
+    assert [i.head_sha for i in page.items] == ["", ""] and page.complete is True
+
+
+def test_gitlab_a_null_node_is_skipped_and_the_list_incomplete(probed: None) -> None:
+    page = gitlab_light.read_light(
+        Stub(gl_route([gl_node(1), None], []), "gitlab"),  # type: ignore[arg-type]
+        "gitlab.example.test",
+    )
+    assert [i.number for i in page.items] == [1] and page.complete is False
+
+
+def test_gitlab_ci_and_merge_status_are_sanitized(probed: None) -> None:
+    node = gl_node(1, status="run\x1b[31m\nning", merge="a\tb\x1b[0m")
+    page = gitlab_light.read_light(Stub(gl_route([node], []), "gitlab"), "gitlab.example.test")  # type: ignore[arg-type]
+    item = page.items[0]
+    for text in (item.ci_state, item.merge_status):
+        assert text is not None and "\x1b" not in text and "\n" not in text and "\t" not in text
+
+
+def test_gitlab_a_pr_repeated_in_one_list_has_one_role(probed: None) -> None:
+    page = gitlab_light.read_light(
+        Stub(gl_route([gl_node(1), gl_node(1)], [gl_node(1)]), "gitlab"),  # type: ignore[arg-type]
+        "gitlab.example.test",
+    )
+    assert [i.roles for i in page.items] == [("authored", "requested")]
+
+
+def test_github_a_pr_repeated_in_one_list_has_one_role() -> None:
+    env = Stub(by_search([gh_node(1), gh_node(1)], []), "github")
+    page = github_light.read_light(env, "github.com", None)  # type: ignore[arg-type]
+    assert [i.roles for i in page.items] == [("authored",)]
+
+
+def test_github_a_repeat_does_not_hide_a_missing_pr_from_the_count() -> None:
+    # the host counted two PRs; the page holds one of them twice
+    def route(query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        found = [gh_node(1), gh_node(1)] if "author:octo" in variables["q"] else []
+        return gh_page(found, count=2 if found else 0)
+
+    page = github_light.read_light(Stub(route, "github"), "github.com", None)  # type: ignore[arg-type]
+    assert page.complete is False
 
 
 # -- the command ---------------------------------------------------------------------------------
@@ -425,6 +475,7 @@ def test_poll_an_unsupported_host_is_named_and_the_list_incomplete(
         {"github": LightPage([light_item(1, TS)]), "gitlab": LightUnsupported("old")},
     )
     assert out["unsupported"] == ["gitlab"] and out["complete"] is False
+    assert out["truncated"] == []
     schemas.validate_cli_output("poll", out)
 
 
@@ -437,3 +488,31 @@ def test_poll_one_host_failing_raises_its_own_error(monkeypatch: pytest.MonkeyPa
 def test_poll_a_cut_list_is_incomplete(monkeypatch: pytest.MonkeyPatch) -> None:
     out = command(monkeypatch, {"github": LightPage([light_item(1, TS)], complete=False)})
     assert out["complete"] is False
+
+
+def test_poll_names_a_cut_host_in_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
+    out = command(
+        monkeypatch,
+        {
+            "github": LightPage([light_item(1, TS)], complete=False),
+            "gitlab": LightPage([light_item(2, TS, "gl.test")]),
+        },
+    )
+    assert out["truncated"] == ["github"] and out["complete"] is False
+    schemas.validate_cli_output("poll", out)
+
+
+def test_poll_names_a_cut_host_even_when_another_host_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ForgectlError) as raised:
+        command(
+            monkeypatch,
+            {
+                "github": LightPage([light_item(1, TS)], complete=False),
+                "gitlab": ForgectlError("upstream_error", "boom"),
+            },
+        )
+    out = raised.value.output
+    assert out is not None and out["truncated"] == ["github"]
+    schemas.validate_cli_output("poll", out)

@@ -17,6 +17,7 @@ from forgectl.errors import ForgectlError
 from forgectl.tui import columns, light
 from forgectl.tui.app import BrowseApp
 from forgectl.tui.source import Row
+from forgectl.tui.source_live import Cancelled
 
 from .test_tui_app import content_of, list_prompts, settle
 from .test_tui_columns import GH, GL, prefix, snap
@@ -495,13 +496,13 @@ def test_selection_scroll_and_the_open_detail_survive_a_refresh_in_which_one_row
     source = LightSource(items)
 
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
-        await seed(app, pilot, source)
         olist = app.query_one("#list", OptionList)
         for _ in range(12):
             await pilot.press("down")
         await settle(app, pilot)
         await pilot.press("enter")  # the detail pane of the highlighted row
         await settle(app, pilot)
+        await seed(app, pilot, source)  # the first poll: the pane's read left no tuple to distrust
         shown = app._detail_pr
         assert shown is not None
         highlighted = olist.highlighted
@@ -546,6 +547,231 @@ def test_a_manual_reload_reads_the_open_detail_even_when_its_row_did_not_change(
         assert source.reads() == [app._detail_pr]  # read once, by the detail load
 
     go(source, script)
+
+
+# -- review round 1 ------------------------------------------------------------------------------
+
+
+def test_the_first_poll_reads_a_row_whose_snapshot_shows_pending_ci() -> None:
+    source = trio()
+    source.snapshots[prefix(GH, 2)] = snap(2, ci="pending", title="pr 2")
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        source.calls.clear()
+        await cycle(app, pilot)
+        assert source.reads() == [prefix(GH, 2)]
+
+    go(source, script)
+
+
+def test_the_first_poll_does_not_see_a_ci_only_change_of_a_settled_row() -> None:
+    source = trio()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        change(source, 2, ci_state="FAILURE")  # the documented limit: caught by a later full read
+        source.calls.clear()
+        await cycle(app, pilot)
+        assert source.reads() == []
+
+    go(source, script)
+
+
+def test_a_change_that_reverts_after_a_read_outside_the_poll_is_read_again() -> None:
+    source = trio()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await seed(app, pilot, source)
+        row = app._highlighted_row()
+        assert row is not None
+        pr = row.pr
+        source.lights[pr]["ci_state"] = "FAILURE"
+        await pilot.press("r")  # a read outside the poll sees the failure
+        await settle(app, pilot)
+        source.lights[pr]["ci_state"] = "SUCCESS"  # and the host reverts to the tuple kept before
+        source.calls.clear()
+        await cycle(app, pilot)
+        assert source.reads() == [pr]
+
+    go(source, script)
+
+
+def test_a_full_cycle_forgets_every_kept_tuple() -> None:
+    source = trio()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await cycle(app, pilot)
+        assert len(app._light_keys) == 3
+        await cycle(app, pilot)  # the full one, the old way
+        assert app._light_keys == {}
+
+    go(source, script, full_every=2)
+
+
+class CancellingSource(LightSource):
+    """A detail read that a newer request replaced: ``snapshot`` of ``cancel_pr`` is cancelled."""
+
+    cancel_pr: str | None = None
+
+    def snapshot(self, pr: str, cancelled: Any = None) -> dict[str, Any]:
+        if pr == self.cancel_pr:
+            raise Cancelled(pr)
+        return super().snapshot(pr, cancelled)
+
+
+def test_a_change_of_the_open_detail_row_is_not_lost_when_its_detail_load_is_cancelled() -> None:
+    source = CancellingSource([make_item(n, title=f"pr {n}") for n in (1, 2, 3)])
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await seed(app, pilot, source)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        shown = app._detail_pr
+        assert shown is not None
+        source.lights[shown]["ci_state"] = "FAILURE"
+        source.cancel_pr = shown
+        await pilot.press("R")  # the poll skips the row from its batch; the detail load dies
+        await settle(app, pilot)
+        source.cancel_pr = None
+        source.calls.clear()
+        await pilot.press("R")
+        await settle(app, pilot)
+        assert shown in source.reads()
+
+    go(source, script)
+
+
+def test_a_row_of_a_batch_that_never_arrived_is_read_by_the_next_poll() -> None:
+    source = trio()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await seed(app, pilot, source)
+        pr = prefix(GH, 2)
+        app._poll_batch = {pr}  # a round cancelled by a newer one never adopted it
+        source.calls.clear()
+        await cycle(app, pilot)
+        assert source.reads() == [pr]
+
+    go(source, script)
+
+
+def test_a_host_that_cannot_be_polled_is_remembered_for_the_session() -> None:
+    source = trio()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await seed(app, pilot, source)
+        source.answer.update(unsupported=["gitlab.example"], complete=False)
+        await cycle(app, pilot)
+        assert source.count("light") == 1 and source.count("prs") == 2
+        source.calls.clear()
+        await cycle(app, pilot)
+        await pilot.press("R")
+        await settle(app, pilot)
+        assert source.count("light") == 0 and source.count("prs") == 4
+
+    go(source, script)
+
+
+def test_a_failing_poll_keeps_falling_back_each_cycle() -> None:
+    source = trio()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await seed(app, pilot, source)
+        source.light_error = ForgectlError("upstream_error", "boom")
+        await cycle(app, pilot)
+        source.calls.clear()
+        await cycle(app, pilot)
+        assert source.count("light") == 1 and source.count("prs") == 2
+
+    go(source, script)
+
+
+@pytest.mark.parametrize("raised", [False, True])
+def test_a_rate_limited_poll_is_not_followed_by_prs_and_pauses_the_host(raised: bool) -> None:
+    source = trio()
+    clock = Clock()
+    reset = (T0 + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await seed(app, pilot, source)
+        if raised:
+            source.light_error = ForgectlError("rate_limited", "slow down")
+        else:
+            source.answer.update(
+                complete=False,
+                hosts_queried=["github.com"],
+                errors=[{"host": "github.com", "code": "rate_limited", "message": "slow down"}],
+                rate_limit={"host": "github.com", "remaining": 0, "reset_at": reset},
+            )
+        rows = list(app._rows)
+        await cycle(app, pilot)
+        assert source.count("prs") == 0 and source.reads() == []
+        assert "rate_limited" in content_of(app, "#status").plain
+        assert app._rates.low("github.com", clock.now)
+        assert app._rows == rows  # the list on screen stays
+
+    go(source, script, clock=clock)
+
+
+def test_a_poll_names_a_cut_host_and_falls_back_whatever_else_failed() -> None:
+    source = LightSource([make_item(1, repo=GH), make_item(1, repo=GL)])
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await seed(app, pilot, source)
+        source.answer.update(
+            complete=False,
+            hosts_queried=["github.com", "gitlab.example"],
+            truncated=["github.com"],
+            errors=[{"host": "gitlab.example", "code": "upstream_error", "message": "x"}],
+        )
+        await cycle(app, pilot)
+        assert source.count("prs") == 2
+        assert "cut" in (app._list_note or "")
+
+    go(source, script)
+
+
+def test_the_kept_tuples_of_a_failed_host_survive_its_failure() -> None:
+    source = LightSource([make_item(1, repo=GH), make_item(1, repo=GL)])
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await seed(app, pilot, source)
+        source.lights.pop(prefix(GL, 1))
+        source.answer.update(
+            complete=False,
+            hosts_queried=["github.com", "gitlab.example"],
+            errors=[{"host": "gitlab.example", "code": "upstream_error", "message": "x"}],
+        )
+        await cycle(app, pilot)
+        assert prefix(GL, 1) in app._light_keys
+        assert prefix(GH, 1) in app._light_keys
+
+    go(source, script)
+
+
+def test_a_manual_reload_under_the_light_path_keeps_the_every_nth_count() -> None:
+    source = trio()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await cycle(app, pilot)
+        assert app._auto_cycles == 1
+        await pilot.press("R")
+        await settle(app, pilot)
+        assert app._auto_cycles == 1 and source.count("light") == 2
+
+    go(source, script)
+
+
+def test_the_poll_time_sorts_a_row_it_does_not_read() -> None:
+    source = trio()
+    current = {i["pr"]: Row(item=copy.deepcopy(i)) for i in source.authored}
+    untouched = current[prefix(GH, 1)].item
+    pr = prefix(GH, 3)
+    source.lights[pr].update(updated_at=NEW, title="renamed", draft=True)
+    listing = light.load_light(source, current)
+    assert listing.rows[0].pr == pr and listing.rows[0] is current[pr]
+    assert listing.rows[0].item["updated_at"] == NEW
+    assert (listing.rows[0].item["title"], listing.rows[0].item["draft"]) == ("renamed", True)
+    assert current[prefix(GH, 1)].item is untouched
 
 
 _ = (asyncio, SHA_A)

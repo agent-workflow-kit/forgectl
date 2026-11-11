@@ -18,7 +18,7 @@
           "title": { "type": "string", "x-untrusted": true },
           "author": { "type": ["string", "null"], "x-untrusted": true },
           "draft": { "type": "boolean" },
-          "head_sha": { "type": "string" },
+          "head_sha": { "type": "string", "description": "The head commit; the empty string for a GitLab merge request with no diff yet." },
           "updated_at": { "type": "string" },
           "ci_state": {
             "type": ["string", "null"],
@@ -55,7 +55,7 @@
     },
     "complete": {
       "type": "boolean",
-      "description": "false when a host failed, a host cannot be polled lightly (`unsupported`), or a list was cut (more pages than the poll reads, or fewer results than the host counted)."
+      "description": "false when a host failed, a host cannot be polled lightly (`unsupported`), or a list was cut (`truncated`: more pages than the poll reads, or fewer results than the host counted)."
     },
     "errors": {
       "type": "array",
@@ -70,8 +70,13 @@
       "description": "Hosts that failed the capability probe (an older GitLab). Nothing was read from them; list them with `prs`.",
       "items": { "$ref": "../defs.json#/$defs/host" }
     },
+    "truncated": {
+      "type": "array",
+      "description": "Hosts whose list was cut (more pages than the poll reads, a result the host counted but did not return, or an unusable entry the poll skipped). Their items are there but may be missing some; list them with `prs`.",
+      "items": { "$ref": "../defs.json#/$defs/host" }
+    },
     "rate_limit": { "$ref": "../defs.json#/$defs/rate_limit" }
   },
   "additionalProperties": false,
-  "required": ["items", "complete", "errors", "hosts_queried", "unsupported", "rate_limit"]
+  "required": ["items", "complete", "errors", "hosts_queried", "unsupported", "truncated", "rate_limit"]
 }

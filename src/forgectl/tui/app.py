@@ -345,6 +345,10 @@ class BrowseApp(App[None]):
         # row as of the poll that last decided about it, and whether the last refresh used it.
         self._light = callable(getattr(source, "light", None))
         self._light_keys: dict[str, lightpoll.Key] = {}
+        # the rows the current poll asked to be read and that have not arrived yet; and whether a
+        # host said it cannot be polled lightly (the session then lists with `prs` throughout)
+        self._poll_batch: set[str] = set()
+        self._light_off = False
         self._unlisted: set[str] = set()  # kept from an incomplete listing, shown stale
         self._added: set[str] = set()  # PRs listed since the first load, not yet read
         self._list_complete = True
@@ -505,6 +509,7 @@ class BrowseApp(App[None]):
         listed = False
         detail_pr: str | None = None
         try:
+            self._expire_poll_batch()
             use_light = self._use_light(auto)
             fallback: str | None = None
             polled: Listing | None = None
@@ -514,15 +519,25 @@ class BrowseApp(App[None]):
                     polled = await in_thread(lightpoll.load_light, self.source, current)
                 except Cancelled:
                     return  # the source was closed (quitting): nothing to show
+                except lightpoll.LightHeld as held:
+                    self._poll_held(held.rate_limit, str(held))
+                    return
+                except lightpoll.LightUnsupportedHost as why:
+                    self._light_off = True  # the probe is cached per process: ask no more
+                    fallback = f"light poll: {why}; listed with prs"
                 except lightpoll.LightFallback as why:
                     fallback = f"light poll: {why}; listed with prs"
                 except ForgectlError as err:
+                    if err.code == "rate_limited":
+                        self._poll_held(None, err.code)
+                        return
                     fallback = f"light poll: {safe.line(err.code, 60)}; listed with prs"
                 except Exception as exc:  # a source bug must not take the UI down
                     fallback = f"light poll: {self._internal(exc)}; listed with prs"
-                if polled is None:
-                    use_light = False
-                    self._light_keys.clear()
+            if not use_light or polled is None:
+                self._light_keys.clear()  # a read of every row: the next poll starts again
+            if polled is None:
+                use_light = False
             listing: Listing
             if polled is not None:
                 listing = polled
@@ -579,6 +594,8 @@ class BrowseApp(App[None]):
             self._paint(self._list_note or f"{len(self._rows)} PRs", self._detail_note)
             # a manual refresh reads the open detail whatever the poll found
             detail_pr = self._detail_to_refresh(refresh_detail, wanted if auto else None)
+            if use_light:
+                self._poll_batch = (wanted or set()) | ({detail_pr} if detail_pr else set())
             # The detail load reads the PR's snapshot, which also refreshes its row: the batch
             # skips it, so one read serves both.
             started = self._start_snapshots(wanted, skip=detail_pr, bulk_changed=use_light)
@@ -587,6 +604,29 @@ class BrowseApp(App[None]):
                 self._finish_refresh(listed=listed)
         if detail_pr is not None:
             self._start_detail(detail_pr)
+
+    def _expire_poll_batch(self) -> None:
+        """The rows the last poll asked to be read that never arrived (their round was replaced,
+        their detail load was cancelled, a summary failed) keep no trusted tuple: the next poll
+        reads them."""
+        for pr in self._poll_batch:
+            if pr in self._light_keys:
+                self._light_keys[pr] = lightpoll.STALE
+        self._poll_batch = set()
+
+    def _poll_held(self, rate_limit: Any, reason: str) -> None:
+        """A poll that failed on every host for a rate limit: no `prs` call (it would fail the
+        same way). The reading it carried, or the hosts of the rows on screen, enter the rate
+        limit pause as for any answer; the rows stay."""
+        now = self.clock()
+        if isinstance(rate_limit, dict) and rate_limit.get("host"):
+            self._rates.observe(rate_limit, now)
+        else:
+            for host in {host_of(r.pr) for r in self._rows}:
+                self._rates.observe({"host": host, "remaining": 0, "reset_at": None}, now)
+        self._list_note = f"light poll: {safe.line(reason, 60)}; not listed until it clears"
+        self._cycle_listed = False
+        self._paint(self._list_note, self._detail_note)
 
     def _detail_to_refresh(self, refresh_detail: bool, wanted: set[str] | None) -> str | None:
         """The PR in the open detail pane when this refresh re-reads it, else None."""
@@ -616,7 +656,7 @@ class BrowseApp(App[None]):
     def _use_light(self, auto: bool) -> bool:
         """Whether this refresh polls lightly: the source can, the list was loaded once, and it is
         not the every-Nth timed cycle that reads every row (``updated_at`` can miss a change)."""
-        if not self._light or not self._loaded_once:
+        if not self._light or self._light_off or not self._loaded_once:
             return False
         return not (auto and self._auto_cycles % self.full_refresh_every == 0)
 
@@ -626,7 +666,13 @@ class BrowseApp(App[None]):
         """The PRs whose tuple changed since the last poll (see ``light.changed``). A timed cycle
         honors a host's rate-limit backoff; a manual one does not, as for the old path."""
         wanted = lightpoll.changed(
-            listing.light_items, self._row_by_pr, self._states, self._light_keys, set(previous)
+            listing.light_items,
+            self._row_by_pr,
+            self._states,
+            self._light_keys,
+            set(previous),
+            listing.light_moved,
+            lambda pr: listing.may_hide(host_of(pr)),
         )
         wanted |= self._deferred & set(self._row_by_pr)  # a read the backoff put off earlier
         if auto:
@@ -875,6 +921,10 @@ class BrowseApp(App[None]):
         fresh = lightpoll.item_of_snapshot(pr, snap)
         if fresh is not None:
             row.item = fresh
+        if pr in self._poll_batch:
+            self._poll_batch.discard(pr)  # the poll's own read: its tuple holds
+        elif pr in self._light_keys:
+            self._light_keys[pr] = lightpoll.STALE  # read outside the poll: the tuple is not
 
     def _snapshot_arrived(self, pr: str, new: columns.RowState) -> None:
         """Store a row's new state. Only that row's text is redrawn unless the snapshot moves
@@ -1157,6 +1207,9 @@ class BrowseApp(App[None]):
 
     def _start_detail(self, pr: str) -> None:
         if pr == self._detail_loading:  # the same PR is already on its way
+            self._poll_batch.discard(pr)  # a load that began before the poll does not settle it
+            if pr in self._light_keys:
+                self._light_keys[pr] = lightpoll.STALE
             self._status(f"already loading {pr}")
             return
         self._detail_token += 1

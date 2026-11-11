@@ -9,7 +9,8 @@ snapshot. The caller re-reads only the PRs whose tuple changed (``snapshots``).
 Scope and failure rules are those of ``prs`` over every host (``fanout``): a failed host is an
 ``errors`` entry and makes the list incomplete; with one host asked, its own error is raised. A
 host that cannot be polled lightly (an older GitLab) is listed in ``unsupported`` and reads
-nothing; the caller then lists with ``prs``. ``hidden_repos`` are dropped.
+nothing; a host whose list was cut is listed in ``truncated``; the caller then lists with ``prs``.
+``hidden_repos`` are dropped.
 """
 
 from __future__ import annotations
@@ -71,6 +72,7 @@ def run_poll(env: ReadEnv) -> dict[str, Any]:
     items: list[LightItem] = []
     failures: list[tuple[str, ForgectlError]] = []
     unsupported: list[str] = []
+    truncated: list[str] = []
     complete = True
 
     def skip(repo: str) -> bool:
@@ -89,6 +91,8 @@ def run_poll(env: ReadEnv) -> dict[str, Any]:
             failures.append((host, error))
             continue
         items.extend(page.items)
+        if not page.complete:
+            truncated.append(host)
         complete = complete and page.complete
     if failures and len(queried) == 1:
         raise failures[0][1]
@@ -102,6 +106,7 @@ def run_poll(env: ReadEnv) -> dict[str, Any]:
         "errors": [host_error(host, error) for host, error in failures],
         "hosts_queried": queried,
         "unsupported": unsupported,
+        "truncated": truncated,
         "rate_limit": lowest_rate_limit(env, queried).to_dict(),
     }
     if failures:
