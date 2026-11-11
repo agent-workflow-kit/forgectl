@@ -39,6 +39,7 @@ READ_COMMANDS = (
     "show",
     "snapshot",
     "snapshots",
+    "poll",
     "diff",
     "compare",
     "files",
@@ -401,6 +402,8 @@ def build_parser() -> argparse.ArgumentParser:
         action=_OnceFlag,
         help="read each PR by its own lookup, not through the lists (a few PRs: GitLab only)",
     )
+
+    add("poll", "the change-detection tuple of every PR of mine, in a few requests")
 
     p = add("compare", "compare two commits of a PR")
     _pr(p)

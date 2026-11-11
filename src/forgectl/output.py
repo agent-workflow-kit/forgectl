@@ -13,7 +13,7 @@ from typing import Any, TextIO
 from .errors import ForgectlError, sanitize_tree
 from .sanitize import sanitize_line, sanitize_text
 
-PARTIAL_RESULT_COMMANDS = frozenset({"prs", "whoami"})
+PARTIAL_RESULT_COMMANDS = frozenset({"prs", "poll", "whoami"})
 POST_COMMANDS = frozenset({"review", "comment", "reply", "approve"})
 
 
@@ -228,10 +228,10 @@ def emit_error(
 ) -> int:
     """Print what the exit code calls for and return the exit code.
 
-    Output by exit code: exit 12 `partial_results` from `prs` or `whoami` prints the command's
-    result, exit 20 from a `--dry-run` prints the plan with `would_refuse`, and everything else
-    prints the error envelope. The error text always goes to stderr, and only there: if stderr
-    is unusable it is dropped, never moved to stdout.
+    Output by exit code: exit 12 `partial_results` from `prs`, `poll` or `whoami` prints the
+    command's result, exit 20 from a `--dry-run` prints the plan with `would_refuse`, and
+    everything else prints the error envelope. The error text always goes to stderr, and only
+    there: if stderr is unusable it is dropped, never moved to stdout.
     """
     printable: dict[str, Any] | None = None
     if err.code == "partial_results" and command in PARTIAL_RESULT_COMMANDS:

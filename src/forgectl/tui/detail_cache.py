@@ -1,4 +1,4 @@
-"""In-memory caches of `browse`'s detail pane (D-38): the detail read by what identifies its
+"""In-memory caches of `browse`'s detail pane (D-39): the detail read by what identifies its
 version, and the diff by head sha. Bounded; the oldest entry goes first; never persisted."""
 
 from __future__ import annotations

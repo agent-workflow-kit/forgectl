@@ -851,6 +851,31 @@ def test_prs_partial_results_print_the_schema_and_exit_12(
     assert "partial_results" in err
 
 
+def test_poll_partial_results_print_the_schema_and_exit_12(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def partial_poll(inv: Invocation) -> dict[str, Any]:
+        raise ForgectlError(
+            "partial_results",
+            "one host failed",
+            output={
+                "items": [],
+                "complete": False,
+                "errors": [{"host": "gitlab.com", "code": "auth_required", "message": "no token"}],
+                "hosts_queried": ["github.com", "gitlab.com"],
+                "unsupported": [],
+                "truncated": [],
+                "rate_limit": {"host": "github.com", "remaining": None, "reset_at": None},
+            },
+        )
+
+    registry.HANDLERS["poll"] = partial_poll
+    code, out, err = run(capsys, ["--json", "poll"])
+    assert code == 12
+    validate(json.loads(out), "forgectl/cli/poll.json")
+    assert "partial_results" in err
+
+
 def test_partial_results_from_another_command_is_the_envelope(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

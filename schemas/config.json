@@ -324,7 +324,7 @@
           "minimum": 1,
           "maximum": 1000,
           "default": 5,
-          "description": "Every Nth automatic refresh re-snapshots every PR; the others only the PRs that may have changed."
+          "description": "Every Nth automatic refresh reads every PR the old way (prs and a snapshot of each row); the others poll lightly and re-read only the PRs the poll found changed."
         },
         "concurrency": {
           "type": "integer",

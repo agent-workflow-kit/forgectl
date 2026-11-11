@@ -55,6 +55,7 @@ HANDLER_MODULES: tuple[str, ...] = (
     "forgectl.merge",  # merge (#21)
     "forgectl.browse",
     "forgectl.bulk",  # snapshots (#116)
+    "forgectl.poll",  # poll (#118)
 )
 
 _loaded = False
