@@ -1383,15 +1383,18 @@ class BrowseApp(App[None]):
                                 self._keep_snapshot(pr, result)
                                 self._row_refreshed(pr, result)
                                 if result.get("complete") is not False:
-                                    # In light mode the row has just adopted the list item of
-                                    # this very read, so its key now names this content (never a
-                                    # newer one); the key from before the read would never match
-                                    # a later lookup. Without the light poll nothing was adopted
-                                    # and both keys are the same.
-                                    current = self._row_by_pr.get(pr)
+                                    # The key names the content of this very read: in light mode
+                                    # the list item it carries (a poll may have moved the row's
+                                    # item on meanwhile, so that is never read here); otherwise
+                                    # the key from before the read.
+                                    read_item = (
+                                        lightpoll.item_of_snapshot(pr, result)
+                                        if self._light
+                                        else None
+                                    )
                                     put_key = (
-                                        detail_cache.detail_key(pr, current.item)
-                                        if current is not None
+                                        detail_cache.detail_key(pr, read_item)
+                                        if read_item is not None
                                         else detail_key
                                     )
                                     self._detail_cache.put(put_key, result)
@@ -1685,8 +1688,10 @@ class BrowseApp(App[None]):
         """The diff is read when the Changes section is opened (D-39), once: an open section that
         holds it, or one whose read is on its way, reads nothing."""
         pr = self._detail_loading or self._detail_pr  # a load for another PR may be on its way
-        if pr is None or not self._detail_shown() or self._diff_in_pane:
+        if pr is None or not self._detail_shown():
             return
+        if pr == self._detail_pr and self._diff_in_pane:
+            return  # the pane holds this PR's diff (a load for another PR is not this case)
         if pr == self._detail_loading:  # a load is on its way: it starts the diff itself
             wake = self._detail_wake
             if wake is not None and not wake.done():

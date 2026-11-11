@@ -510,3 +510,73 @@ def test_light_mode_keeps_the_cached_detail_under_the_adopted_items_key() -> Non
 
     run(source, script, setup=light)
     assert count(source, "detail", PR1) == 1
+
+
+def test_a_poll_that_moves_the_row_during_a_read_does_not_cache_the_content_under_the_new_key() -> (
+    None
+):
+    source = source_of()
+    # the read carries no list item (no update time), so the row keeps whatever a poll gave it
+    fresh = make_snapshot(1, title="Mine")
+    fresh.pop("updated_at", None)
+    source.fresh[PR1] = fresh
+    hold(source, "detail")
+
+    def light(app: BrowseApp) -> None:
+        app._light = True  # pyright: ignore[reportAttributeAccessIssue]
+        app._maybe_prefetch = lambda: None  # type: ignore[method-assign]  # the open itself reads
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down", "enter")
+        await wait_until(pilot, lambda: ("detail", PR1) in source.calls)
+        row = app._row_by_pr[PR1]
+        row.item = {**row.item, "updated_at": "2026-11-05T10:00:00Z"}  # a light poll moved it
+        release(source, "detail")
+        await settle(app, pilot)
+        row.item = {**row.item, "updated_at": "2026-11-05T10:00:00Z"}  # the next poll: still T2
+        await pilot.press("escape")
+        await pilot.press("enter")
+        await settle(app, pilot)
+
+    run(source, script, setup=light)
+    assert count(source, "detail", PR1) == 2  # the older content is not served as current
+
+
+def test_changes_opened_while_another_pr_loads_ignores_the_shown_prs_diff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = three_rows()
+    block = {"on": False}
+    release_frame = threading.Event()
+    original = BrowseApp._frame
+
+    def blocked_frame(*args: Any) -> Any:
+        if block["on"]:
+            release_frame.wait(10.0)  # the first frame of the load stays unpainted
+        return original(*args)
+
+    monkeypatch.setattr(BrowseApp, "_frame", staticmethod(blocked_frame))
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        app._start_detail(PR1)
+        await settle(app, pilot)
+        assert app._diff_in_pane  # PR1 is shown with its diff
+        await pilot.press("3")  # collapse Changes
+        block["on"] = True
+        app._start_detail(PR2)
+        await wait_until(pilot, lambda: app._detail_wake is not None)
+        assert app._detail_pr == PR1 and app._diff_in_pane
+        await pilot.press("3")  # open Changes while PR2 loads
+        wake = app._detail_wake
+        assert wake is not None
+        try:
+            await wait_until(pilot, wake.done, timeout=5.0)  # PR2 is told, whatever PR1 shows
+            assert not wake.cancelled()
+            await wait_until(pilot, lambda: ("diff", PR2) in source.calls)
+        finally:
+            block["on"] = False
+            release_frame.set()
+        await settle(app, pilot)
+
+    run(source, script, collapsed=())
+    assert count(source, "diff", PR2) == 1
