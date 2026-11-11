@@ -37,7 +37,7 @@ from .query_screen import PanelActions, QueryScreen
 from .query_store import QueryStore
 from .refresh import BACKOFF_FACTOR, RateLimits, host_of, needs_snapshot
 from .source import DataSource, Listing, Row, load_list
-from .source_live import Cancelled
+from .source_live import Cancelled, HostStopped
 
 DEFAULT_CONCURRENCY = 4  # snapshots in flight at once; `browse.concurrency` sets it
 DEFAULT_FULL_REFRESH_EVERY = 5  # `browse.full_refresh_every`
@@ -264,6 +264,16 @@ class RowList(OptionList):
         self.app.relayout()  # type: ignore[attr-defined]
 
 
+def _older(new: dict[str, Any], held: dict[str, Any]) -> bool:
+    """Whether ``new`` was fetched before ``held`` (both ``fetched_at`` must parse)."""
+    try:
+        return datetime.fromisoformat(str(new["fetched_at"])) < datetime.fromisoformat(
+            str(held["fetched_at"])
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 class BrowseApp(App[None]):
     ENABLE_COMMAND_PALETTE = False  # its screenshot command would write forge text to a file
     CSS = """
@@ -355,6 +365,8 @@ class BrowseApp(App[None]):
         self._list_errors = 0
         self._source_cancels = _accepts_cancelled(source)
         self._diff_cancels = _accepts_cancelled(source, "diff")
+        self._detail_cancels = _accepts_cancelled(source, "detail")
+        self._snaps: dict[str, dict[str, Any]] = {}  # each row's last full snapshot
         self.concurrency = max(0, concurrency)  # 0: the rows' snapshots are not loaded
         self.clock = clock
         self.source = source
@@ -399,6 +411,7 @@ class BrowseApp(App[None]):
         self._detail_url: str | None = None
         self._detail_checks: list[dict[str, Any]] = []
         self._detail_token = 0
+        self._detail_closed = -1  # the load (token) whose pane the user closed with esc
         # Which detail sections are open: kept for the session, across PRs and refreshes.
         self._open_sections = sections.initial_open(detail_collapsed)
         self._detail: render.Detail | None = None
@@ -582,6 +595,8 @@ class BrowseApp(App[None]):
                 self._added |= {r.pr for r in rows if r.pr not in previous}
             self._rows = rows
             self._row_by_pr = {r.pr: r for r in rows}
+            # a PR that left the list keeps no snapshot: coming back, it must not paint old data
+            self._snaps = {pr: snap for pr, snap in self._snaps.items() if pr in self._row_by_pr}
             # A row that is still listed keeps its last good data while it reloads.
             self._states = {r.pr: self._states.get(r.pr) or columns.RowState() for r in rows}
             self._deferred &= set(self._row_by_pr)
@@ -900,6 +915,7 @@ class BrowseApp(App[None]):
                         state = columns.RowState(columns.LOADED, columns.summarize(snap))
                         self.adopt_item(pr, snap)
                         self._rates.observe(snap.get("rate_limit"), self.clock())
+                        self._keep_snapshot(pr, snap)
                     except Cancelled:
                         return  # a newer round replaced this one before the read started
                     except ForgectlError as err:
@@ -1218,7 +1234,8 @@ class BrowseApp(App[None]):
         return bool(self.query_one("#detail", VerticalScroll).display)
 
     def _start_detail(self, pr: str) -> None:
-        if pr == self._detail_loading:  # the same PR is already on its way
+        if pr == self._detail_loading and self._detail_closed != self._detail_token:
+            # the same PR is already on its way, for an open pane
             self._poll_batch.discard(pr)  # a load that began before the poll does not settle it
             if pr in self._light_keys:
                 self._light_keys[pr] = lightpoll.STALE
@@ -1229,51 +1246,127 @@ class BrowseApp(App[None]):
         self.run_worker(self._load_detail(pr, self._detail_token), group="detail")
 
     async def _load_detail(self, pr: str, token: int) -> None:
+        """Open the pane at once from the data the list holds, then fill it in as the detail read
+        and the diff, started together, arrive (D-37). Every arrival repaints the pane; a read that
+        failed marks its own sections only. A newer request (``token``) discards this one."""
         self._status("loading detail...")
-        detail: render.Detail | None = None
-        diff_note: str | None = None
-        outcome = ""
+
+        def stale() -> bool:  # a newer request replaced this one: no further host call
+            return token != self._detail_token
+
+        row = self._row_by_pr.get(pr)
+        item = row.item if row is not None else {"pr": pr}
+        snap: dict[str, Any] | None = self._snaps.get(pr) if row is not None else None
+        snap_note: str | None = render.LOADING
+        diff: dict[str, Any] | None = None
+        diff_note: str | None = render.LOADING
+        errors: list[str] = []
+        reads: dict[asyncio.Future[Any], str] = {}
         try:
-
-            def stale() -> bool:  # a newer request replaced this one: no further host call
-                return token != self._detail_token
-
-            snap = await in_thread(self._detail_read, "snapshot", pr, stale)
-            self._row_refreshed(pr, snap)
-            try:
-                diff: dict[str, Any] | None = await in_thread(self._detail_read, "diff", pr, stale)
-            except ForgectlError as err:
-                diff = None
-                diff_note = f"diff: {err.code}: {err.message}"
-            # Sanitizing and laying out a large pane happens off the event loop.
-            detail = await in_thread(render.detail_of, snap, diff)
-        except Cancelled:
-            return  # a newer request replaced this one before its next host call
-        except ForgectlError as err:
-            outcome = f"{err.code}: {err.message}"
-            self._row_failed(pr, safe.line(err.code, 60))
-        except Exception as exc:  # a source bug or bad data must not take the UI down
-            outcome = self._internal(exc)
-            self._row_failed(pr, outcome)
+            reads[in_thread(self._read_detail, pr, stale)] = "snapshot"
+            reads[in_thread(self._detail_read, "diff", pr, stale)] = "diff"
+            first = await in_thread(self._frame, item, snap, snap_note, diff, diff_note)
+            if token != self._detail_token:
+                return
+            state = self._states.get(pr)
+            marker = f" [stale: {state.error or 'refresh failed'}]" if state and state.stale else ""
+            if token != self._detail_closed:
+                self._show_detail(pr, first, f"loading detail...{marker}", seen=snap is not None)
+            while reads:
+                done, _ = await asyncio.wait(list(reads), return_when=asyncio.FIRST_COMPLETED)
+                for future in done:
+                    kind = reads.pop(future)
+                    try:
+                        result = future.result()
+                    except Cancelled:
+                        return  # a newer request replaced this one before its next host call
+                    except ForgectlError as err:
+                        failure = f"{err.code}: {err.message}"
+                        code = safe.line(err.code, 60)
+                    except Exception as exc:  # a source bug or bad data must not take the UI down
+                        failure = code = self._internal(exc)
+                    else:
+                        if kind == "snapshot":
+                            held = self._snaps.get(pr)
+                            if held is not None and _older(result, held):
+                                snap, snap_note = held, None  # a newer read landed meanwhile
+                            else:
+                                snap, snap_note = result, None
+                                self._keep_snapshot(pr, result)
+                                self._row_refreshed(pr, result)
+                        else:
+                            diff, diff_note = result, None
+                        continue
+                    if kind == "snapshot":
+                        snap_note = render.failed_note(code)
+                        errors.append(failure)
+                        self._row_failed(pr, code)
+                    else:
+                        diff_note = render.failed_note(code)
+                        errors.append(f"diff: {failure}")
+                if token != self._detail_token:
+                    return
+                detail = await in_thread(self._frame, item, snap, snap_note, diff, diff_note)
+                if token != self._detail_token:
+                    return
+                status = "loading detail..." if reads else f"{len(detail.checks)} checks"
+                if not reads and errors:
+                    status = "; ".join([status, *errors]) if snap is not None else errors[0]
+                if token != self._detail_closed:
+                    self._show_detail(pr, detail, status, seen=snap is not None)
+                else:  # the user closed the pane: do not reopen it, but the status still ends
+                    self._detail_note = status
+                    self._status(status)
+        except Exception as exc:  # a paint bug must not take the UI down
+            if token == self._detail_token:
+                self._detail_note = self._internal(exc)
+                self._status(self._detail_note)
         finally:
+            for future in reads:  # a read left behind (stale): nobody awaits its outcome
+                future.add_done_callback(_discard_outcome)
             if token == self._detail_token:
                 self._detail_loading = None
-        if token != self._detail_token:  # a newer request replaced this one
-            return
-        if detail is not None:
+
+    @staticmethod
+    def _frame(
+        item: dict[str, Any],
+        snap: dict[str, Any] | None,
+        snap_note: str | None,
+        diff: dict[str, Any] | None,
+        diff_note: str | None,
+    ) -> render.Detail:
+        """The pane for what has arrived. Runs on a worker thread (sanitizing and laying out a
+        large pane stays off the event loop). Without a snapshot only the list's facts show."""
+        if snap is None:
+            return render.stub_of(item, snap_note or render.LOADING, diff_note, diff)
+        return render.detail_of(snap, diff, diff_note)
+
+    def _read_detail(self, pr: str, cancelled: Callable[[], bool]) -> dict[str, Any]:
+        """Runs on a worker thread: the PR's snapshot data for the pane. The source's ``detail``
+        (one bulk read) when it has one; a ``detail`` that fails, or a source without one, falls
+        back to ``snapshot``, the source of truth, except when the host stopped the bulk read."""
+        read = getattr(self.source, "detail", None)
+        if read is not None:
             try:
-                self._show_detail(pr, detail, diff_note)
-                return
-            except Exception as exc:
-                outcome = self._internal(exc)
-        self._detail_note = outcome
-        self._status(outcome)
+                return read(pr, cancelled=cancelled) if self._detail_cancels else read(pr)  # type: ignore[no-any-return]
+            except (Cancelled, HostStopped):
+                raise  # a stopped host is not asked again (D-36): the failure is shown
+            except Exception:  # noqa: BLE001 - any failure of the fast read: ask the full one
+                if cancelled():
+                    raise Cancelled(pr) from None
+        return self._detail_read("snapshot", pr, cancelled)
 
     def _detail_read(self, what: str, pr: str, cancelled: Callable[[], bool]) -> dict[str, Any]:
         """Runs on a worker thread: the detail's ``snapshot`` or ``diff``, told when it is stale."""
         read = getattr(self.source, what)
         accepts = self._source_cancels if what == "snapshot" else self._diff_cancels
         return read(pr, cancelled=cancelled) if accepts else read(pr)  # type: ignore[no-any-return]
+
+    def _keep_snapshot(self, pr: str, snap: dict[str, Any]) -> None:
+        """Remember the last full snapshot of a listed row: the pane opens from it. Only rows
+        that are listed keep one."""
+        if pr in self._row_by_pr and isinstance(snap, dict):
+            self._snaps[pr] = snap
 
     def _row_refreshed(self, pr: str, snap: dict[str, Any]) -> None:
         """The detail's snapshot is also the row's fresh data."""
@@ -1292,13 +1385,17 @@ class BrowseApp(App[None]):
         if pr in self._row_by_pr:
             self._snapshot_arrived(pr, self._failed_state(self._states.get(pr), error))
 
-    def _show_detail(self, pr: str, detail: render.Detail, diff_note: str | None) -> None:
+    def _show_detail(
+        self, pr: str, detail: render.Detail, status: str, *, seen: bool = True
+    ) -> None:
+        """Paint the pane. ``seen``: the PR's own data is on it (not only the list's facts), so the
+        PR counts as viewed in the result."""
         if pr != self._detail_pr:  # another PR starts on its first check
             self.query_one("#checks", OptionList).highlighted = None
         self._detail_pr = pr
         self._detail_url = detail.url
         self._detail_checks = detail.checks
-        if not self._opened:
+        if seen and not self._opened:
             self.selected = pr  # enter opened it; the intent stays back
         self._detail = detail
         self._painted.clear()
@@ -1311,8 +1408,8 @@ class BrowseApp(App[None]):
             pane.focus()
         elif focused.id == "checks" and not focused.display:  # a refresh dropped the checks
             pane.focus()
-        self._detail_note = f"{len(detail.checks)} checks" + (f"; {diff_note}" if diff_note else "")
-        self._status(self._detail_note)
+        self._detail_note = status
+        self._status(status)
 
     def _paint_section(self, name: str) -> None:
         """The header always; the body only while the section is open (and only once per
@@ -1418,6 +1515,7 @@ class BrowseApp(App[None]):
         detail = self.query_one("#detail", VerticalScroll)
         if detail.display:
             detail.display = False
+            self._detail_closed = self._detail_token  # a load on its way must not reopen it
             self.query_one("#list", OptionList).focus()
 
     def action_refresh_selected(self) -> None:
@@ -1504,6 +1602,12 @@ class BrowseApp(App[None]):
             self.call_from_thread(self._status, f"opener exited {status}")
         except Exception:  # noqa: BLE001 - the app may be shutting down; the note is dropped
             pass
+
+
+def _discard_outcome(future: asyncio.Future[Any]) -> None:
+    """Mark a read's outcome as seen, so an unawaited failure is not reported as never retrieved."""
+    if not future.cancelled():
+        future.exception()
 
 
 def _accepts_cancelled(source: object, name: str = "snapshot") -> bool:

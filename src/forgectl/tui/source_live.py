@@ -48,6 +48,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from forgectl import cli, registry
+from forgectl.backends.bulk_common import HOST_STOPS
 from forgectl.browse import is_pr
 from forgectl.config import load_config
 from forgectl.errors import Cancelled, ForgectlError
@@ -166,6 +167,12 @@ class _Call:
         self.groups: set[tuple[int, int]] = set()
 
 
+class HostStopped(ForgectlError):
+    """The bulk reader was stopped by its host (a ``HOST_STOPS`` code, such as a rate limit):
+    another read of that host would meet the same answer, so ``detail`` raises this and the
+    caller does not fall back to ``snapshot``."""
+
+
 class LiveSource:
     """``DataSource`` over a runner. ``LiveSource()`` uses the in-process handlers."""
 
@@ -255,6 +262,34 @@ class LiveSource:
         if not prs:
             return {"items": [], "failed": [], "complete": True, "errors": []}
         return self._tracked(["snapshots", "--bulk-only", *prs], cancelled, prs[0])
+
+    def detail(self, pr: str, *, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
+        """The ``snapshot`` object of one PR from one bulk read (``snapshots --bulk-only
+        --lookup`` of that PR: a single GraphQL request on GitHub, a single lookup on GitLab),
+        for the detail pane, which paints from the snapshot it already holds and is refreshed
+        by this.
+
+        Raises ``ForgectlError`` when the bulk reader cannot read the PR whole (``upstream_error``
+        naming the reason code of ``failed``), so the caller reads ``snapshot`` instead.
+        Thread-safe and cancellable like ``snapshot``."""
+        if not is_pr(pr):
+            raise ForgectlError("invalid_pr", "detail: not a PR in the form host/path#N")
+        answer = self._tracked(["snapshots", "--bulk-only", "--lookup", pr], cancelled, pr)
+        for item in answer.get("items") or []:
+            if isinstance(item, dict) and item.get("pr") == pr:
+                if item.get("complete") is not True:
+                    raise ForgectlError("upstream_error", "detail: the bulk read is not whole")
+                # todo(#86): a GitHub check's `required` is null in a bulk item (D-37)
+                return item
+        reason = "no item"
+        for entry in answer.get("failed") or []:
+            error = entry.get("error") if isinstance(entry, dict) else None
+            code = error.get("code") if isinstance(error, dict) else None
+            if isinstance(code, str) and code.replace("_", "").isalnum() and len(code) <= 40:
+                reason = code
+        if reason in HOST_STOPS:  # the code of the stop itself: a stopped host is not asked again
+            raise HostStopped(reason, f"detail: the host stopped the bulk read ({reason})")
+        raise ForgectlError("upstream_error", f"detail: the bulk read failed ({reason})")
 
     def _one(self, command: str, pr: str, cancelled: Callable[[], bool] | None) -> dict[str, Any]:
         if not is_pr(pr):  # also keeps an option-looking value out of the argument list

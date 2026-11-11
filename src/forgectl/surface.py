@@ -396,6 +396,12 @@ def build_parser() -> argparse.ArgumentParser:
         action=_OnceFlag,
         help="read only through the bulk path; list a PR it cannot read whole in failed",
     )
+    p.add_argument(
+        "--lookup",
+        dest="lookup",
+        action=_OnceFlag,
+        help="read each PR by its own lookup, not through the lists (a few PRs: GitLab only)",
+    )
 
     add("poll", "the change-detection tuple of every PR of mine, in a few requests")
 

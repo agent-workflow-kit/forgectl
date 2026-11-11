@@ -828,7 +828,7 @@ def test_repeated_enter_and_r_on_the_same_pr_load_it_once() -> None:
         await wait_until(pilot, lambda: ("snapshot", PR1) in source.calls)
         await pilot.press("enter", "r", "enter", "r")
         await pilot.pause()
-        assert "already running" in status_of(app)
+        assert "already loading" in status_of(app)  # the pane is open: r asks for the same load
         source.gate.set()
         await settle(app, pilot)
 
@@ -842,7 +842,7 @@ def test_a_load_for_another_pr_replaces_the_stale_one() -> None:
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         await pilot.press("down", "enter")
         await wait_until(pilot, lambda: ("snapshot", PR1) in source.calls)
-        await pilot.press("up", "enter")
+        await pilot.press("escape", "up", "enter")  # the pane took focus when it opened
         await wait_until(pilot, lambda: ("snapshot", PR2) in source.calls)
         source.gate.set()
         await settle(app, pilot)
@@ -1091,7 +1091,7 @@ def test_r_with_the_pane_open_reloads_the_row_and_the_detail() -> None:
         seen["shown"] = app.query_one("#detail").display
 
     drive(source, script, concurrency=2)
-    assert seen["after"] == [("snapshot", PR1), ("diff", PR1)]
+    assert sorted(seen["after"]) == [("diff", PR1), ("snapshot", PR1)]  # read together
     assert seen["shown"] is True
 
 

@@ -57,6 +57,7 @@ async def run(app: Any, token: int, order: list[str]) -> list[str]:
             except Exception:  # bad data: this row is left to the per-row pool
                 continue
             app.adopt_item(pr, snap)
+            app._keep_snapshot(pr, snap)
             app._snapshot_arrived(pr, state)
             if snap.get("complete") is True:
                 settled.add(pr)
