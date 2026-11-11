@@ -4,7 +4,7 @@ Normalized access to pull/merge requests across GitHub and GitLab: read them, po
 
 ## Status
 
-Designed; not yet implemented. The contract is [docs/interface.md](docs/interface.md), interface 0.2.0-design. Rationale and live-verification results are in [docs/design.md](docs/design.md); the staged plan is in [docs/plan.md](docs/plan.md).
+Implemented, at v0.40.0: every command in the table below is available. The contract is [docs/interface.md](docs/interface.md). Rationale and live-verification results are in [docs/design.md](docs/design.md); the staged plan is in [docs/plan.md](docs/plan.md). Releases are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## Layer
 
@@ -39,6 +39,8 @@ forgectl has no dependency on any other awkit tool.
 ```sh
 forgectl prs --review-requested-from me --state open
 forgectl show github.com/org/repo#42
+forgectl --json prs --query "authored AND state = open AND NOT draft ORDER BY ready DESC, attention DESC"
+forgectl browse
 forgectl ci gitlab.example.com/group/project#7 --json
 forgectl merge github.com/org/repo#42 --expected-head <sha> --expected-base main --method squash
 ```
@@ -58,14 +60,14 @@ forgectl merge github.com/org/repo#42 --expected-head <sha> --expected-base main
 | `merge` | merge; `--auto` arms auto-merge, for a human only, as the head allows |
 | `review`, `comment`, `reply`, `approve` | posts |
 | `resolve`, `unresolve` | threads |
-| `browse` | optional TUI |
+| `browse` | read-only terminal browser of your open PRs and MRs; needs the `tui` extra |
 | `export` | audit records |
 
 Writes are confirm-by-default: without a TTY and without `--yes` they exit 13. Outside an interactive run, `merge`, `review` and `approve` need `--expected-head` and `--expected-base`. To see a host's raw answer, use `gh api` or `glab api`.
 
 ## Config
 
-`~/.config/forgectl/config.yaml`, documented in [config.example.yaml](config.example.yaml). A self-managed host needs one entry:
+`~/.config/forgectl/config.yaml`, documented in [config.example.yaml](config.example.yaml) and in [Config](docs/interface.md#config); `browse` and its query are described under [TUI](docs/interface.md#tui). A self-managed host needs one entry:
 
 ```yaml
 hosts:
