@@ -432,7 +432,7 @@ class BrowseApp(App[None]):
             self.refresh_timer = self.set_interval(self.refresh_interval, self._tick)
 
     def exit(self, *args: Any, **kwargs: Any) -> None:
-        """Every way out (`q`, ctrl+q, an error) goes through here: the timer stops first, so
+        """`q`, ctrl+q and explicit exit() callers go through here: the timer stops first, so
         no tick can start a worker once the app is shutting down."""
         if self.refresh_timer is not None:
             self.refresh_timer.stop()
@@ -443,7 +443,7 @@ class BrowseApp(App[None]):
         """The automatic refresh. A tick that finds a refresh, a detail load or a modal in the
         way is skipped, not queued: the next tick tries again."""
         if (
-            self._exit
+            self.refresh_timer is None
             or self._busy
             or self._detail_loading is not None
             or len(self.screen_stack) > 1
@@ -486,7 +486,11 @@ class BrowseApp(App[None]):
         re-reads only what may have changed; the others re-read every row."""
         self._busy = True
         self._clear_changed()  # a highlight lasts until the next cycle
-        self.run_worker(self._load_list(refresh_detail, auto), group="list")
+
+        async def work() -> None:  # the coroutine exists only once the worker runs: a worker
+            await self._load_list(refresh_detail, auto)  # cancelled at exit leaves none unawaited
+
+        self.run_worker(work, group="list")
 
     async def _load_list(self, refresh_detail: bool, auto: bool) -> None:
         self._status("refreshing..." if self._loaded_once else "loading...")

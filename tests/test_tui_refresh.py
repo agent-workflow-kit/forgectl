@@ -7,8 +7,10 @@ fire to show that the interval starts it and that 0 does not.
 from __future__ import annotations
 
 import asyncio
+import gc
 import threading
 import time
+import warnings
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -400,7 +402,7 @@ def test_every_exit_path_stops_the_timer_and_a_late_tick_starts_nothing(how: str
         assert app.refresh_timer is not None
         base = source.count("prs")
         if how == "exit":
-            app.exit()  # the path ctrl+q, errors and other callers all take
+            app.exit()  # the path `q`, ctrl+q and explicit exit() callers take
         else:
             await pilot.press("ctrl+q")
         assert app.refresh_timer is None
@@ -410,6 +412,22 @@ def test_every_exit_path_stops_the_timer_and_a_late_tick_starts_nothing(how: str
         assert source.count("prs") == base
 
     run(source, script, interval=0.1)
+
+
+def test_a_tick_just_before_exit_leaves_no_coroutine_never_awaited() -> None:
+    source = three()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await settle(app, pilot)
+        app._tick()  # a tick that ran just before the exit began
+        assert app._busy
+        app.exit()  # no await between: shutdown cancels the worker before it starts
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        run(source, script, interval=0.1)
+        gc.collect()
+    assert [str(w.message) for w in caught if "never awaited" in str(w.message)] == []
 
 
 # -- automatic refresh: what it re-reads -------------------------------------------------------
