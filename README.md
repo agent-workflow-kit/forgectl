@@ -4,7 +4,7 @@ Normalized access to pull/merge requests across GitHub and GitLab: read them, po
 
 ## Status
 
-Designed; not yet implemented. The contract is [docs/interface.md](docs/interface.md), interface 0.2.0-design. Rationale and live-verification results are in [docs/design.md](docs/design.md); the staged plan is in [docs/plan.md](docs/plan.md).
+Implemented and released (see [CHANGELOG.md](CHANGELOG.md) for the version). Available now: the reads (`prs`, `show`, `snapshot`, `snapshots`, `poll`, `diff`, `files`, `compare`, `comments`, `reviews`, `ci`, `access`, `whoami`), `browse`, `export` and `merge` on GitHub. Not yet implemented: `merge` on GitLab (#22), `merge --auto` (#23), `comment` and `reply` (#24), `review` on GitHub (#26) and GitLab (#27), `approve` (#28), and `resolve` and `unresolve` (#29); they parse but fail with an `internal` error. The contract is [docs/interface.md](docs/interface.md). Rationale and live-verification results are in [docs/design.md](docs/design.md); the staged plan is in [docs/plan.md](docs/plan.md).
 
 ## Layer
 
@@ -14,8 +14,8 @@ L1 (primitive). It works on its own at a terminal.
 
 - Lists PRs, including those requesting review from you directly by name, and returns one normalized shape for both hosts: facts, readiness, review requests, reviews, threads, CI, files and diffs.
 - Reports what it cannot determine as `null` or `complete: false` rather than guessing or truncating silently.
-- Merges with a checked head and base: a merge is refused if the PR moved (`stale_head`), was retargeted (`stale_base`) or is blocked (`not_ready`), and is verified afterward. Automation also needs passing CI on the head.
-- Posts reviews, comments and replies, resolves threads and approves, with GitLab quick actions and similar commands in posted text neutralized.
+- Merges (GitHub only so far) with a checked head and base: a merge is refused if the PR moved (`stale_head`), was retargeted (`stale_base`) or is blocked (`not_ready`), and is verified afterward. Automation also needs passing CI on the head.
+- Is designed to post reviews, comments and replies, resolve threads and approve, with GitLab quick actions and similar commands in posted text neutralized; those commands are not yet implemented (see Status).
 - Talks only to hosts it knows: `github.com`, `gitlab.com` and the ones you declare.
 
 ## Install
@@ -37,8 +37,11 @@ forgectl has no dependency on any other awkit tool.
 ## Quick start
 
 ```sh
+# merge works on GitHub only for now; see Status
 forgectl prs --review-requested-from me --state open
 forgectl show github.com/org/repo#42
+forgectl --json prs --query "authored AND state = open AND NOT draft ORDER BY ready DESC, attention DESC"
+forgectl browse
 forgectl ci gitlab.example.com/group/project#7 --json
 forgectl merge github.com/org/repo#42 --expected-head <sha> --expected-base main --method squash
 ```
@@ -55,17 +58,19 @@ forgectl merge github.com/org/repo#42 --expected-head <sha> --expected-base main
 | `compare` | how two commits of a PR relate, with their diff when `to` is ahead of `from` |
 | `comments`, `reviews`, `ci` | threads, reviews, checks |
 | `access`, `whoami` | write access of a user; authenticated user per host |
-| `merge` | merge; `--auto` arms auto-merge, for a human only, as the head allows |
-| `review`, `comment`, `reply`, `approve` | posts |
-| `resolve`, `unresolve` | threads |
-| `browse` | optional TUI |
+| `merge` | merge; GitHub only (GitLab: not yet implemented, #22); `--auto` arms auto-merge, for a human only, as the head allows (not yet implemented, #23) |
+| `review` | post a review (not yet implemented, #26 GitHub, #27 GitLab) |
+| `comment`, `reply` | post a comment or a reply (not yet implemented, #24) |
+| `approve` | approve (not yet implemented, #28) |
+| `resolve`, `unresolve` | threads (not yet implemented, #29) |
+| `browse` | read-only terminal browser of your open PRs and MRs; needs the `tui` extra |
 | `export` | audit records |
 
 Writes are confirm-by-default: without a TTY and without `--yes` they exit 13. Outside an interactive run, `merge`, `review` and `approve` need `--expected-head` and `--expected-base`. To see a host's raw answer, use `gh api` or `glab api`.
 
 ## Config
 
-`~/.config/forgectl/config.yaml`, documented in [config.example.yaml](config.example.yaml). A self-managed host needs one entry:
+`~/.config/forgectl/config.yaml`, documented in [config.example.yaml](config.example.yaml) and in [Config](docs/interface.md#config); `browse` and its query are described under [TUI](docs/interface.md#tui). A self-managed host needs one entry:
 
 ```yaml
 hosts:
