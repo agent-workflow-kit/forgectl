@@ -429,7 +429,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--lookup",
         dest="lookup",
         action=_OnceFlag,
-        help="read each PR by its own lookup, not through the lists (a few PRs: GitLab only)",
+        help="read each PR by its own lookup, for a few PRs (GitLab: not through the lists;"
+        " GitHub: also reads check required-ness, one extra request per PR)",
     )
 
     add("poll", "the change-detection tuple of every PR of mine, in a few requests")

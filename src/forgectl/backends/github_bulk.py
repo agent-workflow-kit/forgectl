@@ -37,7 +37,7 @@ from ..gateway import verify_identity
 from ..identifiers import PrRef
 from ..reads import ReadEnv
 from . import github_snapshot as gs
-from .bulk_common import BULK_UNAVAILABLE, BulkRead, Unresolved, run_pages
+from .bulk_common import BULK_UNAVAILABLE, BulkRead, Unresolved, ends_run, run_pages
 from .github import (
     _ACTOR_FIELDS,
     MAX_PR_NUMBER,
@@ -72,6 +72,7 @@ LABELS = 100
 #: the 50 checks a bulk item may hold; any check it does not name stays null.
 REQUIRED_QUERY = """
 query ForgectlRequired($owner: String!, $name: String!, $number: Int!) {
+  rateLimit { cost remaining resetAt }
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       number
@@ -284,6 +285,9 @@ class _Run:
         self.target = env.hosts.target(host)
         self.limits = gs.Limits(host=host)
         self.backend = GitHubBackend(env)
+        #: the failure that ended the required reads of this run (a rate limit or a credential
+        #: failure): no further required read is asked, and the items stay whole without it
+        self.required_stop: ForgectlError | None = None
 
     # -- one request ---------------------------------------------------------------------------
 
@@ -349,8 +353,10 @@ class _Run:
 
     def fill_required(self, ref: PrRef, snap: m.Snapshot) -> m.Snapshot:
         """``snap`` with ``required`` of its checks read from the host, or ``snap`` as it is,
-        with a warning, when the read fails or its answer does not fit the snapshot."""
-        if not snap.ci.checks:
+        with a warning, when the read fails or its answer does not fit the snapshot. A failure
+        that ends a host's run (``ends_run``) also stops every later required read of this run
+        (``required_stop``); the items stay whole, as the bulk answer is valid without it."""
+        if not snap.ci.checks or self.required_stop is not None:
             return snap
         owner, name = _split(ref)
         try:
@@ -359,17 +365,25 @@ class _Run:
             )
             if errors:
                 raise Malformed("the host answered errors")
-            required = _required_by_name(data, ref.number, snap.ci.head_sha)
+            self.limits.note_graphql(data)
+            required = _required_by_name(
+                data,
+                ref.number,
+                snap.ci.head_sha,
+                lambda text: self.env.warn(f"{ref}: required checks: {text}"),
+            )
         except ForgectlError as error:
             if error.code == "wrong_host_response":
                 raise
+            if ends_run(error, lambda: self.env.gateway.budget.remaining() <= 0):
+                self.required_stop = error
             self.env.warn(f"{ref}: required checks not read ({error.code})")
             return snap
         except Malformed as bad:
             self.env.warn(f"{ref}: required checks not read: unusable answer ({bad})")
             return snap
         checks = tuple(replace(c, required=required.get(c.name)) for c in snap.ci.checks)
-        return replace(snap, ci=replace(snap.ci, checks=checks))
+        return replace(snap, ci=replace(snap.ci, checks=checks), rate_limit=self.limits.result())
 
     # -- one PR --------------------------------------------------------------------------------
 
@@ -467,7 +481,12 @@ class _Run:
         )
 
 
-def _required_by_name(data: Mapping[str, Any], number: int, head_sha: str) -> dict[str, bool]:
+def _required_by_name(
+    data: Mapping[str, Any],
+    number: int,
+    head_sha: str,
+    warn: Callable[[str], None] = lambda _text: None,
+) -> dict[str, bool]:
     """Name -> ``isRequired`` of the head's checks in a ``REQUIRED_QUERY`` answer. A name that
     two checks share with different answers, or with one that is not a boolean, is left out
     (null). Raises ``Malformed`` when the answer is not the one asked for."""
@@ -484,6 +503,8 @@ def _required_by_name(data: Mapping[str, Any], number: int, head_sha: str) -> di
     if commit.get("oid") != head_sha:
         raise Malformed("the head commit")
     rollup = _opt_obj(commit.get("statusCheckRollup"), "the check rollup")
+    if rollup is None:
+        warn("the host answered no check rollup for the head, which has checks")
     contexts = _obj(rollup.get("contexts"), "the checks") if rollup else {}
     listed = contexts.get("nodes") or []
     if not isinstance(listed, list):
@@ -492,6 +513,9 @@ def _required_by_name(data: Mapping[str, Any], number: int, head_sha: str) -> di
     for node in listed:
         node = _obj(node, "a check")
         raw = node.get("name") if node.get("__typename") == "CheckRun" else node.get("context")
+        if not isinstance(raw, str):
+            warn("a check without a name string was left out")
+            continue
         flag = node.get("isRequired")
         key = _check_name(raw)
         seen[key] = flag if isinstance(flag, bool) and seen.get(key, flag) == flag else None
@@ -671,7 +695,7 @@ def read_bulk(
     result.unresolved.update(skipped)
     if lookup:
         for ref in list(result.snapshots):
-            if env.gateway.budget.remaining() <= 0:
+            if env.gateway.budget.remaining() <= 0 or run.required_stop is not None:
                 break  # the answer is whole without it: `required` stays null
             result.snapshots[ref] = run.fill_required(ref, result.snapshots[ref])
     return result
