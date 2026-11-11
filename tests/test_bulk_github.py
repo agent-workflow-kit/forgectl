@@ -583,3 +583,120 @@ def test_an_absent_repository_field_gives_the_pr_up(fake_forges: FakeForges) -> 
 def test_a_null_author_is_a_ghost_and_still_read(fake_forges: FakeForges) -> None:
     got = read_with(fake_forges, lambda pr: pr.update(author=None))
     assert REF in got.snapshots
+
+
+# -- required-ness of the checks on a lookup read (#136) ---------------------------------------
+
+
+def required_doc(**changes: Any) -> dict[str, Any]:
+    """A ``ForgectlRequired`` answer built from the show recording (its checks keep isRequired)."""
+    show = pr_of(show_recording())
+    commit = copy.deepcopy(show["commits"]["nodes"][0]["commit"])
+    pr = {"number": 7, "headRefOid": commit["oid"], "commits": {"nodes": [{"commit": commit}]}}
+    pr.update(changes)
+    return {"data": {"repository": {"pullRequest": pr}}}
+
+
+def lookup_read(forges: FakeForges, required: Any, warnings: list[str] | None = None) -> Any:
+    router = BulkRouter(others={"ForgectlRequired": required})
+    r = rig(forges, router)
+    if warnings is not None:
+        r.env.warn = warnings.append  # type: ignore[misc]
+    got = read_bulk(r.env, "github.com", [REF], now=lambda: NOW, lookup=True)
+    return got, router
+
+
+def test_a_lookup_read_fills_required_from_one_extra_request(fake_forges: FakeForges) -> None:
+    got, router = lookup_read(fake_forges, lambda _r: required_doc())
+    checks = got.snapshots[REF].to_dict()["ci"]["checks"]
+    per_pr = rig(fake_forges, Router(standard())).snapshot()
+    assert sorted(c["required"] for c in checks) == [False, True]
+    assert {c["name"]: c["required"] for c in checks} == {
+        c["name"]: c["required"] for c in per_pr["ci"]["checks"]
+    }
+    (request,) = [r for r in router.requests if operation(r) == "ForgectlRequired"]
+    assert request["query"] == github_bulk.REQUIRED_QUERY
+    assert request["variables"] == {"owner": "user-7", "name": "example-repo", "number": 7}
+    assert router.bulk_sizes == [1]
+
+
+def test_a_plain_bulk_read_asks_nothing_for_required(fake_forges: FakeForges) -> None:
+    router = BulkRouter()
+    got = read_bulk(rig(fake_forges, router).env, "github.com", [REF], now=lambda: NOW)
+    assert "ForgectlRequired" not in router.ops
+    assert [c.required for c in got.snapshots[REF].ci.checks] == [None, None]
+
+
+def test_a_filled_item_still_validates_and_keeps_every_other_field(fake_forges: FakeForges) -> None:
+    from .harness import schemas
+
+    filled, _ = lookup_read(fake_forges, lambda _r: required_doc())
+    plain = read_bulk(rig(fake_forges, BulkRouter()).env, "github.com", [REF], now=lambda: NOW)
+    item = filled.snapshots[REF].to_dict()
+    schemas.validate_cli_output("snapshot", item)
+    base = plain.snapshots[REF].to_dict()
+    for entry in (item, base):
+        for check in entry["ci"]["checks"]:
+            check["required"] = None
+    assert comparable(item) == comparable(base)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param(lambda _r: {"errors": [{"message": "boom"}], "data": None}, id="errors"),
+        pytest.param(lambda _r: required_doc(number=8), id="other-number"),
+        pytest.param(lambda _r: required_doc(headRefOid="f" * 40), id="head-moved"),
+        pytest.param(lambda _r: {"data": {"repository": {"pullRequest": None}}}, id="no-pr"),
+        pytest.param(
+            lambda _r: {"data": {"repository": {"pullRequest": {"number": 7}}}}, id="bare"
+        ),
+        pytest.param(lambda _r: {"data": {"repository": [1]}}, id="wrong-type"),
+        pytest.param(lambda _r: b"HTTP/2.0 502 Bad Gateway\r\n\r\nnope", id="http-502"),
+    ],
+)
+def test_a_failed_or_unusable_required_read_leaves_null_and_warns(
+    fake_forges: FakeForges, answer: Any
+) -> None:
+    warnings: list[str] = []
+    got, _ = lookup_read(fake_forges, answer, warnings)
+    assert got.unresolved == {}
+    assert [c.required for c in got.snapshots[REF].ci.checks] == [None, None]
+    assert len(warnings) == 1 and "required checks not read" in warnings[0]
+
+
+def test_a_rate_limited_required_read_leaves_null_and_warns(fake_forges: FakeForges) -> None:
+    limited = {
+        "errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}],
+        "data": None,
+    }
+    warnings: list[str] = []
+    got, _ = lookup_read(fake_forges, lambda _r: limited, warnings)
+    assert [c.required for c in got.snapshots[REF].ci.checks] == [None, None]
+    assert len(warnings) == 1
+
+
+def test_a_check_name_with_conflicting_answers_stays_null() -> None:
+    def node(flag: Any) -> dict[str, Any]:
+        return {"__typename": "CheckRun", "name": "dup", "isRequired": flag}
+
+    sha = "a" * 40
+    contexts = {
+        "nodes": [
+            node(True),
+            node(False),
+            {"__typename": "StatusContext", "context": "ok", "isRequired": True},
+            node("yes"),
+        ]
+    }
+    commit = {"oid": sha, "statusCheckRollup": {"contexts": contexts}}
+    data = {
+        "repository": {
+            "pullRequest": {
+                "number": 7,
+                "headRefOid": sha,
+                "commits": {"nodes": [{"commit": commit}]},
+            }
+        }
+    }
+    assert github_bulk._required_by_name(data, 7, sha) == {"ok": True}
