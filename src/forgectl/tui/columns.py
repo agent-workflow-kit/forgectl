@@ -17,7 +17,7 @@ later columns aligned, and a row is one line.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -66,6 +66,9 @@ class Summary:
     complete: bool = True  # False: the snapshot says part of its data could not be read
     mergeable: bool | None = None  # the host's mergeability; None when null or not reported
     blocked_count: int | None = None  # len(blocked_by); None when the snapshot has no list
+    # the blocker codes (bounded); None: no list. Not part of equality: the row-change highlight
+    # compares summaries, and the first blocker is all it ever showed
+    blocked_codes: tuple[str, ...] | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -110,7 +113,28 @@ def summarize(snap: dict[str, Any]) -> Summary:
         complete=snap.get("complete") is not False,
         mergeable=snap["mergeable"] if isinstance(snap.get("mergeable"), bool) else None,
         blocked_count=len(blocked) if isinstance(blocked, list) else None,
+        blocked_codes=_codes(blocked),
     )
+
+
+MAX_CODES = 16  # blocker codes in a summary: bounded, whatever the snapshot holds
+CODE_LIMIT = 40
+UNKNOWN_CODE = "unknown"  # stands for a blocker entry with no readable string code
+MAX_COUNT = 1_000_000  # a count in the snapshot summary is clamped to this
+
+
+def _bounded(value: str, limit: int = CODE_LIMIT) -> str:
+    """``value`` sanitized as a line, at most ``limit`` characters (a cut ends in the marker)."""
+    out = safe.line(value, limit)
+    mark = "<truncated>"
+    return out if len(out) <= limit else out[: limit - len(mark)] + mark
+
+
+def _codes(blocked: Any) -> tuple[str, ...] | None:
+    if not isinstance(blocked, list):
+        return None
+    codes = (_word(_d(b).get("code")) for b in blocked[:MAX_CODES])
+    return tuple(UNKNOWN_CODE if c is None else _bounded(c) for c in codes)
 
 
 # -- cells -------------------------------------------------------------------------------------
@@ -722,3 +746,32 @@ def order(
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def _clamp(count: int | None) -> int | None:
+    return None if count is None else min(count, MAX_COUNT)
+
+
+def snapshot_summary(state: RowState) -> dict[str, Any] | None:
+    """The snapshot data of a loaded row as a JSON object (``prs --query`` puts it in each item),
+    or None for a row that has none. ``ready`` and ``attention`` are the values of the ``ready``
+    and ``attention`` query fields, from ``is_ready`` and ``attention_level`` (the one
+    definition, not a copy). A field the snapshot did not report is null; the texts are sanitized
+    and bounded here and in ``_codes``, not by ``summarize``, and the counts are clamped."""
+    if state.status != LOADED or state.summary is None:
+        return None
+    s = state.summary
+    return {
+        "ci_state": None if s.ci_state is None else _bounded(s.ci_state),
+        "review_decision": None if s.review_decision is None else _bounded(s.review_decision),
+        "approvals": _clamp(s.approvals),
+        "approvals_left": _clamp(s.approvals_left),
+        "mergeable": s.mergeable,
+        "blocked_by": None if s.blocked_codes is None else list(s.blocked_codes),
+        "others_since_push": _clamp(s.others_since_push),
+        "awaiting_my_reply": _clamp(s.awaiting_my_reply),
+        "unresolved": _clamp(s.unresolved_threads),
+        "complete": s.complete,
+        "ready": is_ready(s),
+        "attention": attention_level(state),
+    }

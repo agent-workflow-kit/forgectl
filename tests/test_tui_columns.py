@@ -302,6 +302,14 @@ def test_type_confused_snapshot_fields_become_unknown_not_a_crash() -> None:
     assert columns.summarize({"activity": None}) == columns.Summary()
 
 
+def test_summaries_that_differ_only_in_blocker_codes_are_equal() -> None:
+    # the row-change highlight compares summaries: a code past the first blocker is not a change
+    a = columns.summarize({"blocked_by": [{"code": "ci_failing"}, {"code": "a"}]})
+    b = columns.summarize({"blocked_by": [{"code": "ci_failing"}, {"code": "b"}]})
+    assert a.blocked_codes != b.blocked_codes
+    assert a == b
+
+
 # -- ordering --------------------------------------------------------------------------------
 
 
