@@ -29,6 +29,50 @@
     },
     "rate_limit": {
       "$ref": "../defs.json#/$defs/rate_limit"
+    },
+    "query": {
+      "type": "string",
+      "description": "Present with --query or --default-query: the canonical text of the query that was applied (empty for the empty query)."
+    },
+    "snapshot_failures": {
+      "type": "array",
+      "description": "Present only when a query read snapshots and some could not be read: each listed PR whose snapshot failed. The filter cannot decide such a row (its snapshot fields are unknown), so it is in items only when the filter is true whatever those fields are (in_items). complete is false then.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "pr": {
+            "$ref": "../defs.json#/$defs/pr"
+          },
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string",
+                "x-untrusted": true,
+                "x-one-line": true,
+                "description": "Untrusted: redacted of tokens, one line."
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message"
+            ]
+          },
+          "in_items": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "pr",
+          "error",
+          "in_items"
+        ]
+      }
     }
   },
   "additionalProperties": false,

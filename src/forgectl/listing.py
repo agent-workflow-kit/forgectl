@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import registry
+from . import prsquery, registry
 from .backends import create_backend
 from .errors import ForgectlError
 from .fanout import (
@@ -20,23 +20,33 @@ from .identifiers import RepoRef
 from .output import emit_warning
 from .reads import make_env
 from .sanitize import sanitize_line
+from .surface import Implicit
 
 
 @registry.register("prs")
 def prs(inv: registry.Invocation) -> dict[str, Any]:
     a = inv.args
-    return run_prs(
-        make_env(inv),
-        PrsArgs(
-            repo=a.repo,
-            host=a.host,
-            author=a.author,
-            review_requested_from=a.review_requested_from,
-            state=a.state,
-            draft=a.draft,
-            updated_since=a.updated_since,
-            limit=a.limit,
-        ),
+    text = a.query
+    if a.default_query:  # the config's browse.query is the query only when asked for
+        text = inv.config.config.browse.query
+    args = PrsArgs(
+        repo=a.repo,
+        host=a.host,
+        author=a.author,
+        review_requested_from=a.review_requested_from,
+        state=str(a.state),
+        draft=a.draft,
+        updated_since=a.updated_since,
+        limit=a.limit,
+    )
+    env = make_env(inv)
+    if text is None:
+        return run_prs(env, args)
+    return prsquery.run(
+        env,
+        args,
+        prsquery.compile_query(text),
+        state_given=not isinstance(a.state, Implicit),
     )
 
 

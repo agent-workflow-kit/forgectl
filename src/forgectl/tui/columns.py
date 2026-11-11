@@ -21,10 +21,19 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from rich.cells import cell_len, set_cell_size
-
 from . import safe
 from .source import Row
+
+try:
+    from rich.cells import cell_len, set_cell_size
+except ImportError:  # the CLI (``prs --query``) uses the values and the sort without the tui extra
+
+    def cell_len(text: str) -> int:
+        raise ImportError("the terminal layout needs the tui extra: pip install forgectl[tui]")
+
+    def set_cell_size(text: str, total: int) -> str:
+        raise ImportError("the terminal layout needs the tui extra: pip install forgectl[tui]")
+
 
 # Row load states.
 LOADING = "loading"
