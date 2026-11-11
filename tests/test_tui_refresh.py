@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 from textual.pilot import Pilot
 from textual.widgets import OptionList
+from textual.worker import WorkerCancelled
 
 from forgectl.errors import ForgectlError
 from forgectl.tui import columns
@@ -147,7 +148,12 @@ async def quiesce(app: BrowseApp, source: FakeSource) -> None:
         app.refresh_timer.stop()
     if isinstance(source, RefreshSource):
         source.gate.set()
-    await app.workers.wait_for_complete()
+    try:
+        await app.workers.wait_for_complete()
+    except (
+        WorkerCancelled
+    ):  # a worker that shutdown cancelled before it started: nothing to wait for
+        pass
 
 
 async def until(pilot: Pilot[None], cond: Callable[[], bool], tries: int = 200) -> None:
