@@ -81,7 +81,8 @@ HELP_KEYS: list[tuple[str, str]] = [
         "F",
         "the query panel: a form and a query line in step, e.g. `ci IN (failing, pending) AND "
         "NOT draft ORDER BY age DESC`; enter applies, escape cancels, Up and Down in the line "
-        "step through the history",
+        "step through the history; `ORDER BY ready DESC, attention DESC` puts PRs ready to merge "
+        "first, then those needing attention (`ready` and `attention` also filter)",
     ),
     ("D", "set the current query as the default (writes config.d/90-browse-query.yaml)"),
     ("a", "quick filter: authored by me (a preset that edits the query)"),

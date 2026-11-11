@@ -8,7 +8,7 @@ the push", so an author in ``activity.ignore_authors`` cannot move a row.
 
 Fields read from the snapshot (all optional, anything of the wrong type counts as unknown):
 ``ci.state``, ``approvals``, ``review_decision``, ``blocked_by[0].code``, ``head.pushed_at``,
-``updated_at``, ``complete`` and
+``updated_at``, ``complete``, ``mergeable``, the length of ``blocked_by`` and
 ``activity.{comments_total, unresolved_threads, others_since_push, awaiting_my_reply}``.
 
 Every fixed-width cell is cut and padded by terminal cell width, so wide characters keep the
@@ -55,6 +55,8 @@ class Summary:
     others_since_push: int | None = None
     awaiting_my_reply: int | None = None
     complete: bool = True  # False: the snapshot says part of its data could not be read
+    mergeable: bool | None = None  # the host's mergeability; None when null or not reported
+    blocked_count: int | None = None  # len(blocked_by); None when the snapshot has no list
 
 
 @dataclass
@@ -97,6 +99,8 @@ def summarize(snap: dict[str, Any]) -> Summary:
         others_since_push=_count(activity.get("others_since_push")),
         awaiting_my_reply=_count(activity.get("awaiting_my_reply")),
         complete=snap.get("complete") is not False,
+        mergeable=snap["mergeable"] if isinstance(snap.get("mergeable"), bool) else None,
+        blocked_count=len(blocked) if isinstance(blocked, list) else None,
     )
 
 
@@ -487,6 +491,10 @@ class SortKey:
 SortState = tuple[SortKey, ...]
 
 SORTABLE = tuple(c.id for c in COLUMNS if c.id != "note")  # the note is a status, not data
+# Sort-only keys: ``ORDER BY`` takes them but no list column shows them, so the header, its
+# cursor and click targets stay as they are (``SORTABLE``). ``ORDER_KEYS`` is what ORDER BY takes.
+SORT_ONLY = ("ready", "attention")
+ORDER_KEYS = SORTABLE + SORT_ONLY
 
 
 def toggle_sort(sort: SortState, column: str) -> SortState:
@@ -547,8 +555,13 @@ def _value(column: str, row: Row, state: RowState) -> Any:
         # youngest first when ascending: the key is minus the instant; each part is its own
         # component, so an unknown push stays after the known ones in both directions
         return (-updated, None if pushed is None else -pushed)
+    if column == "attention":
+        return attention_level(state)  # never unknown: a row with no snapshot has none
     if s is None:
         return None
+    if column == "ready":
+        ready = is_ready(s)
+        return None if ready is None else int(ready)
     if column == "ci":
         return CI_RANK.get(s.ci_state or "")
     if column == "review":
@@ -608,23 +621,62 @@ def sort_key(sort: SortState, row: Row, state: RowState) -> tuple[Any, ...]:
     return tuple(key)
 
 
-def attention_rank(state: RowState) -> int:
-    """0 failing CI, 1 new comments from others, 2 awaiting my reply, 3 changes requested, 4 rest.
+def attention_level(state: RowState) -> int:
+    """How much attention a row needs, 0 (none) to 4: the one definition, used by the ``attention``
+    field and sort key, the needs-attention preset and ``attention_rank``.
 
-    A row without a loaded snapshot is in the rest: nothing is known to need attention.
+    4 failing CI, 3 new comments from others since the push (``others_since_push``), 2 a thread
+    awaiting my reply, 1 changes requested, 0 the rest. Unresolved threads alone do not count
+    (only the two activity counts above do). A row without a loaded snapshot is 0, not unknown:
+    nothing is known to need attention, so ``attention > 0`` does not show it and
+    ``attention = 0`` does.
     """
     if state.status != LOADED or state.summary is None:
-        return 4
+        return 0
     s = state.summary
     if s.ci_state == "failing":
-        return 0
+        return 4
     if (s.others_since_push or 0) > 0:
-        return 1
+        return 3
     if (s.awaiting_my_reply or 0) > 0:
         return 2
     if s.review_decision == "changes_requested":
-        return 3
-    return 4
+        return 1
+    return 0
+
+
+def attention_rank(state: RowState) -> int:
+    """The preset's rank, ``4 - attention_level``: 0 failing CI ... 4 the rest."""
+    return 4 - attention_level(state)
+
+
+def is_ready(s: Summary) -> bool | None:
+    """Ready to merge, from a loaded snapshot: ``blocked_by`` is empty, ``mergeable`` is true,
+    CI is ``passing`` and the review decision is neither ``changes_requested`` nor
+    ``review_required``. Three-valued, and never true on a guess:
+
+    * False when an input that was reported rules it out (a blocker, ``mergeable`` false, CI not
+      passing, a review decision that is not ready), even if the snapshot is incomplete.
+    * None (unknown) when nothing reported rules it out but an input is missing (``mergeable``
+      null, an unreported CI state, review decision or blocker list) or the snapshot is
+      ``complete: false``, since the part that could not be read may hold a blocker.
+    * True only when every input is reported and ready and the snapshot is complete.
+    """
+    if s.blocked_count:
+        return False
+    if s.mergeable is False:
+        return False
+    if s.ci_state in CI_RANK and s.ci_state != "passing":
+        return False
+    if s.review_decision in ("changes_requested", "review_required"):
+        return False
+    known = (
+        s.blocked_count == 0
+        and s.mergeable is True
+        and s.ci_state == "passing"
+        and s.review_decision in DECISIONS
+    )
+    return True if known and s.complete else None
 
 
 def repo_of(row: Row) -> str:
@@ -648,8 +700,8 @@ def order(
     ordered = sorted(rows, key=lambda r: r.pr)
     ordered.sort(key=_newest_first)
     ordered.sort(key=repo_of)
-    if mode == SORT_ATTENTION:
-        ordered.sort(key=lambda r: attention_rank(states.get(r.pr) or RowState()))
+    if mode == SORT_ATTENTION:  # ``ORDER BY attention DESC`` with these tie-breaks
+        ordered.sort(key=lambda r: -attention_level(states.get(r.pr) or RowState()))
     return ordered
 
 
