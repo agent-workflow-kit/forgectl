@@ -42,6 +42,8 @@ SNAPSHOT_FIELDS = frozenset(
         "others_since_push",
         "awaiting_reply",
         "pushed",
+        "ready",
+        "attention",
     }
 )
 LIST_FIELDS = frozenset(
@@ -51,7 +53,9 @@ LIST_FIELDS = frozenset(
 #: The sort columns whose key comes from the snapshot (``badge`` adds the blocker to the state).
 #: ``age`` is not one: its key is the update time of the item, never the snapshot's times
 #: (``apply`` leaves them out), so the order does not depend on a snapshot being read.
-SNAPSHOT_COLUMNS = frozenset({"badge", "ci", "approvals", "review", "comments"})
+SNAPSHOT_COLUMNS = frozenset(
+    {"badge", "ci", "approvals", "review", "comments", "ready", "attention"}
+)
 LIST_COLUMNS = frozenset({"pr", "age", "title", "author", "roles"})
 
 #: The ``error.code`` of a row whose snapshot the read gave no answer for at all.
@@ -112,14 +116,24 @@ def _list_age(item: dict[str, Any], now: datetime) -> int | None:
 
 
 def decide(
-    where: query.Node | None, row: Row, state: columns.RowState, now: datetime
+    where: query.Node | None,
+    row: Row,
+    state: columns.RowState,
+    now: datetime,
+    *,
+    cheap: bool = False,
 ) -> bool | None:
     """The filter's answer for a row (``filtering``'s getter), except that ``age`` is always the
     update time of the list item: not the snapshot's, so that the answer does not depend on
-    whether a snapshot was read, and a host-side ``updated_since`` can narrow the list."""
+    whether a snapshot was read, and a host-side ``updated_since`` can narrow the list.
+
+    ``cheap`` is the pass that decides which snapshots to read: ``attention`` is 0 for a row
+    without a snapshot, which a snapshot may change, so in that pass it is unknown, not 0."""
     base = filtering.getter(row, state, now)
 
     def get(name: str) -> Any:
+        if cheap and name == "attention":
+            return None
         return _list_age(row.item, now) if name == "age" else base(name)
 
     return query.evaluate(where, get)
@@ -274,8 +288,8 @@ def apply(
     # the cheap pass: what the list alone decides. A row the filter makes false without a
     # snapshot is out (its snapshot is never read); the rest, true or unknown, survive
     unloaded = columns.RowState()
-    cheap = undecided(q.where)
-    survivors = [r for r in rows if decide(cheap, r, unloaded, now) is not False]
+    unread = undecided(q.where)
+    survivors = [r for r in rows if decide(unread, r, unloaded, now, cheap=True) is not False]
     if survivors and needs_snapshots(q):
         states, messages, stopped = _states(env, survivors, read)
         host_errors += [host_error(e["host"], entry_error(e)) for e in stopped]

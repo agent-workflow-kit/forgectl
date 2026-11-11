@@ -222,6 +222,41 @@ def test_an_empty_listing_reads_no_snapshot() -> None:
     assert out["items"] == [] and read.calls == []  # type: ignore[attr-defined]
 
 
+def ready_attention_snaps() -> list[dict[str, Any]]:
+    """#1 ready (complete, mergeable, passing, approved), #2 failing CI (attention 4), #3 ready
+    but with changes requested (attention 1), #4 passing but not mergeable."""
+    ready = {**snap(1), "mergeable": True}
+    failing = {**snap(2, "failing"), "mergeable": True}
+    changes = {**snap(3, "passing", "changes_requested"), "mergeable": True}
+    conflict = {**snap(4), "mergeable": False}
+    return [ready, failing, changes, conflict]
+
+
+def test_order_by_ready_and_attention_reads_snapshots_and_orders_as_the_tui_does() -> None:
+    items = [item(n) for n in (1, 2, 3, 4)]
+    snaps = ready_attention_snaps()
+    text = "ORDER BY ready DESC, attention DESC"
+    read = reader(snaps)
+    out = run(text, listing(*items), read)
+    assert read.calls == [[f"{REPO}#{n}" for n in (1, 2, 3, 4)]]  # type: ignore[attr-defined]
+    rows = [Row(item=i) for i in items]
+    states = {s["pr"]: columns.RowState(columns.LOADED, columns.summarize(s)) for s in snaps}
+    q = prsquery.compile_query(text)
+    want = columns.order(rows, states, columns.SORT_REPO, filtering.sort_of(q.order))
+    assert numbers(out) == [r.item["number"] for r in want] == [1, 2, 3, 4]
+
+
+def test_a_query_on_attention_reads_the_snapshot_of_a_row_the_list_alone_would_drop() -> None:
+    read = reader(ready_attention_snaps())
+    out = run("attention > 0", listing(*(item(n) for n in (1, 2, 3, 4))), read)
+    assert read.calls and numbers(out) == [2, 3]  # type: ignore[attr-defined]
+
+
+def test_a_filter_on_ready_keeps_only_the_ready_rows() -> None:
+    out = run("ready", listing(*(item(n) for n in (1, 2, 3, 4))), reader(ready_attention_snaps()))
+    assert numbers(out) == [1]
+
+
 # -- rows whose snapshot failed ------------------------------------------------------------------
 
 
