@@ -529,7 +529,7 @@ class BrowseApp(App[None]):
                     fallback = f"light poll: {why}; listed with prs"
                 except ForgectlError as err:
                     if err.code == "rate_limited":
-                        self._poll_held(None, err.code)
+                        self._poll_held(self._held_reading(err), err.code)
                         return
                     fallback = f"light poll: {safe.line(err.code, 60)}; listed with prs"
                 except Exception as exc:  # a source bug must not take the UI down
@@ -613,6 +613,18 @@ class BrowseApp(App[None]):
             if pr in self._light_keys:
                 self._light_keys[pr] = lightpoll.STALE
         self._poll_batch = set()
+
+    @staticmethod
+    def _held_reading(err: ForgectlError) -> dict[str, Any] | None:
+        """The reading a rate-limited poll error carries (its host and that host's reset time):
+        a limited host reads as spent. None when the error names no host."""
+        details = err.details if isinstance(err.details, dict) else {}
+        host = details.get("host")
+        if not isinstance(host, str) or not host:
+            return None
+        carried = details.get("rate_limit")
+        reset_at = carried.get("reset_at") if isinstance(carried, dict) else None
+        return {"host": host, "remaining": 0, "reset_at": reset_at}
 
     def _poll_held(self, rate_limit: Any, reason: str) -> None:
         """A poll that failed on every host for a rate limit: no `prs` call (it would fail the

@@ -633,8 +633,7 @@ def test_a_change_of_the_open_detail_row_is_not_lost_when_its_detail_load_is_can
         await settle(app, pilot)
         source.cancel_pr = None
         source.calls.clear()
-        await pilot.press("R")
-        await settle(app, pilot)
+        await cycle(app, pilot)  # an automatic cycle reads the open row only when it is wanted
         assert shown in source.reads()
 
     go(source, script)
@@ -708,6 +707,31 @@ def test_a_rate_limited_poll_is_not_followed_by_prs_and_pauses_the_host(raised: 
         assert "rate_limited" in content_of(app, "#status").plain
         assert app._rates.low("github.com", clock.now)
         assert app._rows == rows  # the list on screen stays
+
+    go(source, script, clock=clock)
+
+
+def test_a_single_host_rate_limit_pauses_that_host_until_its_reset_and_only_it() -> None:
+    source = LightSource([make_item(1, repo=GH), make_item(1, repo=GL)])
+    clock = Clock()
+    reset = T0 + timedelta(minutes=10)
+    reading = {
+        "host": "github.com",
+        "remaining": 0,
+        "reset_at": reset.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await seed(app, pilot, source)
+        source.light_error = ForgectlError(
+            "rate_limited", "slow down", details={"host": "github.com", "rate_limit": reading}
+        )
+        await cycle(app, pilot)
+        assert source.count("prs") == 0
+        assert app._rates.low("github.com", clock.now)
+        assert app._rates.low("github.com", reset - timedelta(seconds=1))
+        assert not app._rates.low("github.com", reset + timedelta(seconds=1))
+        assert not app._rates.low("gitlab.example", clock.now)
 
     go(source, script, clock=clock)
 

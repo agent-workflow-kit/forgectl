@@ -467,6 +467,29 @@ def test_poll_a_failed_host_is_a_partial_result(monkeypatch: pytest.MonkeyPatch)
     schemas.validate_cli_output("poll", out)
 
 
+def test_poll_a_single_rate_limited_host_carries_its_reset_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from forgectl.gateway import RateReading
+
+    original = poll.lowest_rate_limit
+    reading = RateReading(host="github", remaining=0, reset_at="2026-11-03T12:10:00Z")
+
+    def lowest(env: Any, queried: list[str]) -> Any:
+        env.gateway.rate_readings.append(reading)
+        return original(env, queried)
+
+    monkeypatch.setattr(poll, "lowest_rate_limit", lowest)
+    with pytest.raises(ForgectlError) as raised:
+        command(monkeypatch, {"github": ForgectlError("rate_limited", "slow down")})
+    err = raised.value
+    assert err.code == "rate_limited"
+    assert err.details == {
+        "host": "github",
+        "rate_limit": {"host": "github", "remaining": 0, "reset_at": "2026-11-03T12:10:00Z"},
+    }
+
+
 def test_poll_an_unsupported_host_is_named_and_the_list_incomplete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

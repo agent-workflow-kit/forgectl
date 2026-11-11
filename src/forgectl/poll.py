@@ -95,7 +95,17 @@ def run_poll(env: ReadEnv) -> dict[str, Any]:
             truncated.append(host)
         complete = complete and page.complete
     if failures and len(queried) == 1:
-        raise failures[0][1]
+        host, error = failures[0]
+        if (
+            error.code == "rate_limited"
+        ):  # carry the host and its reading: the pause ends at its reset
+            raise ForgectlError(
+                "rate_limited",
+                error.message,
+                retry_after=error.retry_after,
+                details={"host": host, "rate_limit": lowest_rate_limit(env, queried).to_dict()},
+            ) from error
+        raise error
     try:
         ordered = _sorted(items)
     except ForgectlError as error:  # a time that is not RFC 3339
