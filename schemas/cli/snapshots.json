@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forgectl/cli/snapshots.json",
+  "title": "snapshots output",
+  "description": "Snapshots of many PRs from a few GraphQL requests per host. Each item is a `snapshot` output, in the order the PRs were given. A PR that has no item is in `failed`. Printed on exit 0.",
+  "type": "object",
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "snapshot.json"
+      }
+    },
+    "failed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "pr": {
+            "$ref": "../defs.json#/$defs/pr"
+          },
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "oneOf": [
+                  {
+                    "$ref": "../defs.json#/$defs/error_code"
+                  },
+                  {
+                    "const": "bulk_unavailable",
+                    "description": "Only with --bulk-only: the bulk reader could not read this PR whole and nothing was read per PR."
+                  }
+                ]
+              },
+              "message": {
+                "type": "string",
+                "x-untrusted": true,
+                "description": "Untrusted: may hold a host's message."
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "pr",
+          "error"
+        ]
+      }
+    },
+    "complete": {
+      "type": "boolean",
+      "description": "true only when every PR has an item, no host stopped, and every item is itself complete."
+    },
+    "errors": {
+      "type": "array",
+      "description": "A host whose bulk requests stopped (rate limit exhausted, authentication). The PRs it did not read are in `failed`.",
+      "items": {
+        "$ref": "../defs.json#/$defs/host_error"
+      }
+    },
+    "hosts_queried": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/host"
+      }
+    },
+    "fallback": {
+      "type": "array",
+      "description": "The PRs whose item was read by the per-PR `snapshot` instead of the bulk reader.",
+      "items": {
+        "$ref": "../defs.json#/$defs/pr"
+      }
+    },
+    "rate_limit": {
+      "$ref": "../defs.json#/$defs/rate_limit"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "items",
+    "failed",
+    "complete",
+    "errors",
+    "hosts_queried",
+    "fallback",
+    "rate_limit"
+  ]
+}

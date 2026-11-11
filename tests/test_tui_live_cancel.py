@@ -322,6 +322,44 @@ def test_close_ends_a_group_started_during_the_pr_list_load(tmp_path: Path) -> N
     assert children[0].returncode == -signal.SIGKILL
 
 
+def test_close_ends_a_group_started_during_a_bulk_snapshot_read(tmp_path: Path) -> None:
+    started = threading.Event()
+    children: list[subprocess.Popen[bytes]] = []
+    runner = sleeper_runner(tmp_path, started, children)
+
+    def run(argv: list[str]) -> dict[str, Any]:
+        gateway = Gateway(
+            LoadedConfig.defaults(), timeout=30, environ=environ_for(tmp_path), runner=runner
+        )
+        gateway.api(GH, "GET", ["x"])
+        return {}
+
+    source = LiveSource(run)
+    thread = threading.Thread(target=lambda: _swallow(lambda: source.snapshots([PR])), daemon=True)
+    thread.start()
+    assert started.wait(10)
+    source.close()
+    thread.join(10)
+    assert not thread.is_alive()
+    assert children[0].returncode == -signal.SIGKILL
+
+
+def test_a_bulk_snapshot_read_started_after_close_is_cancelled_without_a_call(
+    tmp_path: Path,
+) -> None:
+    calls: list[int] = []
+
+    def runner(argv: Any, **kw: Any) -> ProcessResult:
+        calls.append(1)
+        return answer(argv, **kw)
+
+    source = LiveSource(reads(tmp_path, runner, 1))
+    source.close()
+    with pytest.raises(Cancelled):
+        source.snapshots([PR])
+    assert calls == []
+
+
 def _swallow(fn: Callable[[], Any]) -> None:
     try:
         fn()

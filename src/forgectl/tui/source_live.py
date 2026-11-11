@@ -44,7 +44,7 @@ import os
 import signal
 import threading
 from argparse import Namespace
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from forgectl import cli, registry
@@ -66,7 +66,7 @@ __all__ = ["Cancelled", "LiveSource", "in_process_runner"]
 CLOSE_WAIT = 5.0
 """Seconds ``LiveSource.close`` waits for the calls in flight to return after their groups died."""
 
-READ_COMMANDS = frozenset({"prs", "snapshot", "diff"})
+READ_COMMANDS = frozenset({"prs", "snapshot", "snapshots", "diff"})
 
 # Guards the once-only config load of a runner (``registry.load_handlers`` locks itself).
 _LOAD_LOCK = threading.Lock()
@@ -232,6 +232,19 @@ class LiveSource:
         """The ``diff`` output of one PR. Thread-safe."""
         return self._one("diff", pr, cancelled)
 
+    def snapshots(
+        self, prs: Sequence[str], *, cancelled: Callable[[], bool] | None = None
+    ) -> dict[str, Any]:
+        """The ``snapshots --bulk-only`` output of ``prs``: what the bulk reader read whole as
+        ``items``, the rest in ``failed`` (the caller reads those with ``snapshot``). Thread-safe;
+        like ``snapshot``, the read is cancellable and ``close`` kills it."""
+        for pr in prs:
+            if not is_pr(pr):  # also keeps an option-looking value out of the argument list
+                raise ForgectlError("invalid_pr", "snapshots: not a PR in the form host/path#N")
+        if not prs:
+            return {"items": [], "failed": [], "complete": True, "errors": []}
+        return self._tracked(["snapshots", "--bulk-only", *prs], cancelled, prs[0])
+
     def _one(self, command: str, pr: str, cancelled: Callable[[], bool] | None) -> dict[str, Any]:
         if not is_pr(pr):  # also keeps an option-looking value out of the argument list
             raise ForgectlError("invalid_pr", f"{command}: not a PR in the form host/path#N")
@@ -241,7 +254,7 @@ class LiveSource:
         self, argv: list[str], cancelled: Callable[[], bool] | None, subject: str
     ) -> dict[str, Any]:
         """Run one read inside a ``CallScope`` that this source can cancel and kill (``prs``,
-        ``snapshot`` and ``diff`` all come through here)."""
+        ``snapshot``, ``diff`` and ``snapshots`` all come through here)."""
 
         def stop() -> bool:
             if self._closed:
