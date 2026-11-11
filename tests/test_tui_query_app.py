@@ -20,7 +20,7 @@ from forgectl.tui.query_screen import QueryScreen
 from forgectl.tui.query_store import QueryStore
 from forgectl.tui.source import Row
 
-from .test_tui_app import content_of, list_prompts, settle
+from .test_tui_app import content_of, list_prompts, settle, wait_until
 from .test_tui_columns import GH, GL, activity, snap
 from .tui_fakes import FakeOpener, FakeSource, GatedSource, make_item
 
@@ -459,31 +459,33 @@ def test_a_row_without_a_snapshot_matches_no_value_filter_and_the_panel_counts_i
     source = GatedSource(gated=("snapshot",), authored=base.authored, snapshots=base.snapshots)
 
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
-        for _ in range(100):  # the list is in; the snapshots are held back by the gate
-            if len(shown(app)) == 4:
-                break
-            await pilot.pause(0.05)
-        assert len(shown(app)) == 4  # loading rows, no filter
+        # the panel's report follows the line a tick or more later: wait for it, never a fixed pause
+        async def report_is(check: Callable[[str], bool]) -> None:
+            await wait_until(pilot, lambda: check(content_of_screen(app, "#q-report")), timeout=30)
+
+        # the list is in; the snapshots are held back by the gate
+        await wait_until(pilot, lambda: len(shown(app)) == 4, timeout=30)  # loading rows, no filter
         await open_panel(app, pilot)
         await type_line(app, pilot, "ci = failing")
-        assert content_of_screen(app, "#q-report") == (
-            "0 of 4 PRs match; 4 hidden because their snapshot has not loaded"
+        await report_is(
+            lambda r: r == "0 of 4 PRs match; 4 hidden because their snapshot has not loaded"
         )
         await type_line(app, pilot, "NOT ci = failing")  # unknown stays unknown under NOT
-        assert "4 hidden because" in content_of_screen(app, "#q-report")
+        await report_is(lambda r: "4 hidden because" in r)
         await type_line(app, pilot, "ci IS NULL")
-        assert content_of_screen(app, "#q-report") == "4 of 4 PRs match"
+        await report_is(lambda r: r == "4 of 4 PRs match")
         await type_line(app, pilot, "title LIKE '*e*' AND ci = failing")  # the list data is known
-        assert "hidden because" in content_of_screen(app, "#q-report")
+        await report_is(lambda r: "hidden because" in r)
         await type_line(app, pilot, "title = nothing AND ci = failing")  # false dominates
-        assert content_of_screen(app, "#q-report") == "0 of 4 PRs match"
+        await report_is(lambda r: r == "0 of 4 PRs match")
         await type_line(app, pilot, "ci = failing")
+        await report_is(lambda r: "hidden because" in r)
         await press(app, pilot, "q-apply")
         assert shown(app) == []
         source.gate.set()
         await app.workers.wait_for_complete()
-        await pause(pilot)
-        assert shown(app) == [n(1)]  # the row appears when its snapshot arrives
+        await wait_until(pilot, lambda: shown(app) == [n(1)], timeout=30)  # appears on arrival
+        assert shown(app) == [n(1)]
 
     drive(script, source, wait=False)
 
