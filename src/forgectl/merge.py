@@ -228,15 +228,21 @@ class MergeRun:
     # -- step 4 --------------------------------------------------------------------------------
 
     def _check(
-        self, read: PrRead, *, earlier: tuple[Blocker, ...] | None, method: str | None = None
+        self,
+        read: PrRead,
+        *,
+        earlier: tuple[Blocker, ...] | None,
+        method: str | None = None,
+        resolved: bool = False,
     ) -> Verdict:
         """The table of step 4. ``earlier`` is the blockers of the first run when this is the
         re-read of step 7: a blocker that was not there then refuses even under
-        ``--override-blocks``. ``method`` is the first run's method on the re-read: it is kept,
-        or refused if the repo no longer allows it, never resolved again."""
+        ``--override-blocks``. ``resolved`` is set on the re-read, where ``method`` is the first
+        run's verdict: kept (a resolved ``None``, the host deciding, included), or refused if the
+        repo no longer allows it, never resolved again."""
         pr = read.pr
         # a --dry-run refusal reports what was read, and the caller's method until it resolves
-        self._remember(read, self.args.method if method is None else method)
+        self._remember(read, self.args.method if not resolved else method)
         if pr.state == "closed":
             raise refused(
                 "not_open", "the pull request is closed and not merged", details={"state": "closed"}
@@ -250,9 +256,9 @@ class MergeRun:
                 "a merge queue (or an unknown queue setting) needs a human: a non-human actor "
                 "cannot rely on the head check",
             )
-        if method is None:
+        if not resolved:
             method = resolve_method(self.inv, pr)
-        else:
+        elif method is not None:
             _still_allowed(pr, method)
         check = getattr(self.backend, "check_method", None)
         if check is not None:
@@ -340,7 +346,12 @@ class MergeRun:
         current = first
         if dialog or hooks.entries(self.inv.config.config, "pre-merge"):
             current = self._read()
-            verdict = self._check(current, earlier=self._effective_blockers(first), method=method)
+            verdict = self._check(
+                current,
+                earlier=self._effective_blockers(first),
+                method=method,
+                resolved=True,
+            )
             if verdict.already_merged:
                 self._log("info", "already_merged", {"decision_ids": self.decision_ids})
                 return self._already_merged_output(current.pr)
@@ -419,7 +430,13 @@ class MergeRun:
         outcome: Outcome,
     ) -> None:
         # already merged by someone else: what merged is unknown
-        fields = self._hook_fields(read, None if outcome.already else method, blockers, ci=False)
+        if outcome.already:
+            shown = None
+        elif outcome.pr is not None:
+            shown = self._reported(outcome.pr, method)  # what the output reports
+        else:
+            shown = method
+        fields = self._hook_fields(read, shown, blockers, ci=False)
         fields["observed"] = outcome.observed
         fields["result"] = outcome.result
         result = hooks.run_post_hooks(
@@ -530,6 +547,8 @@ class MergeRun:
             return self._verify(accepted=True, why=None)
         if answer.kind == "stale_head":
             return Outcome("failed", error=self._stale_head())
+        if answer.kind == "locked":  # a 423: like a 5xx, only a read decides
+            return self._verify(accepted=False, why=self._locked(answer))
         return self._after_405(answer)
 
     def _stale_head(self) -> ForgectlError:
@@ -544,12 +563,19 @@ class MergeRun:
             details=details,
         )
 
+    @staticmethod
+    def _locked(answer: MergeAnswer) -> ForgectlError:
+        return ForgectlError(
+            "outcome_unknown",
+            f"the host answered {answer.status} (the merge request is locked)",
+        )
+
     def _after_405(self, answer: MergeAnswer) -> Outcome:
-        """A 405: one re-read decides (interface: Merge order, step 8)."""
+        """A 405 (or 406, 422): one re-read decides (interface: Merge order, step 8)."""
         shown = answer.message or "no reason given"
         rejected = ForgectlError(
             "host_rejected",
-            f"the host refused the merge (405): {shown}",
+            f"the host refused the merge ({answer.status}): {shown}",
             details={"status": answer.status},
         )
         try:
@@ -563,6 +589,9 @@ class MergeRun:
         if answer.kind == "base_modified":
             return Outcome("failed", error=rejected)
         blockers = sorted_blockers(pr.blocked_by)
+        if pr.state == "open" and Blocker(BlockerCode.OTHER, "locked") in blockers:
+            # a merge is running: not a blocker to refuse on, poll like a 5xx
+            return self._verify(accepted=False, why=self._locked(answer))
         if pr.state == "open" and blockers:
             return Outcome(
                 "failed",

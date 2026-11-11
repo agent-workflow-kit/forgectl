@@ -1260,8 +1260,9 @@ class GitLabBackend:
     def check_method(self, pr: m.PR, method: str | None) -> None:
         """Refuse a method the MR cannot get (read by `merge.py` before any hook or write)."""
         facts = self._merge_facts.get(pr.pr)
-        if facts is not None:
-            gitlab_merge.check_method(facts, method)
+        if facts is None:
+            raise ForgectlError("internal", "gitlab merge: the merge request was not read first")
+        gitlab_merge.check_method(facts, method)
 
     def merged_method(self, pr: m.PR, sent: str | None) -> str | None:
         """The method that merged, derived from the last read (see `gitlab_merge`)."""

@@ -563,6 +563,128 @@ def test_auto_is_still_not_implemented(rig: Rig) -> None:
     assert_no_write(rig)
 
 
+# -- round 1 review fixes ----------------------------------------------------------------------
+
+
+def hook_config(name: str, cmd: str) -> str:
+    return f"hooks:\n  {name}:\n    - cmd: {json.dumps(cmd)}\n"
+
+
+@pytest.mark.parametrize(
+    ("merge_method", "squashed", "flag", "expected"),
+    [
+        ("merge", False, None, "merge"),
+        ("ff", False, None, "rebase"),
+        ("merge", True, None, "squash"),
+        ("ff", False, "rebase", "rebase"),
+        ("merge", False, "merge", "merge"),
+    ],
+)
+def test_the_post_merge_payload_method_is_the_reported_method(
+    rig: Rig, tmp_path: Path, merge_method: str, squashed: bool, flag: str | None, expected: str
+) -> None:
+    out = tmp_path / "post.json"
+    after = merged(squash_sha=SQUASH_SHA if squashed else None, squash_on_merge=squashed)
+    rig.script(mr(squash_on_merge=squashed), after, proj=project(merge_method))
+    rig.put()
+    done = rig.run(method=flag, extra_config=hook_config("post-merge", f"cat > {out}"))
+    assert done.code == 0, done.err
+    assert done.json["method"] == expected
+    assert json.loads(out.read_text())["method"] == expected
+
+
+def test_a_sent_squash_is_reported_even_when_the_re_read_shows_no_squash(rig: Rig) -> None:
+    rig.script(mr(), merged(merge_sha=MERGE_SHA, squash_on_merge=False))
+    rig.put()
+    done = rig.run(method="squash")
+    assert done.code == 0, done.err
+    assert done.json["method"] == "squash"
+
+
+def test_a_423_whose_re_read_shows_merged_is_success_after_one_put(rig: Rig) -> None:
+    rig.script(mr(), merged(merge_sha=MERGE_SHA))
+    rig.put(423, {"message": "locked"})
+    done = rig.run(method="merge")
+    assert done.code == 0, done.err
+    assert done.json["merged"] is True
+    assert len(rig.puts()) == 1
+
+
+def test_a_423_whose_mr_stays_open_is_outcome_unknown_after_one_put(rig: Rig) -> None:
+    rig.script(mr())
+    rig.put(423, {"message": "locked"})
+    done = rig.run(method="merge")
+    assert done.code == 12 and done.error["code"] == "outcome_unknown"
+    assert len(rig.puts()) == 1
+    assert [r["result"] for r in rig.audit()] == ["attempted", "outcome_unknown"]
+
+
+@pytest.mark.parametrize("status", [405, 406, 422])
+def test_a_refusal_whose_re_read_shows_locked_is_polled_not_not_ready(
+    rig: Rig, status: int
+) -> None:
+    rig.script(mr(), mr(state="locked"), merged(merge_sha=MERGE_SHA))
+    rig.put(status, {"message": "x"})
+    done = rig.run(method="merge")
+    assert done.code == 0, done.err
+    assert done.json["merged"] is True
+    assert len(rig.puts()) == 1
+
+
+def test_a_refusal_whose_re_read_stays_locked_is_outcome_unknown(rig: Rig) -> None:
+    rig.script(mr(), mr(state="locked"))
+    rig.put(422, {"message": "x"})
+    done = rig.run(method="merge")
+    assert done.code == 12 and done.error["code"] == "outcome_unknown"
+
+
+def test_the_host_rejected_message_names_the_real_status(rig: Rig) -> None:
+    rig.script(mr())
+    rig.put(422, {"message": "Branch cannot be merged"})
+    done = rig.run(method="merge")
+    assert "(422)" in done.error["message"] and "(405)" not in done.error["message"]
+
+
+def test_the_squash_refusal_has_no_doubled_word(rig: Rig) -> None:
+    rig.script(mr(squash_on_merge=True))
+    done = rig.run(method="merge")
+    assert done.code == 20
+    assert "merge merge" not in done.error["message"]
+
+
+def test_the_gitlab_backend_offers_the_merge_hooks() -> None:
+    from forgectl.backends.gitlab import GitLabBackend
+
+    assert callable(getattr(GitLabBackend, "check_method", None))
+    assert callable(getattr(GitLabBackend, "merged_method", None))
+
+
+def test_check_method_without_facts_is_internal(rig: Rig) -> None:
+    from forgectl.backends.gitlab import GitLabBackend
+    from forgectl.errors import ForgectlError
+
+    backend = GitLabBackend.__new__(GitLabBackend)
+    backend._merge_facts = {}
+    pr = object.__new__(type("P", (), {}))
+    pr.pr = "x"  # type: ignore[attr-defined]
+    with pytest.raises(ForgectlError) as err:
+        backend.check_method(pr, "merge")  # type: ignore[arg-type]
+    assert err.value.code == "internal"
+
+
+def test_the_no_flag_method_is_not_resolved_again_at_the_re_read(rig: Rig) -> None:
+    # the first read lets the project decide; the re-read after a hook sees an unknown setting,
+    # which would need a method if it were resolved again
+    bad = project()
+    bad["merge_method"] = "something_new"
+    rig.forges.answer("glab", endpoint_re=r"^projects/101(\?|$)", body=project(), times=1)
+    rig.forges.answer("glab", endpoint_re=r"^projects/101(\?|$)", body=bad)
+    rig.script(mr(), mr(), merged(merge_sha=MERGE_SHA), proj=bad)
+    rig.put()
+    done = rig.run(method=None, extra_config=hook_config("pre-merge", "true"))
+    assert done.code == 0, done.err
+
+
 # -- goldens -----------------------------------------------------------------------------------
 
 
