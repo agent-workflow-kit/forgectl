@@ -517,7 +517,7 @@ def test_the_header_cursor_is_drawn_only_while_the_header_has_focus() -> None:
         await pilot.press("H")
         span = columns.column_span("pr", app._pr_width, app._hoffset, app._view_width())
         # the cursor is painted from a call_after_refresh once the header has focus
-        await wait_until(pilot, lambda: reversed_cells() == [span], timeout=30)
+        await wait_until(pilot, lambda: reversed_cells() == [span])
         assert reversed_cells() == [span]
         await pilot.press("right")
         span = columns.column_span("badge", app._pr_width, app._hoffset, app._view_width())
@@ -713,7 +713,6 @@ def test_reaching_the_header_by_focus_scrolls_the_cursor_column_into_view() -> N
                 columns.column_span("author", app._pr_width, app._hoffset, app._view_width())
                 is not None
             ),
-            timeout=30,
         )
         span = columns.column_span("author", app._pr_width, app._hoffset, app._view_width())
         assert span is not None and span[0] < span[1]

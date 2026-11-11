@@ -461,10 +461,10 @@ def test_a_row_without_a_snapshot_matches_no_value_filter_and_the_panel_counts_i
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         # the panel's report follows the line a tick or more later: wait for it, never a fixed pause
         async def report_is(check: Callable[[str], bool]) -> None:
-            await wait_until(pilot, lambda: check(content_of_screen(app, "#q-report")), timeout=30)
+            await wait_until(pilot, lambda: check(content_of_screen(app, "#q-report")))
 
         # the list is in; the snapshots are held back by the gate
-        await wait_until(pilot, lambda: len(shown(app)) == 4, timeout=30)  # loading rows, no filter
+        await wait_until(pilot, lambda: len(shown(app)) == 4)  # loading rows, no filter
         await open_panel(app, pilot)
         await type_line(app, pilot, "ci = failing")
         await report_is(
@@ -484,7 +484,7 @@ def test_a_row_without_a_snapshot_matches_no_value_filter_and_the_panel_counts_i
         assert shown(app) == []
         source.gate.set()
         await app.workers.wait_for_complete()
-        await wait_until(pilot, lambda: shown(app) == [n(1)], timeout=30)  # appears on arrival
+        await wait_until(pilot, lambda: shown(app) == [n(1)])  # appears on arrival
         assert shown(app) == [n(1)]
 
     drive(script, source, wait=False)
