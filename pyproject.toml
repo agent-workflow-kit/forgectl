@@ -1,6 +1,6 @@
 [project]
 name = "forgectl"
-version = "0.34.0"
+version = "0.35.0"
 description = "Normalized access to pull/merge requests across GitHub and GitLab"
 readme = "README.md"
 requires-python = ">=3.12"
