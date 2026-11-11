@@ -214,9 +214,23 @@ def _comments_out(snap: dict[str, Any], reviews: _Budget | None = None) -> _Budg
     return out
 
 
-def changes_text(diff: dict[str, Any] | None) -> str:
-    """The diff (bounded by its own limit), or a note that it is not loaded."""
-    return "  (not loaded)" if diff is None else safe.diff(diff.get("diff"))
+LOADING = "loading..."
+
+
+def note_text(note: str) -> str:
+    """A section's body while its data is on its way or failed: one sanitized line."""
+    return f"  ({safe.line(note, 200)})"
+
+
+def failed_note(reason: str) -> str:
+    return f"failed: {reason}"
+
+
+def changes_text(diff: dict[str, Any] | None, note: str | None = None) -> str:
+    """The diff (bounded by its own limit), or ``note`` (default: not loaded) when there is none."""
+    if diff is None:
+        return note_text(note or "not loaded")
+    return safe.diff(diff.get("diff"))
 
 
 def _count(value: Any) -> str:
@@ -279,7 +293,33 @@ def check_labels_of(checks: list[dict[str, Any]]) -> tuple[list[dict[str, Any]],
     return shown, labels
 
 
-def detail_of(snap: dict[str, Any], diff: dict[str, Any] | None) -> Detail:
+def stub_of(item: dict[str, Any], note: str, changes_note: str | None = None) -> Detail:
+    """The pane for a PR with no snapshot yet: the facts the list holds, and ``note`` in the
+    sections that need the snapshot (``changes_note``: in the changes section)."""
+    url = item.get("url")
+    body = note_text(note)
+    return Detail(
+        url=url if isinstance(url, str) else None,
+        checks=[],
+        check_labels=[],
+        texts={
+            "facts": facts_text(item),
+            "description": body,
+            "changes": changes_text(None, changes_note or note),
+            "ci": body,
+            "comments": body,
+            "reviews": body,
+        },
+        counts={},
+        lines={},
+    )
+
+
+def detail_of(
+    snap: dict[str, Any], diff: dict[str, Any] | None, changes_note: str | None = None
+) -> Detail:
+    """The pane for ``snap`` and the diff; without a diff the changes section shows
+    ``changes_note`` (default: not loaded)."""
     url = snap.get("url")
     checks, labels = check_labels_of(checks_of(snap))
     reviews = _reviews_out(snap)
@@ -291,7 +331,7 @@ def detail_of(snap: dict[str, Any], diff: dict[str, Any] | None) -> Detail:
         texts={
             "facts": facts_text(snap),
             "description": description_text(snap),
-            "changes": changes_text(diff),
+            "changes": changes_text(diff, changes_note),
             "ci": ci_text(snap),
             "comments": "\n".join(_lines(comments_out)),
             "reviews": reviews_text(snap, reviews),

@@ -810,3 +810,29 @@ def test_bulk_only_lists_the_mr_of_a_failed_probe_instead_of_reading_it(tmp_path
     out = bulk.run_snapshots(env_of(fake, tmp_path / "env"), [ref()], bulk_only=True)
     assert out["items"] == [] and out["failed"][0]["error"]["code"] == BULK_UNAVAILABLE
     assert fake.count("projects/user-9%2Fproj/merge_requests/7") == 0
+
+
+# -- lookup: one or a few MRs without walking the lists (#119) --------------------------------
+
+
+def test_lookup_reads_the_mr_by_its_own_request_and_never_walks_the_lists(tmp_path: Path) -> None:
+    fake = GraphFake(authored=[mr_node(7)])
+    got = read(fake, tmp_path, [ref(number=7)], lookup=True)
+    assert fake.kinds() == ["probe", "lookup"]
+    assert list(got.snapshots) == [ref(number=7)] and got.unresolved == {}
+
+
+def test_lookup_gives_the_same_snapshot_as_the_list_read(tmp_path: Path) -> None:
+    by_list = read(GraphFake(authored=[mr_node(7)]), tmp_path, [ref(number=7)])
+    by_lookup = read(GraphFake(authored=[]), tmp_path, [ref(number=7)], lookup=True)
+    wanted = by_list.snapshots[ref(number=7)].to_dict()
+    got = by_lookup.snapshots[ref(number=7)].to_dict()
+    assert comparable(got) == comparable(wanted)
+
+
+def test_lookup_of_a_missing_mr_is_not_found(tmp_path: Path) -> None:
+    fake = GraphFake(authored=[])
+    fake.lookup = lambda request: {"data": {"m0": None}}
+    got = read(fake, tmp_path, [ref(number=7)], lookup=True)
+    assert got.snapshots == {} and got.unresolved[ref(number=7)].code == "not_found"
+    assert "list" not in fake.kinds()

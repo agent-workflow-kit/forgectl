@@ -245,6 +245,31 @@ class LiveSource:
             return {"items": [], "failed": [], "complete": True, "errors": []}
         return self._tracked(["snapshots", "--bulk-only", *prs], cancelled, prs[0])
 
+    def detail(self, pr: str, *, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
+        """The ``snapshot`` object of one PR from one bulk read (``snapshots --bulk-only
+        --lookup`` of that PR: a single GraphQL request on GitHub, a single lookup on GitLab),
+        for the detail pane, which paints from the snapshot it already holds and is refreshed
+        by this.
+
+        Raises ``ForgectlError`` when the bulk reader cannot read the PR whole (``upstream_error``
+        naming the reason code of ``failed``), so the caller reads ``snapshot`` instead.
+        Thread-safe and cancellable like ``snapshot``."""
+        if not is_pr(pr):
+            raise ForgectlError("invalid_pr", "detail: not a PR in the form host/path#N")
+        answer = self._tracked(["snapshots", "--bulk-only", "--lookup", pr], cancelled, pr)
+        for item in answer.get("items") or []:
+            if isinstance(item, dict) and item.get("pr") == pr:
+                if item.get("complete") is not True:
+                    raise ForgectlError("upstream_error", "detail: the bulk read is not whole")
+                return item
+        reason = "no item"
+        for entry in answer.get("failed") or []:
+            error = entry.get("error") if isinstance(entry, dict) else None
+            code = error.get("code") if isinstance(error, dict) else None
+            if isinstance(code, str) and code.replace("_", "").isalnum() and len(code) <= 40:
+                reason = code
+        raise ForgectlError("upstream_error", f"detail: the bulk read failed ({reason})")
+
     def _one(self, command: str, pr: str, cancelled: Callable[[], bool] | None) -> dict[str, Any]:
         if not is_pr(pr):  # also keeps an option-looking value out of the argument list
             raise ForgectlError("invalid_pr", f"{command}: not a PR in the form host/path#N")

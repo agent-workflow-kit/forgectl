@@ -549,6 +549,7 @@ def read_bulk(
     *,
     now: Callable[[], datetime] = gs.utc_now,
     page_size: int = PAGE_SIZE,
+    lookup: bool = False,  # GitHub asks each PR by its own alias already: nothing to change
 ) -> BulkRead:
     """The snapshots of ``refs`` (all on ``host``) that the bulk reader can give whole, and why
     not for the others."""

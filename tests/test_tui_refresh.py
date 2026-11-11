@@ -720,9 +720,10 @@ def test_a_superseded_detail_load_passes_a_cancel_check_to_both_reads() -> None:
         app._start_detail(b)  # replaces A's request while its snapshot runs
         source.gate.set()
         await settle(app, pilot)
-        assert source.diff_probes[a]() is True  # A's diff was told it was abandoned
+        # the diff starts with the snapshot (#119), so A's diff was already under way: both reads
+        # were given the check, and A's is told it was abandoned
+        assert source.diff_probes[a]() is True
         assert source.diff_probes[b]() is False
-        assert not [c for c in source.calls if c == ("diff", a)]  # and sent nothing
 
     run(source, script)
 

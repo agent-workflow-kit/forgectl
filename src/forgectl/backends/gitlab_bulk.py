@@ -904,9 +904,12 @@ def read_bulk(
     *,
     now: Callable[[], datetime] = gls.utc_now,
     page_size: int = PAGE_SIZE,
+    lookup: bool = False,
 ) -> BulkRead:
     """The snapshots of ``refs`` (all on ``host``) that the bulk reader can give whole, and why
-    not for the others. A host that fails the capability probe has none."""
+    not for the others. A host that fails the capability probe has none. With ``lookup`` the lists
+    are not walked: every MR is read by its own project and iid (``LOOKUP_PAGE`` to a request), the
+    right read for one or a few MRs (the detail pane's) where a list walk costs seconds."""
     if not refs:
         return BulkRead()
     reason = probe(env, host)
@@ -919,7 +922,8 @@ def read_bulk(
     result = BulkRead()
     wanted = {(ref.project.lower(), ref.number): ref for ref in refs}
     try:
-        run.read_lists(wanted, result, page_size)
+        if not lookup:
+            run.read_lists(wanted, result, page_size)
     except ForgectlError as error:
         if not ends_run(error, run.exhausted):
             raise

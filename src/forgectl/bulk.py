@@ -47,7 +47,9 @@ BULK_READERS: dict[str, str] = {
 
 
 class BulkReader(Protocol):
-    def read_bulk(self, env: ReadEnv, host: str, refs: Sequence[PrRef]) -> BulkRead: ...
+    def read_bulk(
+        self, env: ReadEnv, host: str, refs: Sequence[PrRef], *, lookup: bool = False
+    ) -> BulkRead: ...
 
 
 def _line(text: str) -> str:
@@ -104,11 +106,18 @@ def _exhausted(env: ReadEnv) -> Callable[[], bool]:
     return lambda: env.gateway.budget.remaining() <= 0
 
 
-def _bulk_host(env: ReadEnv, host: str, refs: list[PrRef], verbose: bool = False) -> BulkRead:
+def _bulk_host(
+    env: ReadEnv, host: str, refs: list[PrRef], verbose: bool = False, lookup: bool = False
+) -> BulkRead:
     """One host's bulk run. A failure of the whole run, whatever it is, is every PR of the host
     unresolved and never a crash: the other hosts' results are kept."""
     try:
-        return _reader(refs[0].backend).read_bulk(env, host, refs)
+        reader = _reader(refs[0].backend)
+        return (
+            reader.read_bulk(env, host, refs, lookup=True)
+            if lookup
+            else reader.read_bulk(env, host, refs)
+        )
     except ForgectlError as error:
         stop = ends_run(error, _exhausted(env))
         code = error.code if stop else BULK_UNAVAILABLE
@@ -127,7 +136,12 @@ def _bulk_host(env: ReadEnv, host: str, refs: list[PrRef], verbose: bool = False
 
 
 def run_snapshots(
-    env: ReadEnv, refs: list[PrRef], *, bulk_only: bool = False, verbose: bool = False
+    env: ReadEnv,
+    refs: list[PrRef],
+    *,
+    bulk_only: bool = False,
+    verbose: bool = False,
+    lookup: bool = False,
 ) -> dict[str, Any]:
     by_host: dict[str, list[PrRef]] = {}
     for ref in refs:
@@ -137,7 +151,7 @@ def run_snapshots(
     fallback: list[PrRef] = []
     stopped: dict[str, ForgectlError] = {}
     for host, host_refs in by_host.items():
-        read = _bulk_host(env, host, host_refs, verbose)
+        read = _bulk_host(env, host, host_refs, verbose, lookup)
         if read.reason and verbose:
             emit_warning(f"snapshots: {host}: {read.reason}")
         if read.bug and verbose:
@@ -193,5 +207,9 @@ def run_snapshots(
 def snapshots(inv: registry.Invocation) -> dict[str, Any]:
     refs = refs_of(inv)
     return run_snapshots(
-        make_env(inv), refs, bulk_only=bool(inv.args.bulk_only), verbose=bool(inv.args.verbose)
+        make_env(inv),
+        refs,
+        bulk_only=bool(inv.args.bulk_only),
+        verbose=bool(inv.args.verbose),
+        lookup=bool(inv.args.lookup),
     )

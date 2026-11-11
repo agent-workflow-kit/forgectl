@@ -397,5 +397,31 @@ def test_help_names_the_flag_and_stdin(
     assert "--bulk-only" in done.stdout and "stdin" in done.stdout
 
 
+def test_help_names_the_lookup_flag(
+    run_forgectl: Callable[..., subprocess.CompletedProcess[str]], config: Path
+) -> None:
+    done = run_forgectl(["snapshots", "--help"], env={})
+    assert done.returncode == 0 and "--lookup" in done.stdout
+
+
+def test_lookup_reaches_the_bulk_reader_and_only_when_asked(
+    fake_forges: FakeForges, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[dict[str, Any]] = []
+
+    def reader(env: Any, host: str, refs: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs)
+        return bulk.BulkRead()
+
+    class Module:
+        read_bulk = staticmethod(reader)
+
+    monkeypatch.setattr(bulk, "_reader", lambda backend: Module)
+    env = make(fake_forges, BulkRouter()).env
+    bulk.run_snapshots(env, [ref(7)], bulk_only=True)
+    bulk.run_snapshots(env, [ref(7)], bulk_only=True, lookup=True)
+    assert seen == [{}, {"lookup": True}]
+
+
 def test_unused_imports_stay_used() -> None:
     assert HEAD and show_recording and pr_of and rec

@@ -395,6 +395,12 @@ def build_parser() -> argparse.ArgumentParser:
         action=_OnceFlag,
         help="read only through the bulk path; list a PR it cannot read whole in failed",
     )
+    p.add_argument(
+        "--lookup",
+        dest="lookup",
+        action=_OnceFlag,
+        help="read each PR by its own lookup, not through the lists (a few PRs: GitLab only)",
+    )
 
     p = add("compare", "compare two commits of a PR")
     _pr(p)
