@@ -1275,7 +1275,7 @@
             "null"
           ],
           "minimum": 0,
-          "description": "GitLab: the approvals the approval rules still need (`approvals_left`). null on GitHub, which reports no required count in the model, and on GitLab when the host does not say."
+          "description": "GitLab: the approvals the approval rules still need (`approvals_left`). null on GitHub, which reports no required count in the model, and on GitLab when the host does not say or reports a negative number."
         }
       },
       "allOf": [
