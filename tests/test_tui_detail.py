@@ -456,10 +456,31 @@ def test_escape_during_a_load_keeps_the_pane_closed_when_the_reads_arrive() -> N
         await settle(app, pilot)
         assert app.query_one("#detail").display is False
         assert app.focused is not None and app.focused.id == "list"
+        assert "loading detail" not in status_of(app)
         await pilot.press("enter")  # a new Enter still loads
         await settle(app, pilot)
         assert app.query_one("#detail").display is True
         assert "fresh body" in text_of(app, "description")
+
+    drive(source, script)
+
+
+def test_a_diff_failure_after_escape_during_a_load_still_shows_in_the_status() -> None:
+    source = source_of()
+    source.fresh[PR1] = make_snapshot(1, title="Mine", body="fresh body")
+    source.fail["diff:" + PR1] = ForgeError("not_found", "no diff")
+    hold(source, "detail", "diff")
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("down", "enter")
+        await wait_until(pilot, lambda: ("detail", PR1) in source.calls)
+        await pilot.press("escape")
+        release(source, "detail", "diff")
+        await settle(app, pilot)
+        await asyncio.sleep(0.2)
+        await settle(app, pilot)
+        assert app.query_one("#detail").display is False
+        assert "not_found" in status_of(app)
 
     drive(source, script)
 

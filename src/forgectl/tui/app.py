@@ -1175,8 +1175,11 @@ class BrowseApp(App[None]):
                 status = "loading detail..." if reads else f"{len(detail.checks)} checks"
                 if not reads and errors:
                     status = "; ".join([status, *errors]) if snap is not None else errors[0]
-                if token != self._detail_closed:  # the user closed the pane: do not reopen it
+                if token != self._detail_closed:
                     self._show_detail(pr, detail, status, seen=snap is not None)
+                else:  # the user closed the pane: do not reopen it, but the status still ends
+                    self._detail_note = status
+                    self._status(status)
         except Exception as exc:  # a paint bug must not take the UI down
             if token == self._detail_token:
                 self._detail_note = self._internal(exc)
