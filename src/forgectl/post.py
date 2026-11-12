@@ -14,7 +14,7 @@ retried. After ``Attempt.begin()`` every path records exactly one outcome, then 
 ``post-post`` hooks and exits; a signal before the outcome is recorded records ``outcome_unknown``
 and exits 12 (``cli.py``) without hooks, and one after it stops the remaining hooks.
 
-TODO(#25): position validation (step 3) for ``review`` comments.
+Position validation (step 3) for ``review`` comments is ``positions.py``; #26 and #27 call it.
 TODO(#26), TODO(#27): ``review`` on GitHub and GitLab: events, drafts, the read-back (steps 5, 9
 to 11) and the review body's own limits; they reuse ``prepare_body`` and ``PostRun``'s hooks.
 TODO(#28): ``approve`` (self-approval, the state step, ``head_verified``).

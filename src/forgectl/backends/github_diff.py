@@ -7,7 +7,7 @@ passed off as a whole answer:
   stops at ``MAX_FILE_PAGES`` and reports ``files_complete: false`` unless the list ended and its
   length equals the PR's ``changed_files``. A file whose ``patch`` the host omitted (binary,
   large, rename only) is kept, with ``patch`` ``None`` in ``RawFile`` (the data position
-  validation, TODO(#25), needs: it treats such a file as invalid for inline comments).
+  validation (``positions.py``) needs: it treats such a file as invalid for inline comments).
 - ``diff``: the PR's diff media type; a 406 (more than 300 files, or a diff the host will not
   produce), or an answer past forgectl's read cap, is ``too_large``. Its ``diff --git`` headers
   must number the PR's ``changed_files``. The PR is read before and after; a moved head, base or
@@ -84,7 +84,7 @@ _DIFF_HEADER = re.compile(rb"(?m)^diff --git ")
 @dataclass(frozen=True, slots=True)
 class RawFile:
     """One listed file as the host gave it, checked but not sanitized: for position validation
-    (TODO(#25)) and the GitLab twin (TODO(#18)). ``path`` and ``patch`` are untrusted raw text;
+    (``positions.py``) and the GitLab twin. ``path`` and ``patch`` are untrusted raw text;
     never print them. ``patch`` is None when the host omitted it."""
 
     path: str

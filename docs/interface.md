@@ -485,8 +485,8 @@ Every inline comment is checked against the diff, before anything is posted. A c
 
 - `right` is valid on added and context lines, `left` on removed and context lines. A line must be inside a hunk. `start_line <= line`, same hunk, same side.
 - A renamed file matches by its new path. A binary file, or a file with no patch, including one flagged too large, is invalid.
-- Source: GitHub `/pulls/N/files`; GitLab `/diffs`. `too_large` comes only from a cut file list with comments on unlisted files, or a host's refusal of the whole list; both exit 20. A listed file in a cut list is checked normally. A 5xx or network failure is `upstream_error`.
-- GitLab: `line_code` is computed by forgectl, because the host stores a garbage one on a range; `old_line` and `new_line` are paired from the diff; `line_range` carries a range. GitHub: `side` maps to `LEFT` or `RIGHT`, default `RIGHT`.
+- Source: GitHub `/pulls/N/files`; GitLab `/diffs`. `too_large` comes only from a cut file list with comments on unlisted files, or a host's refusal of the whole list; both exit 20. A list is cut when it did not end, or ended with a count other than the host's own (GitHub `changed_files`; GitLab `changes_count`, or `1000+`). A listed file in a cut list is checked normally; a comment that is invalid whatever the file (line below 1, an unknown side, a bad `start_line`) is `invalid_position` even on an unlisted file. A 4xx on the pull or merge request read is `host_rejected`, not `too_large`. A 5xx or network failure is `upstream_error`.
+- GitLab: `line_code` is computed by forgectl, because the host stores a garbage one on a range; `old_line` and `new_line` are paired from the diff; `line_range` carries a range, each point's `type` being `new` for an added line and `old` otherwise (`UNVERIFIED` until the live suite). GitHub: `side` maps to `LEFT` or `RIGHT`, default `RIGHT`.
 - A local finding exits 12 (`invalid_position`, `details.invalid` listing them), with nothing posted. A host 422 on a position after the local checks passed is `host_rejected`, with the host's message.
 
 ### Dedupe key
