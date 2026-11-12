@@ -491,10 +491,10 @@ def compare_result(
     status, listed = answer
     if status == "identical":
         return result(status, "")
-    if status != "ahead" or listed is None:  # behind, diverged: no diff, by the interface
+    # behind, diverged: no diff, by the interface; under no_diff the status is the answer
+    # (listed stays None), and the diff, and so its caps, are not asked about
+    if status != "ahead" or listed is None:
         return result(status, None)
-    if no_diff:  # the status is the answer; the diff, and so its caps, are not asked about
-        return result("ahead", None)
     if listed >= COMPARE_FILE_CAP:  # the host lists at most this many: the list may be cut
         raise _too_large("this comparison")
 
