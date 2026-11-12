@@ -50,7 +50,7 @@ from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from forgectl import cli, registry
+from forgectl import cli, jsonlog, registry
 from forgectl.backends.bulk_common import HOST_STOPS
 from forgectl.browse import is_pr
 from forgectl.config import load_config
@@ -106,9 +106,10 @@ def in_process_runner(
         registry.load_handlers()  # thread-safe: it returns only once every handler is registered
         with _LOAD_LOCK:
             if not loaded:  # a failure is not cached: fixing the config and refreshing works
-                loaded.append(
-                    load_config(config_path, env=environ if environ is not None else os.environ)
-                )
+                cfg = load_config(config_path, env=environ if environ is not None else os.environ)
+                log = cfg.config.log
+                jsonlog.set_rotation(jsonlog.Rotation(max_bytes=log.max_bytes, keep=log.keep))
+                loaded.append(cfg)
             return loaded[0]
 
     def run(argv: list[str]) -> dict[str, Any]:

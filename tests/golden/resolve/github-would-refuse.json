@@ -1,0 +1,13 @@
+{
+  "action": "resolve",
+  "changed": false,
+  "dry_run": true,
+  "pr": "github.com/user-7/example-repo#7",
+  "resolved": null,
+  "thread_id": "gh:ic:IC_x0000001",
+  "would_refuse": {
+    "details": null,
+    "message": "only review threads (gh:rt: and gl:d: ids) can be resolved",
+    "reason": "not_resolvable"
+  }
+}

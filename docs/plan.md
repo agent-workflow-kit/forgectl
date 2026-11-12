@@ -37,7 +37,8 @@ Status: planned, 2026-11-03. Implements [interface.md](interface.md) (normative)
 | `reads.py` | 1 | `prs`, `show`, `snapshot`, `diff`, `compare`, `files`, `comments`, `reviews`, `ci`, `access`, `whoami`, retries |
 | `hooks.py` | 3 | hook processes, payloads, outcomes, decision ids, the async watchdog |
 | `merge.py` | 3 | Merge order, method resolution, verification |
-| `post.py` | 4 | Post order, position validation, dedupe, draft handling, read-back, state steps |
+| `positions.py` | 4 | Position validation, `line_code` and position building |
+| `post.py` | 4 | Post order, dedupe, draft handling, read-back, state steps |
 | `tui/` | 6 | `browse`; only `tui.run` and the Textual widgets need the extra, the query engine modules import without it |
 
 ## Stage 0: Foundations
