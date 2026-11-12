@@ -1230,3 +1230,33 @@ def test_a_sync_post_hook_leaving_a_mode_000_directory_never_raises(
     assert [r.outcome for r in result.reports] == ["allow"]
     assert tmp_leftovers() == []
     spawned.reap_and_assert_gone()
+
+
+def test_watchdog_rotates_the_log_with_the_limits_in_its_spec(tmp_path: Path) -> None:
+    from forgectl import gateway as gw
+    from forgectl import hookwatch, jsonlog
+
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    limit = jsonlog.MIN_MAX_BYTES
+    (state / "log.jsonl").write_bytes(b"\n" * limit)
+    (state / "log.jsonl").chmod(0o600)
+    dirs = gw.make_private_dirs(os.environ, config=False)
+    spec = {
+        "argv": [str(tmp_path / "missing")], "env": {}, "root": dirs.root, "cwd": dirs.cwd,
+        "payload": "{}", "timeout": 5, "state_dir": str(state), "hook": "post-post", "index": 0,
+        "log_rotation": [limit, 1],
+    }  # fmt: skip
+    assert hookwatch.run(spec) == 0
+    assert (state / "log.jsonl.1").stat().st_size == limit
+    (record,) = [json.loads(x) for x in (state / "log.jsonl").read_text().splitlines()]
+    assert record["event"] == "hook_failed"
+
+
+@pytest.mark.parametrize("bad", [[1, 1], [65536], "x", [65536, 0], [True, 1], None])
+def test_watchdog_falls_back_to_default_limits_for_a_bad_spec_value(
+    tmp_path: Path, bad: object
+) -> None:
+    from forgectl import hookwatch
+
+    assert hookwatch._rotation({"log_rotation": bad}) is None

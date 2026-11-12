@@ -94,6 +94,9 @@ def test_example_values_equal_the_schema_defaults() -> None:
     assert data["hooks"] == props["hooks"]["default"] == {}
     assert data["activity"] == props["activity"]["default"] == {}
     assert data["browse"] == props["browse"]["default"] == {}
+    assert data["log"] == props["log"]["default"] == {}
+    assert props["log"]["properties"]["max_bytes"]["default"] == 10 * 1024 * 1024
+    assert props["log"]["properties"]["keep"]["default"] == 3
     browse_props = props["browse"]["properties"]
     assert browse_props["refresh_interval"]["default"] == "120s"
     assert browse_props["full_refresh_every"]["default"] == 5
@@ -120,6 +123,37 @@ def test_activity_ignore_authors_loads_and_defaults_to_empty(home: Path) -> None
     ],
 )
 def test_activity_refuses_a_bad_ignore_list(home: Path, text: str) -> None:
+    with pytest.raises(ForgectlError) as caught:
+        load(home, text)
+    assert caught.value.code == "config_invalid"
+
+
+def test_log_defaults_and_values(home: Path) -> None:
+    log = load(home, "").config.log
+    assert (log.max_bytes, log.keep) == (10 * 1024 * 1024, 3)
+    log = load(home, "log:\n  max_bytes: 65536\n  keep: 100\n").config.log
+    assert (log.max_bytes, log.keep) == (65536, 100)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "log:\n  max_bytes: 65535\n",
+        "log:\n  max_bytes: 1073741825\n",
+        "log:\n  max_bytes: 0\n",
+        "log:\n  max_bytes: -1\n",
+        'log:\n  max_bytes: "10485760"\n',
+        "log:\n  max_bytes: 1.5e6\n",
+        "log:\n  max_bytes: true\n",
+        "log:\n  keep: 0\n",
+        "log:\n  keep: 101\n",
+        "log:\n  keep: true\n",
+        "log:\n  keep: null\n",
+        "log:\n  files: 3\n",
+        "log: 5\n",
+    ],
+)
+def test_log_refuses_bad_values(home: Path, text: str) -> None:
     with pytest.raises(ForgectlError) as caught:
         load(home, text)
     assert caught.value.code == "config_invalid"
@@ -1442,6 +1476,7 @@ def test_hash_is_sha256_of_sorted_key_json_of_the_merged_config_after_defaults(
             "detail_collapsed": ["changes"],
             "query": "",
         },
+        "log": {"max_bytes": 10485760, "keep": 3},
         "hooks": {"pre-merge": [], "post-merge": [], "pre-post": [], "post-post": []},
     }
     assert loaded.config_hash == hashlib.sha256(canonical(expected).encode()).hexdigest()
