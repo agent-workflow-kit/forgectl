@@ -392,13 +392,13 @@ Every `merge` follows one order:
    | `blocked_by` not empty, not `--auto`, no `--override-blocks` | exit 20, `not_ready`, `details.blocked_by` |
    | `--auto`, and `blocked_by` has `draft`, `conflicts` or `checks_failing` | exit 20, `not_ready` |
    | Non-human actor and `ci.state` not `passing` | exit 20, `not_ready`, `details.blocked_by`, including `{code: checks_absent}` when the state is `none` |
-   | `--auto` and already armed | exit 0, `auto_merge_enabled: true`, no host call, no audit record; a different method is ignored, with a warning |
+   | `--auto` and already armed | exit 0, `auto_merge_enabled: true`, no host call, no audit record, no hooks; a method named is ignored, with a warning (the armed method cannot be read back). On GitLab the no-op trusts the read: `auto_merge.enabled` can read stale true for about 3 s after a push, so a run in that window can report armed with nothing armed, and a re-run after the window arms. Found armed only at the step 7 re-read, the `pre-merge` hooks have already run: the run still exits 0 with no audit record and no `post-merge` hooks |
 
 5. **Confirmation.** An interactive run gets a dialog on stderr with head, base, method, CI state (including "no checks on this head") and blockers; on a merge queue or train it warns. Not interactive and no `--yes`: exit 13 (`confirmation_required`). `--dry-run` stops here, prints the plan and needs neither.
 6. **`pre-merge` hooks** (veto 11, escalate 13).
-7. **Re-read** if a hook ran or a dialog was shown, and apply step 4 again; a slow gate may have outlasted the state it saw. Hooks do not re-run. A blocker that was not there at the first run of step 4 refuses, even with `--override-blocks`. If the PR merged meanwhile, step 4's rows decide: at the expected head and base, exit 0 with `already_merged: true`, and log the decision ids; at another head or into another base, the same refusal.
+7. **Re-read** if a hook ran or a dialog was shown, and apply step 4 again; a slow gate may have outlasted the state it saw. Hooks do not re-run. The arm mode of the first read is fixed for the re-read: a GitHub `--auto` run that armed stays an arm run even if the re-read shows nothing blocking, so it is never sent as a plain merge (GitHub then answers `in clean status` and the run exits 20, `auto_merge_unavailable`). A blocker that was not there at the first run of step 4 refuses, even with `--override-blocks`. If the PR merged meanwhile, step 4's rows decide: at the expected head and base, exit 0 with `already_merged: true`, and log the decision ids; at another head or into another base, the same refusal.
 8. **Audit `attempted`, then merge,** carrying the expected head as `sha`, which the host enforces; GitHub's auto-merge is the one exception, enforcing it only when armed. `squash` is sent only now, after the checks passed, because `squash=true` on a refused merge stays set on a GitLab MR.
-   - GitHub `--auto`: with `blocked_by` empty, a plain merge carrying `sha`, reported as `merged: true, auto_merge_enabled: false`. Otherwise `enablePullRequestAutoMerge` with `expectedHeadOid` set to the head the human saw, after a warning that any later head can merge. A refusal of the form `in clean status` or `in unstable status` exits 20 (`auto_merge_unavailable`, `details.observed`), with a message to run `merge` without `--auto`; forgectl does not switch to a plain merge on a state nobody confirmed. A repo that does not allow auto-merge exits the same way.
+   - GitHub `--auto`: with `blocked_by` empty on the first read (the arm mode is fixed there; see step 7, so a run that armed stays an arm run even if the re-read finds it empty), a plain merge carrying `sha`, reported as `merged: true, auto_merge_enabled: false`. Otherwise `enablePullRequestAutoMerge` with `expectedHeadOid` set to the head the human saw, after a warning that any later head can merge. A refusal of the form `in clean status` or `in unstable status` exits 20 (`auto_merge_unavailable`, `details.observed`), with a message to run `merge` without `--auto`; forgectl does not switch to a plain merge on a state nobody confirmed. A repo that does not allow auto-merge exits the same way.
    - GitLab `--auto`: `auto_merge=true` on 17.11 or newer, `merge_when_pipeline_succeeds=true` before that, with `sha`. A running pipeline arms it; no pipeline or a passed one merges at once. A failed, canceled or skipped pipeline answers 405 and does not merge, whatever the project's pipeline setting.
    - Answers from the host:
 
@@ -406,13 +406,13 @@ Every `merge` follows one order:
      |---|---|
      | any 2xx | step 9 |
      | 409 (either host), or GraphQL `expected head oid` | exit 20, `stale_head`, per the [write table](#reliability) |
-     | 405 (either host; on GitLab also 406 and 422) | one re-read: merged at the expected head and base: audit `merged`, `post-merge` fires, output `already_merged: true`; merged otherwise: `merge_unverified` as in step 9; open with blockers exits 20 `not_ready`, except GitLab's transient `locked` blocker, which step 9 decides; GitHub wording naming the method exits 20 `method_not_allowed`; else exit 12 `host_rejected`. GitHub's `Base branch was modified` is `host_rejected`, and a caller may retry |
+     | 405 (either host; on GitLab also 406 and 422) | one re-read: merged at the expected head and base: audit `merged`, `post-merge` fires, output `already_merged: true`; merged otherwise: `merge_unverified` as in step 9; open with blockers exits 20 `not_ready`, except GitLab's transient `locked` blocker, which step 9 decides, and an arm run that reads armed at the sent head and base (step 9); GitHub wording naming the method exits 20 `method_not_allowed`; else exit 12 `host_rejected`. GitHub's `Base branch was modified` is `host_rejected`, and a caller may retry |
      | 5xx, timeout, no status (GitLab also 423, locked) | step 9 decides; a PR still open exits 12 `outcome_unknown` |
      | anything else | the [write table](#reliability) |
 
      A wrong `sha` gets 409 on GitLab, which beats the bare 405 that a moved target gets on an `ff` or `rebase_merge` project.
 
-9. **Verify,** polling up to 10 s (1 s, 2 s, 3 s, 4 s): head, base and state; for `--auto`, armed or merged. GitLab's transient `locked` counts as not yet decided. Merged at the sent head and the expected base is success. A merged PR at another head or whose `base.ref` differs from the expected base exits 12 (`merge_unverified`, `details.observed`). Still open or closed after the window is `merge_unverified`, for example a PR that was enqueued, or `outcome_unknown` after step 8's failure answer. A failed verify read is `outcome_unknown`. A success answer from the host is never proof by itself: GitHub returns `merged: true` for an already merged PR with a wrong sha.
+9. **Verify,** polling up to 10 s (1 s, 2 s, 3 s, 4 s): head, base and state; for `--auto`, armed or merged. GitLab's transient `locked` counts as not yet decided. Merged at the sent head and the expected base is success. A merged PR at another head or whose `base.ref` differs from the expected base exits 12 (`merge_unverified`, `details.observed`). Still open or closed after the window is `merge_unverified`, for example a PR that was enqueued, or `outcome_unknown` after step 8's failure answer. For `--auto`, armed at another head or base is not success either: exit 12 (`merge_unverified`, `details.observed` reading `armed at head <sha> on base <ref>`, `details.head_sha`), audit result `outcome_unknown`, and the `post-merge` payload's `observed` is null. On GitLab, a 405 whose re-read shows the MR open and armed at the sent head and base reports armed (exit 0), whatever blocks a merge now. A failed verify read is `outcome_unknown`. A success answer from the host is never proof by itself: GitHub returns `merged: true` for an already merged PR with a wrong sha.
 10. **Audit result, `post-merge` hooks, result.**
 
 Once a host write was attempted, every path runs the audit result record and the `post-` hooks, then exits. A signal before the outcome is recorded skips the `post-` hooks and exits 12 `outcome_unknown`; a signal after it stops the remaining `post-` hooks and exits with the recorded outcome. A signal while the result is being printed, or anywhere else after the `attempted` record was written, exits 12 `outcome_unknown`, since the result was not reported, and the audit record is authoritative. Neither exits 128+N. A refusal before any call does not.
@@ -534,7 +534,7 @@ With `--repo` or `--host` there is one target, so a failure uses the ordinary ex
 
 ### `show`
 
-`show <pr>`: the [PR object](#pr-object).
+`show <pr>`: the [PR object](#pr-object). Without `--json`, `body` prints as an indented [block](#human-output).
 
 ### `snapshot`
 
@@ -580,7 +580,7 @@ GitLab assembly (a contract `pr-comment` re-anchors against). Each file is one s
 
 ### `compare`
 
-`compare [--no-diff] <pr> --from <sha> --to <sha>`: `{pr, from_sha, to_sha, status, diff}`, `status` being `ahead`, `behind`, `diverged`, `identical` or `unavailable` (a host no longer has it, or it is inaccessible). `diff` is the change from `from` to `to`: present on `ahead`, empty on `identical`, null on `behind`, `diverged` and `unavailable`. It is sanitized as for [`diff`](#diff). Shas only.
+`compare [--no-diff] <pr> --from <sha> --to <sha>`: `{pr, from_sha, to_sha, status, diff}`, `status` being `ahead`, `behind`, `diverged`, `identical` or `unavailable` (a host no longer has it, or it is inaccessible). `diff` is the change from `from` to `to`: present on `ahead`, empty on `identical`, null on `behind`, `diverged` and `unavailable`. It is sanitized as for [`diff`](#diff). Shas only. Without `--json`, `diff` prints as an indented [block](#human-output); with `--no-diff` there is no `diff` key, so nothing is printed for it.
 
 `--no-diff` is for a caller that needs only the relationship: the `diff` key is absent from the output (not null and not empty, so it is never confused with the null of `behind` or the empty text of `identical`), and `pr`, `from_sha`, `to_sha` and `status` are as without it. GitHub makes no diff request, so a diff the host would cut (a 406, a file count at the cap, a header count that differs from the listed one) cannot make the answer `too_large` or `unavailable` there: `ahead` is answered from the status request alone. GitLab sends the diffs with the commits whatever is asked, so its requests are the same, but no `diffs` entry is parsed: a cut or malformed entry, or as many entries as GitLab's cap, no longer matters. `compare_timeout` and an answer past forgectl's read cap are still `too_large`, because the status is then unclear. The flag is given once, takes no value and belongs to `compare` only.
 
@@ -629,7 +629,7 @@ The order and refusals are in [Merge order](#merge-order). `--expected-head` is 
 
 There is no flag for a merge message. Merge attribution is the audit record, plus a caller's own comment.
 
-Output: `{pr, merged, already_merged, auto_merge_enabled, merged_head_sha, merge_commit_sha, method, dry_run}`. `merged_head_sha` is the PR's own `merged_head_sha`, equal to the sha sent when this run merged; null while only armed.
+Output: `{pr, merged, already_merged, auto_merge_enabled, merged_head_sha, merge_commit_sha, method, dry_run}`. `merged_head_sha` is the PR's own `merged_head_sha`, equal to the sha sent when this run merged; null while only armed. An armed run reports `merged: false`, `auto_merge_enabled: true` and a null `method`; so does the `post-merge` payload (`result: auto_merge_enabled`). A GitHub run that armed is never turned into a plain merge by the step 7 re-read. A dialog or hook that outlasts the state it saw refuses on a new blocker for a `--auto` that was to merge at once, and on a new `draft`, `conflicts` or `checks_failing` for one that was to arm.
 
 ### `review`
 
@@ -682,7 +682,16 @@ See [TUI](#tui).
 
 ### `export`
 
-`export [--since TIME]`: audit records, as JSONL; `--json` prints an array. `--since` takes RFC 3339 or a duration. A missing file gives empty output; a malformed line warns and is skipped. If the state directory or `audit.jsonl` exists but is refused (see [Files](#files)) or cannot be read, `export` exits 12 `audit_unavailable`.
+`export [--since TIME]`: audit records, as JSONL; `--json` prints an array. `--since` takes RFC 3339 or a duration. A missing file gives empty output; a malformed line warns and is skipped. Without `--json` it prints one JSON record per line, unchanged by #68; `--json` wraps the records in an array (see [Human output](#human-output)). If the state directory or `audit.jsonl` exists but is refused (see [Files](#files)) or cannot be read, `export` exits 12 `audit_unavailable`.
+
+## Human output
+
+Without `--json`, a result prints as `key: value` lines, one per top-level field in the schema's order. Every string is [sanitized](#sanitizing) and a value that is not a string is its JSON, so a tab or line feed inside a field is a marker, except inside a block, where a tab stays raw (it cannot start or break a line), and untrusted text cannot forge a line of its own. The `--json` form is unchanged by anything here.
+
+- **`diff`** prints the unified diff alone, as the backend sanitized it: LF, tab and a CR before LF stay raw, so its lines are the diff's own.
+- **`compare`** and **`show`** print one field as a block: `compare`'s `diff` and `show`'s `body`. The line is `key:`, followed by the text, one output line per line of the text, each indented by four spaces and sanitized on its own; a tab stays raw there. An empty line is the indent alone, and the last line feed ends its line without adding an empty one, so the block has the text's line count and a diff keeps its line numbers. Because every line of the block is indented, a line of a body or a diff cannot start at the left margin and pass for a field. A CR that a diff kept before its LF is a visible `<U+000D>` marker in the block, so no raw control character reaches the terminal. A null (`compare` on `behind`, `diverged` or `unavailable`; `show` of a PR with no body) or an empty string stays on the key's line (`diff: null`).
+- **`export`** prints the records as JSON lines, one per line. `--json` prints them as one array instead. A record is sanitized and is plain ASCII, so it cannot hold a raw control character.
+- Every other command keeps the one-line form above. Its multi-line text fields (a comment's body, for example) show their line feeds as markers; `--json` is how a script or a reader gets their lines.
 
 ## Global flags
 

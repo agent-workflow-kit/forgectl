@@ -103,9 +103,11 @@ class Backend(Protocol):
         """The authenticated account on `host`."""
         ...
 
-    def merge(self, pr: m.PR, *, sha: str, method: str | None) -> m.MergeAnswer:
+    def merge(self, pr: m.PR, *, sha: str, method: str | None, auto: bool = False) -> m.MergeAnswer:
         """The merge call for ``pr`` (as just read, so the write goes to its canonical path),
-        carrying ``sha`` for the host to enforce and ``method`` where the host takes one. Never
+        carrying ``sha`` for the host to enforce and ``method`` where the host takes one. With
+        ``auto`` it arms auto-merge instead (GitHub: ``enablePullRequestAutoMerge``; GitLab: the
+        merge call with its auto flag), and a plain merge is what ``auto=False`` sends. Never
         retried. A 2xx is ``accepted``, which proves nothing; the caller verifies by reading.
         A failure that may have landed is `outcome_unknown`, raised as such."""
         ...

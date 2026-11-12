@@ -1285,7 +1285,13 @@ class PrRead:
 # --- merge -------------------------------------------------------------------------------------
 
 MergeAnswerKind = Literal[
-    "accepted", "stale_head", "method_not_allowed", "base_modified", "refused", "locked"
+    "accepted",
+    "stale_head",
+    "method_not_allowed",
+    "base_modified",
+    "refused",
+    "locked",
+    "auto_unavailable",
 ]
 MergeMethod = Literal["squash", "merge", "rebase"]
 MERGE_METHODS: tuple[str, ...] = ("squash", "merge", "rebase")
@@ -1299,7 +1305,9 @@ class MergeAnswer:
     also answers 200). The others are the answers a caller maps itself: ``stale_head`` (409, the
     ``sha`` did not match), ``method_not_allowed`` (a 405 whose wording names the method),
     ``base_modified`` (a 405 saying the base moved; a caller may retry) and ``refused`` (any
-    other 405, 406 or 422) and ``locked`` (GitLab's 423, decided like a 5xx, by reading). Every
+    other 405, 406 or 422), ``locked`` (GitLab's 423, decided like a 5xx, by reading) and
+    ``auto_unavailable`` (GitHub's refusal to arm auto-merge: a clean or unstable status, or a
+    repository that does not allow it). Every
     other failure is raised by the gateway as a ``ForgectlError``.
     """
 
