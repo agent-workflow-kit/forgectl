@@ -4,7 +4,7 @@ Normalized access to pull/merge requests across GitHub and GitLab: read them, po
 
 ## Status
 
-Implemented and released (see [CHANGELOG.md](CHANGELOG.md) for the version). Available now: the reads (`prs`, `show`, `snapshot`, `snapshots`, `poll`, `diff`, `files`, `compare`, `comments`, `reviews`, `ci`, `access`, `whoami`), `browse`, `export` and `merge` (with `--auto`), `comment`, `reply`, `resolve` and `unresolve` on GitHub and GitLab, and `review` on GitHub. Not yet implemented: `review` on GitLab (#27) and `approve` (#28); they parse but fail with an `internal` error. The contract is [docs/interface.md](docs/interface.md). Rationale and live-verification results are in [docs/design.md](docs/design.md); the staged plan is in [docs/plan.md](docs/plan.md).
+Implemented and released (see [CHANGELOG.md](CHANGELOG.md) for the version). Available now: the reads (`prs`, `show`, `snapshot`, `snapshots`, `poll`, `diff`, `files`, `compare`, `comments`, `reviews`, `ci`, `access`, `whoami`), `browse`, `export` and `merge` (with `--auto`), `comment`, `reply`, `resolve` and `unresolve` on GitHub and GitLab, and `review` on GitHub and GitLab. Not yet implemented: `approve` (#28); it parses but fails with an `internal` error. The contract is [docs/interface.md](docs/interface.md). Rationale and live-verification results are in [docs/design.md](docs/design.md); the staged plan is in [docs/plan.md](docs/plan.md).
 
 ## Layer
 
@@ -59,7 +59,7 @@ forgectl merge github.com/org/repo#42 --expected-head <sha> --expected-base main
 | `comments`, `reviews`, `ci` | threads, reviews, checks |
 | `access`, `whoami` | write access of a user; authenticated user per host |
 | `merge` | merge, on GitHub and GitLab (on GitLab the project's merge method setting decides; `--method squash` is sent only after the checks); `--auto` arms auto-merge, for a human only, as the head allows |
-| `review` | post a review with inline comments, checked against the diff (GitHub implemented; GitLab not yet, #27) |
+| `review` | post a review with inline comments, checked against the diff (GitHub: one atomic review; GitLab: draft notes and one publish, then the state step) |
 | `comment`, `reply` | post a comment; reply to a thread |
 | `approve` | approve (not yet implemented, #28) |
 | `resolve`, `unresolve` | resolve or reopen a review thread (`gh:rt:` or `gl:d:` id); reports `changed` |
