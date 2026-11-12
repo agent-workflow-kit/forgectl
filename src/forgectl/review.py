@@ -800,8 +800,9 @@ class ReviewRun:
     ) -> ForgectlError:
         """Nothing was published: delete forgectl's own drafts (the ones whose creation was proven
         and any listed one with exactly the text and position sent that was not there before) and
-        return the error to raise. ``unproven`` says a creation was not proven (a timeout, a 5xx or
-        an answer with no usable id), so a failed re-list leaves drafts of unknown ids behind.
+        return the error to raise. ``unproven`` says a creation may have landed unseen (a timeout, a
+        5xx or an answer with no usable id: ``outcome_unknown``), so a failed re-list leaves drafts
+        of unknown ids behind; a definitive 4xx or a wrong answer is not unproven.
 
         The host's own answer for a 401, 403, 404 or 429 is kept (its code, details and
         ``retry_after``); any other failure is ``host_rejected``. Either way the message names the
@@ -867,7 +868,9 @@ class ReviewRun:
             for note, position in sent:
                 own.append(self.drafts.create_draft(pr, note, position))
         except ForgectlError as err:
-            raise self._abandon(pr, own, err, sent, unproven=True) from None
+            raise self._abandon(
+                pr, own, err, sent, unproven=err.code == "outcome_unknown"
+            ) from None
         if len(set(own)) != len(own):
             twice = ForgectlError(
                 "wrong_host_response",
@@ -943,7 +946,7 @@ class ReviewRun:
         assert prep is not None
         done = Outcome("approved" if prep.event == "approve" else "posted")
         if prep.has_text and not self.hits:
-            per_body, found, warnings, _ = self._post_drafts(pr)
+            per_body, found, warnings, deleted_rest = self._post_drafts(pr)
             done.landed = True
             done.warnings.extend(warnings)
             if not warnings:
@@ -957,11 +960,20 @@ class ReviewRun:
                     self._attempt_record.unknown_ids = list(done.ids)
                 if any(f is None for f in per_body):  # a sent body that did not come back intact
                     done.result = "quick_action_ran"
+                    if deleted_rest:
+                        message = (
+                            "the publish was not answered and part of the review landed "
+                            f"(notes {', '.join(done.ids)}); forgectl deleted the unpublished "
+                            "drafts itself; a published body does not match the one sent; "
+                            "the state step was not run"
+                        )
+                    else:
+                        message = (
+                            "a published body does not match the one sent: the host may have "
+                            "run a quick action from it; the state step was not run"
+                        )
                     done.error = ForgectlError(
-                        "quick_action_ran",
-                        "a published body does not match the one sent: the host may have run a "
-                        "quick action from it; the state step was not run",
-                        details={"ids": list(done.ids)},
+                        "quick_action_ran", message, details={"ids": list(done.ids)}
                     )
                     return done
         if not self.state.needed:
