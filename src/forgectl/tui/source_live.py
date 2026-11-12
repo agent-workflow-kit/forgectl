@@ -6,7 +6,9 @@ command line, in this process: load the config, bind the identifiers (the closed
 call the handler registered for the command. It never starts ``forgectl``, ``gh`` or ``glab``
 itself; the handlers reach the forges through the gateway, as for the CLI.
 
-Only the three read commands can be run from here, so no write handler is reachable.
+The read runner reaches only the read commands. The one write, ``merge``, has a runner of its own
+(``in_process_merge_runner``) that runs nothing else and goes through the same gate as the command
+line (``build_context``), then the registered ``merge`` handler: there is no second merge.
 
 Thread safety, for the progressive loading of #58: ``prs``, ``snapshot(pr)`` and ``diff(pr)`` may
 be called from any number of worker threads at once. A ``LiveSource`` keeps only the registry of
@@ -53,6 +55,7 @@ from forgectl.browse import is_pr
 from forgectl.config import load_config
 from forgectl.errors import Cancelled, ForgectlError
 from forgectl.gateway import CALL_SCOPE, CallScope
+from forgectl.humanactions import Tty, build_context, default_me_name
 from forgectl.identifiers import bind_args
 from forgectl.registry import Invocation
 from forgectl.surface import parse
@@ -62,7 +65,7 @@ Runner = Callable[[list[str]], dict[str, Any]]
 ``ForgectlError`` for a failed command, ``partial_results`` carrying ``output``."""
 
 
-__all__ = ["Cancelled", "LiveSource", "in_process_runner"]
+__all__ = ["Cancelled", "LiveSource", "in_process_merge_runner", "in_process_runner"]
 
 CLOSE_WAIT = 5.0
 """Seconds ``LiveSource.close`` waits for the calls in flight to return after their groups died."""
@@ -138,6 +141,55 @@ def in_process_runner(
     return run
 
 
+def in_process_merge_runner(
+    config_path: str | None = None,
+    environ: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+) -> Runner:
+    """A runner for the ``merge`` command only, mirroring ``cli._run`` for a write: config, the
+    closed host list, the human-action gate with a terminal on stdin and stderr (so the actor is
+    ``human:<me.name>`` with ``actor_source: tty``), then the registered handler. ``browse`` always
+    passes ``--yes`` with ``--expected-head`` and ``--expected-base`` after its own dialog, so the
+    command line dialog never runs and a stale PR is refused by the command itself."""
+
+    def run(argv: list[str]) -> dict[str, Any]:
+        args: Namespace | None = None
+        try:
+            args = parse(argv)
+            if args.command != "merge":
+                raise ForgectlError("internal", f"{args.command}: not the merge command")
+            registry.load_handlers()
+            with _LOAD_LOCK:
+                cfg = load_config(config_path, env=environ if environ is not None else os.environ)
+            bind_args(args, cfg.config)
+            human = build_context(
+                args, Tty(stdin=True, stderr=True), me_name=cfg.config.me.name or default_me_name()
+            )
+            handler = registry.HANDLERS.get("merge")
+            if handler is None:
+                raise ForgectlError("internal", "merge: not implemented")
+            out = handler(
+                Invocation(
+                    command="merge",
+                    args=args,
+                    json=True,
+                    human=human,
+                    config=cfg,
+                    timeout=cfg.timeout_for(timeout),
+                )
+            )
+            if not isinstance(out, dict):
+                raise ForgectlError("internal", "merge: the handler gave no object")
+            if not human.dry_run:
+                cli._log("info", "command_done", args, {"command": "merge"})
+            return out
+        except ForgectlError as err:
+            _log_failure(err, args)
+            raise
+
+    return run
+
+
 def _kill_group(pid: int, pgid: int) -> None:
     """SIGKILL the group of a child this process started, if its leader is not reaped yet.
 
@@ -182,8 +234,10 @@ class LiveSource:
         *,
         config_path: str | None = None,
         timeout: float | None = None,
+        merge_runner: Runner | None = None,
     ) -> None:
         self._runner = runner or in_process_runner(config_path, timeout=timeout)
+        self._merge_runner = merge_runner or in_process_merge_runner(config_path, timeout=timeout)
         self._cond = threading.Condition()
         self._closed = False
         self._calls: list[_Call] = []
@@ -197,9 +251,9 @@ class LiveSource:
                     _kill_group(pid, pgid)
             self._cond.wait_for(lambda: not self._calls, timeout=CLOSE_WAIT)
 
-    def _run(self, argv: list[str]) -> dict[str, Any]:
+    def _run(self, argv: list[str], runner: Runner | None = None) -> dict[str, Any]:
         try:
-            return self._runner(argv)
+            return (runner or self._runner)(argv)
         except (ForgectlError, Cancelled):
             raise
         except Exception as exc:  # a handler bug: the type only, its text may hold anything
@@ -290,13 +344,41 @@ class LiveSource:
             raise HostStopped(reason, f"detail: the host stopped the bulk read ({reason})")
         raise ForgectlError("upstream_error", f"detail: the bulk read failed ({reason})")
 
+    def merge(
+        self,
+        pr: str,
+        *,
+        head: str,
+        base: str,
+        method: str | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """The ``merge`` output of one PR, through the merge command's own path, with the head and
+        base the caller showed as ``--expected-head`` and ``--expected-base`` (a PR that moved is
+        refused as ``stale_head`` or ``stale_base``) and ``--yes`` (the caller's dialog is the
+        confirmation). ``dry_run`` runs every check and writes nothing. Never ``--override-blocks``,
+        ``--auto`` or any other human-only flag. Not cancellable: once the write started, only
+        the command itself decides the outcome."""
+        if not is_pr(pr):
+            raise ForgectlError("invalid_pr", "merge: not a PR in the form host/path#N")
+        argv = ["merge", pr, "--yes", f"--expected-head={head}", f"--expected-base={base}"]
+        if method is not None:
+            argv.append(f"--method={method}")
+        if dry_run:
+            argv.append("--dry-run")
+        return self._tracked(argv, None, pr, self._merge_runner)
+
     def _one(self, command: str, pr: str, cancelled: Callable[[], bool] | None) -> dict[str, Any]:
         if not is_pr(pr):  # also keeps an option-looking value out of the argument list
             raise ForgectlError("invalid_pr", f"{command}: not a PR in the form host/path#N")
         return self._tracked([command, pr], cancelled, pr)
 
     def _tracked(
-        self, argv: list[str], cancelled: Callable[[], bool] | None, subject: str
+        self,
+        argv: list[str],
+        cancelled: Callable[[], bool] | None,
+        subject: str,
+        runner: Runner | None = None,
     ) -> dict[str, Any]:
         """Run one read inside a ``CallScope`` that this source can cancel and kill (``prs``,
         ``snapshot``, ``diff`` and ``snapshots`` all come through here)."""
@@ -337,7 +419,7 @@ class LiveSource:
         try:
             if stop():  # before the first host call, whatever the runner is
                 raise Cancelled(subject)
-            return self._run(argv)
+            return self._run(argv, runner)
         finally:
             CALL_SCOPE.reset(token)
             with self._cond:
