@@ -946,7 +946,7 @@ class ReviewRun:
         assert prep is not None
         done = Outcome("approved" if prep.event == "approve" else "posted")
         if prep.has_text and not self.hits:
-            per_body, found, warnings, deleted_rest = self._post_drafts(pr)
+            per_body, found, warnings, after_publish_error = self._post_drafts(pr)
             done.landed = True
             done.warnings.extend(warnings)
             if not warnings:
@@ -960,11 +960,12 @@ class ReviewRun:
                     self._attempt_record.unknown_ids = list(done.ids)
                 if any(f is None for f in per_body):  # a sent body that did not come back intact
                     done.result = "quick_action_ran"
-                    if deleted_rest:
+                    if after_publish_error:
                         message = (
-                            "the publish was not answered and part of the review landed "
-                            f"(notes {', '.join(done.ids)}); forgectl deleted the unpublished "
-                            "drafts itself; a published body does not match the one sent; "
+                            "the publish was not answered; "
+                            f"notes {', '.join(done.ids)} landed and a sent body did not come "
+                            "back intact (the host may have run a quick action from it, or "
+                            "forgectl deleted drafts that were not published); "
                             "the state step was not run"
                         )
                     else:

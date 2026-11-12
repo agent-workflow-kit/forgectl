@@ -848,13 +848,29 @@ def test_a_publish_error_with_only_some_own_drafts_gone_deletes_the_rest_and_rea
     done = gl.run()
     assert done.code == 12 and done.error["code"] == "quick_action_ran"
     assert done.error["details"] == {"ids": ["gl:n:601"]}
-    assert "part of the review landed" in done.error["message"]
+    assert "the publish was not answered" in done.error["message"]
     assert "gl:n:601" in done.error["message"]
-    assert "forgectl deleted the unpublished drafts" in done.error["message"]
-    assert "quick action" not in done.error["message"]
+    assert "the state step was not run" in done.error["message"]
+    assert "forgectl deleted the unpublished drafts itself" not in done.error["message"]
     assert gl.endpoints("DELETE") == [f"{DRAFTS}/12"]
     assert [r["result"] for r in gl.audit()] == ["attempted", "quick_action_ran"]
     assert gl.audit()[-1]["ids"] == ["gl:n:601"]
+
+
+def test_a_publish_error_with_all_own_drafts_gone_and_a_body_missing_claims_no_deletion(
+    gl: Gl,
+) -> None:
+    happy(gl)
+    gl.drafts([], [draft(11), draft(12)], [])
+    gl.publish(status=500, body={"message": "timeout"})
+    gl.discussions(mine_published([(601, D1, "use c here")]))  # the body did not land
+    done = gl.run()
+    assert done.code == 12 and done.error["code"] == "quick_action_ran"
+    assert done.error["details"] == {"ids": ["gl:n:601"]}
+    assert "gl:n:601" in done.error["message"]
+    assert "the publish was not answered" in done.error["message"]
+    assert "forgectl deleted the unpublished drafts itself" not in done.error["message"]
+    assert gl.endpoints("DELETE") == []
 
 
 def test_a_publish_error_with_some_own_drafts_gone_and_the_rest_undeletable_is_outcome_unknown(
