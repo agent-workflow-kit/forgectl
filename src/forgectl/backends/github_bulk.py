@@ -13,7 +13,9 @@ one that has another page (or a ``mergeStateStatus`` still being computed, a hea
 the last commit, a requested team the token cannot read, ...) makes the PR ``Unresolved`` and
 ``forgectl.bulk`` reads it with ``snapshot``. Differences from ``snapshot`` (interface:
 ``snapshots``): ``ci.checks[].required`` is null, since ``isRequired`` takes the PR number as an
-argument; the review requests come from GraphQL only.
+argument, unless the read is a ``lookup`` (the browse detail path, #136), which then asks one
+small extra request per PR (``REQUIRED_QUERY``) and fills it, or leaves it null with a warning
+when that request fails; the review requests come from GraphQL only.
 
 Page size. ``mergeable`` and ``mergeStateStatus`` are the expensive fields: a page of 50 returns
 HTTP 502 after about 10 s. Pages start at ``PAGE_SIZE``; a page that fails is halved and each half
@@ -24,6 +26,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
@@ -34,12 +37,13 @@ from ..gateway import verify_identity
 from ..identifiers import PrRef
 from ..reads import ReadEnv
 from . import github_snapshot as gs
-from .bulk_common import BULK_UNAVAILABLE, BulkRead, Unresolved, run_pages
+from .bulk_common import BULK_UNAVAILABLE, BulkRead, Unresolved, ends_run, run_pages
 from .github import (
     _ACTOR_FIELDS,
     MAX_PR_NUMBER,
     GitHubBackend,
     Malformed,
+    _check_name,
     _is_unknown,
     _obj,
     _opt_obj,
@@ -62,6 +66,37 @@ REQUESTS = 30
 REQUEST_EVENTS = 30
 FORCE_PUSHES = 20
 LABELS = 100
+
+#: The checks' ``isRequired`` of one PR (#136): the bulk query cannot select it, as it takes the PR
+#: number as an argument. One request per PR, only for a ``lookup`` read. One page of 100 covers
+#: the 50 checks a bulk item may hold; any check it does not name stays null.
+REQUIRED_QUERY = """
+query ForgectlRequired($owner: String!, $name: String!, $number: Int!) {
+  rateLimit { cost remaining resetAt }
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      number
+      headRefOid
+      commits(last: 1) {
+        nodes {
+          commit {
+            oid
+            statusCheckRollup {
+              contexts(first: 100) {
+                nodes {
+                  __typename
+                  ... on CheckRun { name isRequired(pullRequestNumber: $number) }
+                  ... on StatusContext { context isRequired(pullRequestNumber: $number) }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
 
 _THREADS_PAGE = gs._THREADS_PAGE.replace(
     "comments(first: 50)", f"comments(first: {THREAD_COMMENTS})"
@@ -250,16 +285,22 @@ class _Run:
         self.target = env.hosts.target(host)
         self.limits = gs.Limits(host=host)
         self.backend = GitHubBackend(env)
+        #: the failure that ended the required reads of this run (a rate limit or a credential
+        #: failure): no further required read is asked, and the items stay whole without it
+        self.required_stop: ForgectlError | None = None
 
     # -- one request ---------------------------------------------------------------------------
 
     def _graphql(self, page: Sequence[PrRef]) -> tuple[dict[str, Any], tuple[Any, ...]]:
         """The page's answer, after the retries of a rate limit only: any other failure is the
         caller's, which halves the page instead of asking the same again."""
+        return self._post(bulk_query(len(page)), _variables(page))
+
+    def _post(
+        self, query: str, variables: dict[str, Any]
+    ) -> tuple[dict[str, Any], tuple[Any, ...]]:
         gateway = self.env.gateway
         retries = self.env.retries
-        query = bulk_query(len(page))
-        variables = _variables(page)
         attempt = 0
         while True:
             if gateway.budget.remaining() <= 0:
@@ -307,6 +348,42 @@ class _Run:
                 result.unresolved[ref] = outcome
             else:
                 result.snapshots[ref] = outcome
+
+    # -- the required checks of one PR (#136) ----------------------------------------------------
+
+    def fill_required(self, ref: PrRef, snap: m.Snapshot) -> m.Snapshot:
+        """``snap`` with ``required`` of its checks read from the host, or ``snap`` as it is,
+        with a warning, when the read fails or its answer does not fit the snapshot. A failure
+        that ends a host's run (``ends_run``) also stops every later required read of this run
+        (``required_stop``); the items stay whole, as the bulk answer is valid without it."""
+        if not snap.ci.checks or self.required_stop is not None:
+            return snap
+        owner, name = _split(ref)
+        try:
+            data, errors = self._post(
+                REQUIRED_QUERY, {"owner": owner, "name": name, "number": ref.number}
+            )
+            if errors:
+                raise Malformed("the host answered errors")
+            self.limits.note_graphql(data)
+            required = _required_by_name(
+                data,
+                ref.number,
+                snap.ci.head_sha,
+                lambda text: self.env.warn(f"{ref}: required checks: {text}"),
+            )
+        except ForgectlError as error:
+            if error.code == "wrong_host_response":
+                raise
+            if ends_run(error, lambda: self.env.gateway.budget.remaining() <= 0):
+                self.required_stop = error
+            self.env.warn(f"{ref}: required checks not read ({error.code})")
+            return snap
+        except Malformed as bad:
+            self.env.warn(f"{ref}: required checks not read: unusable answer ({bad})")
+            return snap
+        checks = tuple(replace(c, required=required.get(c.name)) for c in snap.ci.checks)
+        return replace(snap, ci=replace(snap.ci, checks=checks), rate_limit=self.limits.result())
 
     # -- one PR --------------------------------------------------------------------------------
 
@@ -402,6 +479,47 @@ class _Run:
             head_push=head_push,
             activity=activity,
         )
+
+
+def _required_by_name(
+    data: Mapping[str, Any],
+    number: int,
+    head_sha: str,
+    warn: Callable[[str], None] = lambda _text: None,
+) -> dict[str, bool]:
+    """Name -> ``isRequired`` of the head's checks in a ``REQUIRED_QUERY`` answer. A name that
+    two checks share with different answers, or with one that is not a boolean, is left out
+    (null). Raises ``Malformed`` when the answer is not the one asked for."""
+    repo = _obj(data.get("repository"), "the repository")
+    pr = _obj(repo.get("pullRequest"), "the pull request")
+    if isinstance(pr.get("number"), bool) or pr.get("number") != number:
+        raise Malformed("the pull request number")
+    if pr.get("headRefOid") != head_sha:
+        raise Malformed("the head moved")
+    nodes = _obj(pr.get("commits"), "the commits").get("nodes")
+    if not isinstance(nodes, list) or not nodes:
+        raise Malformed("the commits")
+    commit = _obj(_obj(nodes[-1], "a commit").get("commit"), "a commit")
+    if commit.get("oid") != head_sha:
+        raise Malformed("the head commit")
+    rollup = _opt_obj(commit.get("statusCheckRollup"), "the check rollup")
+    if rollup is None:
+        warn("the host answered no check rollup for the head, which has checks")
+    contexts = _obj(rollup.get("contexts"), "the checks") if rollup else {}
+    listed = contexts.get("nodes") or []
+    if not isinstance(listed, list):
+        raise Malformed("the checks")
+    seen: dict[str, bool | None] = {}
+    for node in listed:
+        node = _obj(node, "a check")
+        raw = node.get("name") if node.get("__typename") == "CheckRun" else node.get("context")
+        if not isinstance(raw, str):
+            warn("a check without a name string was left out")
+            continue
+        flag = node.get("isRequired")
+        key = _check_name(raw)
+        seen[key] = flag if isinstance(flag, bool) and seen.get(key, flag) == flag else None
+    return {k: v for k, v in seen.items() if v is not None}
 
 
 # -- completeness ------------------------------------------------------------------------------
@@ -549,10 +667,11 @@ def read_bulk(
     *,
     now: Callable[[], datetime] = gs.utc_now,
     page_size: int = PAGE_SIZE,
-    lookup: bool = False,  # GitHub asks each PR by its own alias already: nothing to change
+    lookup: bool = False,
 ) -> BulkRead:
     """The snapshots of ``refs`` (all on ``host``) that the bulk reader can give whole, and why
-    not for the others."""
+    not for the others. GitHub asks each PR by its own alias already, so ``lookup`` changes only
+    one thing: ``required`` of the checks is read, one request per PR (#136)."""
     if not refs:
         return BulkRead()
     # a ref the query cannot carry (a number GraphQL's Int cannot hold, a path that is not
@@ -574,4 +693,9 @@ def read_bulk(
         askable, page_size, run.ask, exhausted=lambda: env.gateway.budget.remaining() <= 0
     )
     result.unresolved.update(skipped)
+    if lookup:
+        for ref in list(result.snapshots):
+            if env.gateway.budget.remaining() <= 0 or run.required_stop is not None:
+                break  # the answer is whole without it: `required` stays null
+            result.snapshots[ref] = run.fill_required(ref, result.snapshots[ref])
     return result
