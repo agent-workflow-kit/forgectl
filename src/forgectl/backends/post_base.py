@@ -6,8 +6,9 @@ write, and it never believes an answer without its documented status and proof (
 a redirected write comes back as a GET's answer and fails that proof, so nothing "posted" is
 reported for it.
 
-TODO(#26): ``review`` posts, TODO(#28): ``approve`` posts, TODO(#29): ``resolve`` and
-``unresolve`` extend the protocol here, each in its own backend module.
+``review`` (``github_review.py``, #26) has its own module and protocol. TODO(#28): ``approve``
+posts, TODO(#29): ``resolve`` and ``unresolve`` extend the protocol here, each in its own backend
+module.
 """
 
 from __future__ import annotations
