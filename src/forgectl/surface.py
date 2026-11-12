@@ -402,7 +402,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     for name, summary in (
         ("show", "the normalized PR object"),
-        ("snapshot", "the PR with reviews, threads and CI in one call"),
         ("diff", "the unified diff"),
         ("files", "the changed files"),
         ("comments", "review threads and comments"),
@@ -410,6 +409,15 @@ def build_parser() -> argparse.ArgumentParser:
         ("ci", "checks on the head"),
     ):
         _pr(add(name, summary))
+
+    p = add("snapshot", "the PR with reviews, threads and CI in one call")
+    _pr(p)
+    p.add_argument(
+        "--no-bodies",
+        dest="no_bodies",
+        action=_OnceFlag,
+        help="leave out the bodies of the reviews and the comments",
+    )
 
     p = add("snapshots", "snapshots of many PRs from a few bulk requests")
     p.add_argument(

@@ -22,16 +22,47 @@ def dumps(data: Any) -> str:
     return json.dumps(data, ensure_ascii=True)
 
 
-def format_human(data: dict[str, Any]) -> str:
+# The multi-line text fields of a command's human output, printed as indented blocks.
+# `compare`'s diff and `show`'s body; every other field, and every other command, keeps the
+# one-line form. `diff` prints its diff alone and `export` prints records (see emit_success).
+HUMAN_TEXT_FIELDS: dict[str, frozenset[str]] = {
+    "compare": frozenset({"diff"}),
+    "show": frozenset({"body"}),
+}
+BLOCK_INDENT = "    "
+
+
+def text_block(text: str) -> list[str]:
+    """A text field as indented lines: one per line of ``text``, each sanitized on its own.
+
+    Every line, an empty one too, carries the indent, so a line of the text can never start a
+    line of the output at the left margin and forge a ``key: value`` line. A CR the diff kept
+    before its LF is a visible marker here. The last LF ends its line and starts no new one, so
+    the block has the text's line count.
+    """
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return [BLOCK_INDENT + sanitize_text(line) for line in lines]
+
+
+def format_human(data: dict[str, Any], text_fields: frozenset[str] = frozenset()) -> str:
     """`key: value` lines, never raw: every string passes through the sanitizer.
 
     One line per field: a tab or LF inside a key or a value becomes a marker, so untrusted text
-    cannot forge a line of its own.
+    cannot forge a line of its own. The exception is a key in ``text_fields`` whose value is a
+    non-empty string: ``key:`` and then its lines as an indented block (``text_block``). Null
+    and the empty string stay on the key's line.
     """
     lines: list[str] = []
     for key, value in data.items():
+        name = sanitize_line(str(key))
+        if key in text_fields and isinstance(value, str) and value:
+            lines.append(f"{name}:")
+            lines.extend(text_block(value))
+            continue
         text = value if isinstance(value, str) else dumps(sanitize_tree(value))
-        lines.append(f"{sanitize_line(str(key))}: {sanitize_line(text)}")
+        lines.append(f"{name}: {sanitize_line(text)}")
     return "\n".join(lines)
 
 
@@ -214,14 +245,19 @@ def emit_success(
 ) -> None:
     """The result on stdout. Human `diff` prints the unified diff alone, as the backend
     sanitized it (interface: `diff`; Sanitizing): LF, tab and a CR before LF stay raw, so its
-    lines are the diff's own."""
+    lines are the diff's own. `compare` and `show` print their text field as an indented block
+    and `export` prints its record lines, or one array with --json (interface: Human output)."""
     if isinstance(data, RecordStream):
         _write_stream(sys.stdout, data.records, array=json_mode)
         return
     if command == "diff" and not json_mode:
         write_text(sys.stdout, data["diff"])
         return
-    write_line(sys.stdout, dumps(data) if json_mode else format_human(data))
+    if json_mode:
+        write_line(sys.stdout, dumps(data))
+    else:
+        text_fields = HUMAN_TEXT_FIELDS.get(command or "", frozenset())
+        write_line(sys.stdout, format_human(data, text_fields))
 
 
 def emit_error(
