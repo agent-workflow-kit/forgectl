@@ -365,7 +365,7 @@ After text landed, any failure of the state step is exit 12 `outcome_partial`, `
 | GitLab `POST /notes`, `POST /discussions/:id/notes`, `POST /draft_notes` | 201 | integer `id`; a 202 on a note is `quick_action_ran` |
 | GitLab `bulk_publish`, `DELETE /draft_notes/:id` | 204 | none; the read-back decides |
 | GitLab `POST /approve` | 201 | none |
-| GitLab `PUT /discussions/:id` | 200 | `id` and the requested `resolved` |
+| GitLab `PUT /discussions/:id` | 200 | `id` and every resolvable note in the requested `resolved` state (a mix is not proof) |
 | GraphQL mutations | per [Invoking the backends](#invoking-the-backends) | non-null result, no `errors` |
 
 There is no limiter shared between processes. A caller polling many PRs paces itself.
@@ -657,7 +657,7 @@ Output: as for `comment`, plus `threaded`. `thread_ids` holds the thread the rep
 
 They follow [Post order](#post-order) where a step applies: usage, read and lookup, confirmation, `pre-post` hooks, the host call with its audit records, `post-post` hooks. There is no head check. `--thread` takes `gh:rt:` and `gl:d:`. Any other well-formed id, or a thread with `resolvable: false`, exits 20 (`not_resolvable`); a malformed one exits 2. The state is read at Post order step 2. Already in that state: exit 0, no host call, no hooks, no audit record, before confirmation.
 
-Output: `{pr, action, thread_id, resolved, dry_run}`.
+Output: `{pr, action, thread_id, resolved, changed, dry_run}`. `changed` is true only when this run wrote: false when the thread was already in the requested state (at the first read, or at the re-read after a hook or dialog, where nothing is written and no `post-post` hook runs), and false on a `--dry-run`, which also reports the requested state in `resolved`. A thread that changed after forgectl's read is still written, since both host calls are idempotent, and reports `changed: true`. The answer to the write must show this thread in the requested state (GitHub: the mutation's `thread`; GitLab: the discussion, every resolvable note in that state), else exit 12 `outcome_unknown`. A half-resolved GitLab discussion (some resolvable notes resolved, some not) counts as not resolved for `resolve` and as not unresolved for `unresolve`: either command writes it, and an answer that leaves a mix is `outcome_unknown`. The `resolved` the command reports stays the requested state.
 
 ### `approve`
 

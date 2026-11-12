@@ -4,7 +4,7 @@ Normalized access to pull/merge requests across GitHub and GitLab: read them, po
 
 ## Status
 
-Implemented and released (see [CHANGELOG.md](CHANGELOG.md) for the version). Available now: the reads (`prs`, `show`, `snapshot`, `snapshots`, `poll`, `diff`, `files`, `compare`, `comments`, `reviews`, `ci`, `access`, `whoami`), `browse`, `export` and `merge` (with `--auto`) on GitHub and GitLab. Not yet implemented: `comment` and `reply` (#24), `review` on GitHub (#26) and GitLab (#27), `approve` (#28), and `resolve` and `unresolve` (#29); they parse but fail with an `internal` error. The contract is [docs/interface.md](docs/interface.md). Rationale and live-verification results are in [docs/design.md](docs/design.md); the staged plan is in [docs/plan.md](docs/plan.md).
+Implemented and released (see [CHANGELOG.md](CHANGELOG.md) for the version). Available now: the reads (`prs`, `show`, `snapshot`, `snapshots`, `poll`, `diff`, `files`, `compare`, `comments`, `reviews`, `ci`, `access`, `whoami`), `browse`, `export` and `merge` (with `--auto`), `comment`, `reply`, `resolve` and `unresolve` on GitHub and GitLab. Not yet implemented: `review` on GitHub (#26) and GitLab (#27) and `approve` (#28); they parse but fail with an `internal` error. The contract is [docs/interface.md](docs/interface.md). Rationale and live-verification results are in [docs/design.md](docs/design.md); the staged plan is in [docs/plan.md](docs/plan.md).
 
 ## Layer
 
@@ -62,7 +62,7 @@ forgectl merge github.com/org/repo#42 --expected-head <sha> --expected-base main
 | `review` | post a review (not yet implemented, #26 GitHub, #27 GitLab; the position check for its inline comments is done, #25) |
 | `comment`, `reply` | post a comment; reply to a thread |
 | `approve` | approve (not yet implemented, #28) |
-| `resolve`, `unresolve` | threads (not yet implemented, #29) |
+| `resolve`, `unresolve` | resolve or reopen a review thread (`gh:rt:` or `gl:d:` id); reports `changed` |
 | `browse` | read-only terminal browser of your open PRs and MRs; needs the `tui` extra |
 | `export` | audit records |
 
