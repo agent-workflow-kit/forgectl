@@ -655,7 +655,7 @@ Output: as for `comment`, plus `threaded`. `thread_ids` holds the thread the rep
 
 They follow [Post order](#post-order) where a step applies: usage, read and lookup, confirmation, `pre-post` hooks, the host call with its audit records, `post-post` hooks. There is no head check. `--thread` takes `gh:rt:` and `gl:d:`. Any other well-formed id, or a thread with `resolvable: false`, exits 20 (`not_resolvable`); a malformed one exits 2. The state is read at Post order step 2. Already in that state: exit 0, no host call, no hooks, no audit record, before confirmation.
 
-Output: `{pr, action, thread_id, resolved, dry_run}`.
+Output: `{pr, action, thread_id, resolved, changed, dry_run}`. `changed` is true only when this run wrote: false when the thread was already in the requested state (at the first read, or at the re-read after a hook or dialog, where nothing is written and no `post-post` hook runs), and false on a `--dry-run`, which also reports the requested state in `resolved`. A thread that changed after forgectl's read is still written, since both host calls are idempotent, and reports `changed: true`. The answer to the write must show this thread in the requested state (GitHub: the mutation's `thread`; GitLab: the discussion, every resolvable note in that state), else exit 12 `outcome_unknown`.
 
 ### `approve`
 

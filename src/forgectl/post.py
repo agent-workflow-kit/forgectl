@@ -18,7 +18,7 @@ TODO(#25): position validation (step 3) for ``review`` comments.
 TODO(#26), TODO(#27): ``review`` on GitHub and GitLab: events, drafts, the read-back (steps 5, 9
 to 11) and the review body's own limits; they reuse ``prepare_body`` and ``PostRun``'s hooks.
 TODO(#28): ``approve`` (self-approval, the state step, ``head_verified``).
-TODO(#29): ``resolve`` and ``unresolve``.
+``resolve`` and ``unresolve`` (``resolve.py``) reuse its audit, hook and signal helpers.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ import hashlib
 import os
 import stat
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -186,6 +187,109 @@ def _poster(backend: str, env: ReadEnv) -> Poster:
     return GitLabPoster(env)
 
 
+def attempt_write(
+    write: Callable[[], Outcome], log: Callable[[str, str, dict[str, Any]], None]
+) -> Outcome:
+    """Run the one host write. A bug here (any non-forgectl exception) is an unknown outcome: the
+    write may have landed, so the audit result and the post- hooks still follow. A signal is not
+    caught."""
+    try:
+        return write()
+    except ForgectlError as err:
+        unknown = err.code in ("outcome_unknown", "wrong_host_response")
+        return Outcome("outcome_unknown" if unknown else "failed", error=err)
+    except Exception as exc:
+        try:
+            log("error", "internal", {"exception": type(exc).__name__})
+        except Exception:  # a failing log must not skip the record and the hooks
+            pass
+        return Outcome(
+            "outcome_unknown",
+            error=ForgectlError(
+                "outcome_unknown",
+                f"internal error after the post was sent ({type(exc).__name__}); "
+                "it may have landed",
+            ),
+        )
+
+
+def audited_write(
+    directory: Path,
+    context: audit.AuditContext,
+    write: Callable[[], Outcome],
+    post_hooks: Callable[[Outcome], None],
+) -> Outcome:
+    """Steps 9 and 12 for every post command: audit ``attempted``, the one write, the audit
+    result, then the ``post-post`` hooks. The caller raises ``outcome.error`` afterwards."""
+    audit_error: ForgectlError | None = None
+    signalled = False
+    with audit.Attempt(directory, context) as attempt:
+        attempt.begin()  # a failure here is audit_unavailable and nothing has been sent
+        outcome = write()
+        ids = list(outcome.posted.ids) if outcome.posted else []
+        try:
+            attempt.finish(outcome.result, ids=ids)
+        except ForgectlError as err:  # audit_failed: the post- hooks still run
+            audit_error = err
+        except SignalExit:
+            if not attempt.finished:
+                raise  # the outcome is not on record: Attempt records outcome_unknown
+            signalled = True
+            audit_error = attempt.finish_error
+    if not signalled:
+        try:
+            post_hooks(outcome)
+        except SignalExit:
+            pass  # the running hook's group was ended; the remaining hooks do not run
+    if audit_error is not None:
+        raise audit_error
+    return outcome
+
+
+def fire_pre_hooks(
+    env: ReadEnv, fields: dict[str, Any], decision_ids: list[str], override: bool
+) -> hooks.HookResult:
+    """Step 7: the ``pre-post`` hooks (a veto or escalation raises); their warnings are shown."""
+    pre = hooks.run_pre_hooks(
+        env.gateway,
+        "pre-post",
+        fields,
+        decision_ids=decision_ids,
+        override_escalation=override,
+    )
+    for text in pre.warnings:
+        output.warn(text)
+    return pre
+
+
+def fire_post_hooks(
+    env: ReadEnv,
+    fields: dict[str, Any],
+    decision_ids: list[str],
+    directory: Path,
+    pr_id: str,
+    log: Callable[[str, str, dict[str, Any]], None],
+) -> None:
+    """Step 12: the ``post-post`` hooks; a failure is a warning and a log line, never fatal."""
+    result = hooks.run_post_hooks(
+        env.gateway,
+        "post-post",
+        fields,
+        decision_ids=decision_ids,
+        state_dir=str(directory),
+        pr=pr_id,
+    )
+    for text in result.warnings:
+        output.warn(text)
+    for report in result.reports:
+        if report.outcome == "failed":
+            log(
+                "warn",
+                "hook_failed",
+                {"hook": report.hook, "index": report.index, "why": report.detail},
+            )
+
+
 class PostRun:
     """One ``comment`` or ``reply``."""
 
@@ -308,15 +412,12 @@ class PostRun:
         if dialog and not self._dialog(pr, anchor):
             raise ForgectlError("confirmation_required", "declined")
         # step 7: pre-post hooks (a veto or escalation raises)
-        pre = hooks.run_pre_hooks(
-            self.env.gateway,
-            "pre-post",
+        pre = fire_pre_hooks(
+            self.env,
             self._hook_fields(pr, anchor),
-            decision_ids=self.decision_ids,
-            override_escalation=bool(args.override_escalation),
+            self.decision_ids,
+            bool(args.override_escalation),
         )
-        for text in pre.warnings:
-            output.warn(text)
         self.decision_ids = list(pre.decision_ids)
         self.escalated = bool(pre.escalated)
         # step 8: a slow gate may have outlasted what it saw
@@ -371,23 +472,7 @@ class PostRun:
         del fields["override_escalation"], fields["allow_self"]
         fields["result"] = outcome.result
         fields["ids"] = list(outcome.posted.ids) if outcome.posted else []
-        result = hooks.run_post_hooks(
-            self.env.gateway,
-            "post-post",
-            fields,
-            decision_ids=self.decision_ids,
-            state_dir=str(self.directory),
-            pr=self.pr_id,
-        )
-        for text in result.warnings:
-            output.warn(text)
-        for report in result.reports:
-            if report.outcome == "failed":
-                self._log(
-                    "warn",
-                    "hook_failed",
-                    {"hook": report.hook, "index": report.index, "why": report.detail},
-                )
+        fire_post_hooks(self.env, fields, self.decision_ids, self.directory, self.pr_id, self._log)
 
     # -- steps 9 to 12 -------------------------------------------------------------------------
 
@@ -417,59 +502,32 @@ class PostRun:
         )
         if self.env.gateway.budget.remaining() <= 0:  # nothing was sent: no `attempted` record
             raise ForgectlError("network_error", "the time budget ran out before the post")
-        audit_error: ForgectlError | None = None
-        signalled = False
-        with audit.Attempt(self.directory, context) as attempt:
-            attempt.begin()  # a failure here is audit_unavailable and nothing has been sent
-            outcome = self._attempt(pr, anchor)
-            ids = list(outcome.posted.ids) if outcome.posted else []
-            try:
-                attempt.finish(outcome.result, ids=ids)
-            except ForgectlError as err:  # audit_failed: the post- hooks still run
-                audit_error = err
-            except SignalExit:
-                if not attempt.finished:
-                    raise  # the outcome is not on record: Attempt records outcome_unknown
-                signalled = True
-                audit_error = attempt.finish_error
-        if not signalled:
-            try:
-                self._post_hooks(pr, anchor, outcome)
-            except SignalExit:
-                pass  # the running hook's group was ended; the remaining hooks do not run
-        if audit_error is not None:
-            raise audit_error
+        outcome = audited_write(
+            self.directory,
+            context,
+            lambda: self._attempt(pr, anchor),
+            lambda done: self._post_hooks(pr, anchor, done),
+        )
         if outcome.error is not None:
             raise outcome.error
         assert outcome.posted is not None
         return self._out(posted=outcome.posted, anchor=anchor)
 
     def _attempt(self, pr: PR, anchor: Anchor | None) -> Outcome:
-        """The write. A bug here (any non-forgectl exception) is an unknown outcome: the write
-        may have landed, so the audit result and the post- hooks still follow. A signal is not
-        caught."""
+        """The write; ``attempt_write`` turns any failure into an outcome."""
         assert self.body is not None
-        try:
+        body = self.body
+
+        def write() -> Outcome:
             if anchor is not None:
-                posted = self.poster.post_reply(pr, anchor, self.body.text)
+                posted = self.poster.post_reply(pr, anchor, body.text)
             else:
-                posted = self.poster.post_comment(pr, self.body.text)
-        except ForgectlError as err:
-            unknown = err.code in ("outcome_unknown", "wrong_host_response")
-            return Outcome("outcome_unknown" if unknown else "failed", error=err)
-        except Exception as exc:
-            try:
-                self._log("error", "internal", {"exception": type(exc).__name__})
-            except Exception:  # a failing log must not skip the record and the hooks
-                pass
-            return Outcome(
-                "outcome_unknown",
-                error=ForgectlError(
-                    "outcome_unknown",
-                    f"internal error after the post was sent ({type(exc).__name__}); "
-                    "it may have landed",
-                ),
-            )
+                posted = self.poster.post_comment(pr, body.text)
+            return self._outcome(posted)
+
+        return attempt_write(write, self._log)
+
+    def _outcome(self, posted: Posted) -> Outcome:
         if posted.quick_action:
             return Outcome(
                 "quick_action_ran",

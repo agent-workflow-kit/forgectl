@@ -6,8 +6,11 @@ write, and it never believes an answer without its documented status and proof (
 a redirected write comes back as a GET's answer and fails that proof, so nothing "posted" is
 reported for it.
 
-TODO(#26): ``review`` posts, TODO(#28): ``approve`` posts, TODO(#29): ``resolve`` and
-``unresolve`` extend the protocol here, each in its own backend module.
+``ThreadPoster`` is the write side of ``resolve`` and ``unresolve``, in its own backend modules
+(``github_resolve``, ``gitlab_resolve``).
+
+TODO(#26): ``review`` posts and TODO(#28): ``approve`` posts extend the protocol here, each in its
+own backend module.
 """
 
 from __future__ import annotations
@@ -71,6 +74,31 @@ class Poster(Protocol):
 
     def post_reply(self, pr: m.PR, anchor: Anchor, body: str) -> Posted:
         """One reply to ``anchor``. Never retried."""
+        ...
+
+
+@dataclass(frozen=True)
+class ThreadState:
+    """A review thread as ``resolve`` and ``unresolve`` need it, read within the PR."""
+
+    resolvable: bool
+    resolved: bool  # never true for a thread that is not resolvable
+    author_is_self: bool | None  # the thread's first comment is the account's; None: not known
+
+
+class ThreadPoster(Protocol):
+    def prepare(self, pr: m.PR) -> None:
+        """As for ``Poster``: whatever the write needs read first."""
+        ...
+
+    def read_thread(self, pr: m.PR, thread: TypedId, login: str, account_id: str) -> ThreadState:
+        """The thread's state, within ``pr``; absent, of another host or another PR's is
+        ``not_found``. ``login`` and ``account_id`` are the authenticated account's."""
+        ...
+
+    def set_resolved(self, pr: m.PR, thread: TypedId, resolved: bool) -> ThreadState:
+        """The one write. Never retried. The answer must show the requested state, else
+        ``outcome_unknown``: the write may have landed."""
         ...
 
 

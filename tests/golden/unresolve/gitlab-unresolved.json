@@ -1,0 +1,8 @@
+{
+  "action": "unresolve",
+  "changed": true,
+  "dry_run": false,
+  "pr": "gitlab.com/user-9/proj#7",
+  "resolved": false,
+  "thread_id": "gl:d:dddddddddddddddddddddddddddddddddddddddd"
+}

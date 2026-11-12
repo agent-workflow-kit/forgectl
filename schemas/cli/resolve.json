@@ -21,6 +21,10 @@
       ],
       "description": "The thread's state after the command; null on a --dry-run with a refusal."
     },
+    "changed": {
+      "type": "boolean",
+      "description": "true when this run changed the thread; false when it was already in the requested state (no host write), on a --dry-run, and on a refusal."
+    },
     "dry_run": {
       "type": "boolean"
     },
@@ -34,6 +38,7 @@
     "action",
     "thread_id",
     "resolved",
+    "changed",
     "dry_run"
   ],
   "allOf": [
