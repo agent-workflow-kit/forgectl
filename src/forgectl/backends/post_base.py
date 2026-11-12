@@ -6,11 +6,12 @@ write, and it never believes an answer without its documented status and proof (
 a redirected write comes back as a GET's answer and fails that proof, so nothing "posted" is
 reported for it.
 
+``review`` (``github_review.py``, #26) has its own module and protocol.
+
 ``ThreadPoster`` is the write side of ``resolve`` and ``unresolve``, in its own backend modules
 (``github_resolve``, ``gitlab_resolve``).
 
-TODO(#26): ``review`` posts and TODO(#28): ``approve`` posts extend the protocol here, each in its
-own backend module.
+TODO(#28): ``approve`` posts extend the protocol here, in its own backend module.
 """
 
 from __future__ import annotations

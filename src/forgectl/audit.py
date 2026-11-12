@@ -285,6 +285,9 @@ class Attempt:
         #: ``audit_failed`` when the outcome append failed, kept so a signal delivered as the
         #: append returns does not lose it.
         self.finish_error: ForgectlError | None = None
+        #: ids proven before the outcome is known; the ``outcome_unknown`` that ``__exit__``
+        #: records (a signal, or a bug) carries them.
+        self.unknown_ids: list[str] = []
 
     @property
     def finished(self) -> bool:
@@ -349,10 +352,10 @@ class Attempt:
         if self._finished:
             return
         record = self._record(result, ids, observed)
-        # TODO(#26): an outcome record's `ids` is unbounded, so a large review can pass the
-        # 64 KiB line cap and end in audit_failed after the post landed. Decided: `review`
-        # accepts at most 200 inline comments per call (more is a usage error, exit 2), which
-        # keeps this record under the cap. Enforced in #26 and #27, not here.
+        # An outcome record's `ids` is unbounded, so a large review could pass the 64 KiB line
+        # cap and end in audit_failed after the post landed. `review` accepts at most 200 inline
+        # comments per call (more is a usage error, exit 2), which keeps this record under the
+        # cap. Enforced in `review.py` (#26) and #27, not here.
         with _signals_held():
             self._finished = True
             try:
@@ -382,7 +385,7 @@ class Attempt:
         if self._finished:
             return False
         try:
-            self.finish("outcome_unknown")
+            self.finish("outcome_unknown", ids=self.unknown_ids)
         except SignalExit as late:  # held during the append, it replaces the one in flight
             late.write_attempted = True
             if self.finish_error is not None:  # the append failed: audit_failed carries it
