@@ -207,7 +207,7 @@ Each has a conservative default in place.
 
 ### Upstream report
 
-`glab` repeating `Private-Token` on a cross-host redirect of a read is to be reported to the `glab` project, as an item of the implementation plan.
+`glab` repeating `Private-Token` on a cross-host redirect of a read is to be reported to the `glab` project, as an item of the implementation plan. The report is drafted in [docs/upstream/glab-private-token-redirect.md](upstream/glab-private-token-redirect.md) and is not yet filed (#37). `tests/test_glab_redirect_process.py` reproduces it against two loopback servers with the installed `glab` and a made-up token; it skips with a message naming the documents to update when `glab` stops repeating the header, so a fix upstream is noticed (then update the residual risk in `interface.md`, D-2 and D-5).
 
 ## Modules
 
