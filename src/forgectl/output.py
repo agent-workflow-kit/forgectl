@@ -245,7 +245,7 @@ def emit_success(
     """The result on stdout. Human `diff` prints the unified diff alone, as the backend
     sanitized it (interface: `diff`; Sanitizing): LF, tab and a CR before LF stay raw, so its
     lines are the diff's own. `compare` and `show` print their text field as an indented block
-    and `export` prints its JSON lines in either mode (interface: Human output)."""
+    and `export` prints its record lines, or one array with --json (interface: Human output)."""
     if isinstance(data, RecordStream):
         _write_stream(sys.stdout, data.records, array=json_mode)
         return

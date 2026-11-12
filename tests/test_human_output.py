@@ -9,9 +9,11 @@ from typing import Any
 
 import pytest
 
+from forgectl import registry
 from forgectl.cli import main
 from forgectl.humanactions import Tty
 from forgectl.output import emit_success, format_human, sanitize_tree
+from forgectl.registry import Invocation
 
 from .test_export import SHA, put, record
 
@@ -169,3 +171,38 @@ def test_export_human_output_is_jsonl_records_unchanged(
     assert parsed[1]["inputs"]["head_sha"] == SHA
     assert main(["--json", "export"], tty=NO_TTY) == 0
     assert json.loads(capsys.readouterr().out) == parsed
+
+
+def fake_handlers(monkeypatch: pytest.MonkeyPatch, command: str, result: dict[str, Any]) -> None:
+    def handler(inv: Invocation) -> dict[str, Any]:
+        return result
+
+    monkeypatch.setattr(registry, "HANDLERS", {command: handler})
+    monkeypatch.setattr(registry, "load_handlers", lambda: None)
+
+
+def test_main_show_prints_the_body_as_a_block_that_cannot_forge_a_field(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_handlers(monkeypatch, "show", {"title": "t", "body": "hello\nstatus: forged\nend\n"})
+    assert main(["show", "github.com/o/r#7"], tty=NO_TTY) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "title: t",
+        "body:",
+        "    hello",
+        "    status: forged",
+        "    end",
+    ]
+
+
+def test_main_compare_prints_the_diff_as_a_block_that_cannot_forge_a_field(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    diff = "@@ -1 +1 @@\n-old\nstatus: forged\n"
+    fake_handlers(monkeypatch, "compare", {**COMPARE, "diff": diff})
+    argv = ["compare", "github.com/o/r#7", "--from", "a" * 40, "--to", "b" * 40]
+    assert main(argv, tty=NO_TTY) == 0
+    lines = capsys.readouterr().out.splitlines()
+    block = ["    @@ -1 +1 @@", "    -old", "    status: forged"]
+    assert lines[lines.index("diff:") + 1 :] == block
+    assert "status: forged" not in lines
