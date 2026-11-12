@@ -1,0 +1,16 @@
+{
+  "action": "comment",
+  "already_posted": false,
+  "dry_run": false,
+  "follow_up_done": false,
+  "head_sha": "3f8a1c0d5e7b9a2c4d6e8f0a1b3c5d7e9f0a1b2c",
+  "ids": [
+    "gh:ic:IC_kwDOnew00001"
+  ],
+  "markers_removed": 0,
+  "neutralized_lines": 0,
+  "pr": "github.com/user-7/example-repo#7",
+  "review_id": null,
+  "thread_ids": [],
+  "warnings": []
+}
