@@ -556,13 +556,6 @@ def test_a_status_that_stays_unknown_blocks_the_merge(rig: Rig) -> None:
     assert_no_write(rig)
 
 
-def test_auto_is_still_not_implemented(rig: Rig) -> None:
-    rig.script(mr())
-    done = rig.run("--auto", actor="human:me", method="merge")
-    assert done.code == 1 and "not implemented" in done.error["message"]
-    assert_no_write(rig)
-
-
 # -- round 1 review fixes ----------------------------------------------------------------------
 
 

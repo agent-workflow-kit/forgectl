@@ -22,7 +22,7 @@ from datetime import UTC, date, datetime
 from typing import Any, TypeVar
 
 from .. import model as m
-from ..errors import ForgectlError
+from ..errors import ForgectlError, refused
 from ..gateway import Gateway, Response, Target, path_int, shown_text, verify_identity
 from ..hosts import Hosts, User, redact_secrets
 from ..identifiers import PrRef, RepoRef, bind_login
@@ -1252,7 +1252,7 @@ class GitLabBackend:
 
         return gitlab_lists.whoami(self, host)
 
-    def merge(self, pr: m.PR, *, sha: str, method: str | None) -> m.MergeAnswer:
+    def merge(self, pr: m.PR, *, sha: str, method: str | None, auto: bool = False) -> m.MergeAnswer:
         host = pr.repo.partition("/")[0]
         return gitlab_merge.put_merge(
             self._gateway,
@@ -1261,6 +1261,30 @@ class GitLabBackend:
             self._merge_facts.get(pr.pr),
             sha=sha,
             method=method,
+            auto_param=gitlab_merge.auto_flag(self.host_version(host)) if auto else None,
+        )
+
+    def check_auto(self, ref: PrRef, *, head_given: bool, interactive: bool) -> tuple[str, ...]:
+        """Head-match availability of ``--auto`` (interface: Merge order, step 2): from 17.7 a
+        push cancels auto-merge, so the head check holds. Below it ``--expected-head`` is refused
+        and an interactive run is warned. An unreadable version is exit 12."""
+        version = self.host_version(ref.host)
+        if version is None:
+            raise ForgectlError(
+                "unsupported_host_version",
+                f"the version of {ref.host} cannot be read, so --auto is refused",
+            )
+        if version >= gitlab_merge.PUSH_CANCELS_AUTO:
+            return ()
+        if head_given:
+            raise refused(
+                "no_head_match",
+                f"before GitLab 17.7 a push does not cancel auto-merge, so --auto cannot be "
+                f"combined with --expected-head (version {version[0]}.{version[1]})",
+            )
+        return (
+            f"{ref.host} is older than GitLab 17.7: a push may not cancel auto-merge, so a "
+            "later head can merge",
         )
 
     def check_method(self, pr: m.PR, method: str | None) -> None:
