@@ -1,0 +1,19 @@
+{
+  "action": "reply",
+  "already_posted": false,
+  "dry_run": false,
+  "follow_up_done": false,
+  "head_sha": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+  "ids": [
+    "gl:n:8001"
+  ],
+  "markers_removed": 0,
+  "neutralized_lines": 0,
+  "pr": "gitlab.com/user-9/proj#7",
+  "review_id": null,
+  "thread_ids": [
+    "gl:d:dddddddddddddddddddddddddddddddddddddddd"
+  ],
+  "threaded": true,
+  "warnings": []
+}

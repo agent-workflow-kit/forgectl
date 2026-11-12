@@ -51,7 +51,7 @@ forgectl merge github.com/org/repo#42 --expected-head <sha> --expected-base main
 | Command | Purpose |
 |---|---|
 | `prs` | list PRs |
-| `show`, `snapshot` | PR facts; facts plus requests, reviews, threads and CI |
+| `show`, `snapshot` | PR facts; facts plus requests, reviews, threads and CI (`snapshot --no-bodies` leaves the review and comment bodies out) |
 | `snapshots` | `snapshot` of many PRs from a few bulk GraphQL requests per host, falling back to `snapshot` per PR |
 | `poll` | the change-detection tuple of every PR of mine in a few requests, for a cheap `browse` refresh |
 | `diff`, `files` | diff (refused rather than cut off); changed paths |
@@ -60,7 +60,7 @@ forgectl merge github.com/org/repo#42 --expected-head <sha> --expected-base main
 | `access`, `whoami` | write access of a user; authenticated user per host |
 | `merge` | merge, on GitHub and GitLab (on GitLab the project's merge method setting decides; `--method squash` is sent only after the checks); `--auto` arms auto-merge, for a human only, as the head allows |
 | `review` | post a review (not yet implemented, #26 GitHub, #27 GitLab) |
-| `comment`, `reply` | post a comment or a reply (not yet implemented, #24) |
+| `comment`, `reply` | post a comment; reply to a thread |
 | `approve` | approve (not yet implemented, #28) |
 | `resolve`, `unresolve` | threads (not yet implemented, #29) |
 | `browse` | read-only terminal browser of your open PRs and MRs; needs the `tui` extra |
