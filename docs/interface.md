@@ -534,13 +534,15 @@ With `--repo` or `--host` there is one target, so a failure uses the ordinary ex
 
 ### `show`
 
-`show <pr>`: the [PR object](#pr-object).
+`show <pr>`: the [PR object](#pr-object). Without `--json`, `body` prints as an indented [block](#human-output).
 
 ### `snapshot`
 
-`snapshot <pr>`: the PR object plus `review_requests`, `teams_visible`, `reviews`, `latest_by_reviewer`, `threads`, `ci`, `activity` ([Activity](#activity)), `rate_limit`, `complete`, `incomplete` (names of the parts that are not complete) and `fetched_at`. In `snapshot` only, `head` also carries `pushed_at` and `pushed_at_source` ([Push time](#push-time)); `prs` and `show` items keep the `head` fields they have. One call for a caller that compares successive states. forgectl emits no events and stores nothing. `updated_at` is not a reliable change signal on either host.
+`snapshot [--no-bodies] <pr>`: the PR object plus `review_requests`, `teams_visible`, `reviews`, `latest_by_reviewer`, `threads`, `ci`, `activity` ([Activity](#activity)), `rate_limit`, `complete`, `incomplete` (names of the parts that are not complete) and `fetched_at`. In `snapshot` only, `head` also carries `pushed_at` and `pushed_at_source` ([Push time](#push-time)); `prs` and `show` items keep the `head` fields they have. One call for a caller that compares successive states. forgectl emits no events and stores nothing. `updated_at` is not a reliable change signal on either host.
 
 `incomplete` names any of `review_requests`, `reviews`, `threads`, `ci`. The `ci` name follows `ci.complete`.
+
+`--no-bodies` leaves out the review and comment bodies for a caller that does not need them: the `body` of every review and of every comment, thread comments included, is absent from the output (the key is not there, so it is never confused with an empty body). The `body` of the PR itself stays. Nothing else changes: `ci`, `blocked_by`, `activity`, `incomplete`, `complete`, ids, authors, states and shas are what the same snapshot has without the flag. The host reads are the same, so the flag shortens the output and not the run, and a part that is cut off is still named in `incomplete`. The flag is `snapshot`'s only; `snapshots`, `show`, `comments` and `reviews` reject it. The schema accepts every review and comment with a body or none with one (empty lists fit either); `snapshots` accepts only the first. There is no cap on the size of the output: a caller that reads stdout caps what it reads itself.
 
 On GitHub `rate_limit` is the lowest `remaining` among the GraphQL `rateLimit` fields and the REST response headers of the reads after `show`'s own, which carries none. Lists have a fixed order, so two snapshots compare directly, excluding `fetched_at` and `rate_limit`. `reviews`: `submitted_at`, `id`. `latest_by_reviewer`, `review_requests`: login. `threads`: first comment's `created_at`, `id`. A thread's comments: `created_at`, `id`. `checks`: `name`, `url`, `state`. `blocked_by`: code, `detail`. `files`: `path`. Comparison by code point. Logins: ASCII-lowered, then `kind`. Ids are not ordered, so a watermark is a set of seen ids. Absence from a part named in `incomplete` means nothing.
 
@@ -578,7 +580,7 @@ GitLab assembly (a contract `pr-comment` re-anchors against). Each file is one s
 
 ### `compare`
 
-`compare <pr> --from <sha> --to <sha>`: `{pr, from_sha, to_sha, status, diff}`, `status` being `ahead`, `behind`, `diverged`, `identical` or `unavailable` (a host no longer has it, or it is inaccessible). `diff` is the change from `from` to `to`: present on `ahead`, empty on `identical`, null on `behind`, `diverged` and `unavailable`. It is sanitized as for [`diff`](#diff). Shas only.
+`compare <pr> --from <sha> --to <sha>`: `{pr, from_sha, to_sha, status, diff}`, `status` being `ahead`, `behind`, `diverged`, `identical` or `unavailable` (a host no longer has it, or it is inaccessible). `diff` is the change from `from` to `to`: present on `ahead`, empty on `identical`, null on `behind`, `diverged` and `unavailable`. It is sanitized as for [`diff`](#diff). Shas only. Without `--json`, `diff` prints as an indented [block](#human-output).
 
 GitHub: the PR is read first, for its canonical path (a missing PR is `not_found`); then `/compare/<from>...<to>`, whose `status` is used; `diff` by the diff media type. GitLab: the MR is read first for its identity only (a missing MR is `not_found`; its `diff_refs`, `sha` and `changes_count` are not needed), then `/repository/compare` in the target project, `straight=false`, both ways. Commits only forward is `ahead`, only backward `behind`, both `diverged`. `identical` requires equal shas or the host's own `identical` status; an answer with no commits either way for two different shas is `unavailable`. A 404 is `unavailable`; other failures follow the read table. On GitLab an answer past forgectl's read cap one way is decided from the other: a cut backward answer (whose diffs are never used) gives `diverged` when the forward answer has commits, else `behind`; a cut forward answer gives `diverged` when the backward answer has commits, else `too_large`.
 
@@ -678,7 +680,16 @@ See [TUI](#tui).
 
 ### `export`
 
-`export [--since TIME]`: audit records, as JSONL; `--json` prints an array. `--since` takes RFC 3339 or a duration. A missing file gives empty output; a malformed line warns and is skipped. If the state directory or `audit.jsonl` exists but is refused (see [Files](#files)) or cannot be read, `export` exits 12 `audit_unavailable`.
+`export [--since TIME]`: audit records, as JSONL; `--json` prints an array. `--since` takes RFC 3339 or a duration. A missing file gives empty output; a malformed line warns and is skipped. Without `--json` it prints one JSON record per line, unchanged by #68; `--json` wraps the records in an array (see [Human output](#human-output)). If the state directory or `audit.jsonl` exists but is refused (see [Files](#files)) or cannot be read, `export` exits 12 `audit_unavailable`.
+
+## Human output
+
+Without `--json`, a result prints as `key: value` lines, one per top-level field in the schema's order. Every string is [sanitized](#sanitizing) and a value that is not a string is its JSON, so a tab or line feed inside a field is a marker, except inside a block, where a tab stays raw (it cannot start or break a line), and untrusted text cannot forge a line of its own. The `--json` form is unchanged by anything here.
+
+- **`diff`** prints the unified diff alone, as the backend sanitized it: LF, tab and a CR before LF stay raw, so its lines are the diff's own.
+- **`compare`** and **`show`** print one field as a block: `compare`'s `diff` and `show`'s `body`. The line is `key:`, followed by the text, one output line per line of the text, each indented by four spaces and sanitized on its own; a tab stays raw there. An empty line is the indent alone, and the last line feed ends its line without adding an empty one, so the block has the text's line count and a diff keeps its line numbers. Because every line of the block is indented, a line of a body or a diff cannot start at the left margin and pass for a field. A CR that a diff kept before its LF is a visible `<U+000D>` marker in the block, so no raw control character reaches the terminal. A null (`compare` on `behind`, `diverged` or `unavailable`; `show` of a PR with no body) or an empty string stays on the key's line (`diff: null`).
+- **`export`** prints the records as JSON lines, one per line. `--json` prints them as one array instead. A record is sanitized and is plain ASCII, so it cannot hold a raw control character.
+- Every other command keeps the one-line form above. Its multi-line text fields (a comment's body, for example) show their line feeds as markers; `--json` is how a script or a reader gets their lines.
 
 ## Global flags
 
