@@ -442,13 +442,24 @@ def _compare_status(data: dict[str, Any]) -> m.CompareStatus:
     return "unavailable"
 
 
-def compare_result(env: ReadEnv, ref: PrRef, from_sha: str, to_sha: str) -> m.CompareResult:
+def compare_result(
+    env: ReadEnv, ref: PrRef, from_sha: str, to_sha: str, *, no_diff: bool = False
+) -> m.CompareResult:
+    """``no_diff`` (#44) answers from the status request alone: the diff is never requested, so
+    it can neither be read nor be cut, and the result has no ``diff`` key."""
     target = env.hosts.target(ref.host)
     pull = read_pull(env, target, ref)  # a missing PR is not_found; the canonical path
     pr = f"{ref.host}/{pull.project}#{ref.number}"
 
     def result(status: m.CompareStatus, diff: str | None) -> m.CompareResult:
-        return m.CompareResult(pr=pr, from_sha=from_sha, to_sha=to_sha, status=status, diff=diff)
+        return m.CompareResult(
+            pr=pr,
+            from_sha=from_sha,
+            to_sha=to_sha,
+            status=status,
+            diff=None if no_diff else diff,
+            omit_diff=no_diff,
+        )
 
     if from_sha == to_sha:
         return result("identical", "")
@@ -482,6 +493,8 @@ def compare_result(env: ReadEnv, ref: PrRef, from_sha: str, to_sha: str) -> m.Co
         return result(status, "")
     if status != "ahead" or listed is None:  # behind, diverged: no diff, by the interface
         return result(status, None)
+    if no_diff:  # the status is the answer; the diff, and so its caps, are not asked about
+        return result("ahead", None)
     if listed >= COMPARE_FILE_CAP:  # the host lists at most this many: the list may be cut
         raise _too_large("this comparison")
 

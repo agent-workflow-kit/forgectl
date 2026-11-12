@@ -447,6 +447,12 @@ def build_parser() -> argparse.ArgumentParser:
     _pr(p)
     p.add_argument("--from", dest="from_sha", type=sha, required=True, action=_Once, metavar="SHA")
     p.add_argument("--to", dest="to_sha", type=sha, required=True, action=_Once, metavar="SHA")
+    p.add_argument(
+        "--no-diff",
+        dest="no_diff",
+        action=_OnceFlag,
+        help="answer with the status only: no diff is read or printed",
+    )
 
     p = add("access", "whether a user has write access to a repo")
     p.add_argument("repo", type=parse_repo)

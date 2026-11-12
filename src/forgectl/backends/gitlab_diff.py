@@ -778,13 +778,24 @@ def _compare_status(forward: _Compared, backward: _Compared) -> m.CompareStatus:
     return "unavailable"  # two different shas with no commit either way: unclear
 
 
-def compare_result(gl: GitLabBackend, ref: PrRef, from_sha: str, to_sha: str) -> m.CompareResult:
+def compare_result(
+    gl: GitLabBackend, ref: PrRef, from_sha: str, to_sha: str, *, no_diff: bool = False
+) -> m.CompareResult:
+    """``no_diff`` (#44): the ``diffs`` entries of the answers are never parsed (GitLab sends
+    them with the commits either way), and the result has no ``diff`` key."""
     target = gl._hosts.target(ref.host)
     mr = read_mr_identity(gl, target, ref)  # a missing MR is not_found; the canonical path
     pr = f"{ref.host}/{mr[1]}#{ref.number}"
 
     def result(status: m.CompareStatus, diff: str | None) -> m.CompareResult:
-        return m.CompareResult(pr=pr, from_sha=from_sha, to_sha=to_sha, status=status, diff=diff)
+        return m.CompareResult(
+            pr=pr,
+            from_sha=from_sha,
+            to_sha=to_sha,
+            status=status,
+            diff=None if no_diff else diff,
+            omit_diff=no_diff,
+        )
 
     if from_sha == to_sha:
         return result("identical", "")
@@ -794,7 +805,10 @@ def compare_result(gl: GitLabBackend, ref: PrRef, from_sha: str, to_sha: str) ->
     if backward is None:
         return result("unavailable", None)
     can_be_ahead = (
-        isinstance(backward, _Compared) and not backward.commits and not backward.same_ref
+        not no_diff
+        and isinstance(backward, _Compared)
+        and not backward.commits
+        and not backward.same_ref
     )
     forward = _compare_one(gl, target, mr, from_sha, to_sha, parse=can_be_ahead)
     if forward is None:
@@ -814,6 +828,8 @@ def compare_result(gl: GitLabBackend, ref: PrRef, from_sha: str, to_sha: str) ->
         return result(status, "")
     if status != "ahead":  # behind, diverged: no diff, by the interface
         return result(status, None)
+    if no_diff:
+        return result("ahead", None)
     if forward.capped or forward.files is None:
         raise _too_large("this comparison lists as many files as GitLab's cap")
     return result("ahead", assemble(forward.files, "this comparison"))

@@ -28,7 +28,7 @@
         "null"
       ],
       "x-untrusted": true,
-      "description": "Untrusted: the sanitized unified diff from from_sha to to_sha: present on ahead, empty on identical, null on behind, diverged and unavailable."
+      "description": "Untrusted: the sanitized unified diff from from_sha to to_sha: present on ahead, empty on identical, null on behind, diverged and unavailable. Absent when `--no-diff` is given: the key is then not there at all, and the same rules hold for it whenever it is present."
     }
   },
   "additionalProperties": false,
@@ -36,8 +36,7 @@
     "pr",
     "from_sha",
     "to_sha",
-    "status",
-    "diff"
+    "status"
   ],
   "allOf": [
     {

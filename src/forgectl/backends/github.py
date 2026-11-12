@@ -1023,10 +1023,12 @@ class GitHubBackend:
 
         return github_diff.diff_result(self._env, ref)
 
-    def compare(self, ref: PrRef, from_sha: str, to_sha: str) -> m.CompareResult:
+    def compare(
+        self, ref: PrRef, from_sha: str, to_sha: str, *, no_diff: bool = False
+    ) -> m.CompareResult:
         from . import github_diff
 
-        return github_diff.compare_result(self._env, ref, from_sha, to_sha)
+        return github_diff.compare_result(self._env, ref, from_sha, to_sha, no_diff=no_diff)
 
     def files(self, ref: PrRef) -> m.FilesResult:
         from . import github_diff

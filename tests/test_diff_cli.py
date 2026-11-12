@@ -118,6 +118,48 @@ def test_compare_prints_the_schema_valid_object(
     assert out["pr"] == "github.com/user-1/example-repo#7"
 
 
+def test_compare_no_diff_leaves_the_diff_key_out_and_makes_no_diff_request(
+    run_forgectl: Run, fake_forges: FakeForges, config: Path
+) -> None:
+    fake_forges.answer("gh", PR_ENDPOINT, body=pull())
+    # only the status answer exists: a diff request would find no route and fail the run
+    fake_forges.answer("gh", endpoint_re=r"/compare/", body=recording("compare-ahead"), times=1)
+    done = go(run_forgectl, config, "compare", PR, "--from", FROM, "--to", TO, "--no-diff")
+    assert done.returncode == 0, done.stderr
+    out = json.loads(done.stdout)
+    schemas.validate_cli_output("compare", out)
+    assert out["status"] == "ahead"
+    assert "diff" not in out
+    assert set(out) == {"pr", "from_sha", "to_sha", "status"}
+
+
+def test_compare_default_output_still_carries_the_diff_key(
+    run_forgectl: Run, fake_forges: FakeForges, config: Path
+) -> None:
+    fake_forges.answer("gh", PR_ENDPOINT, body=pull())
+    fake_forges.answer("gh", endpoint_re=r"/compare/", body=recording("compare-ahead"), times=1)
+    fake_forges.answer(
+        "gh", endpoint_re=r"/compare/", body_text=(RECORDINGS / "pull.diff").read_text()
+    )
+    out = json.loads(go(run_forgectl, config, "compare", PR, "--from", FROM, "--to", TO).stdout)
+    assert isinstance(out["diff"], str)
+
+
+def test_compare_no_diff_is_given_once_and_takes_no_value(run_forgectl: Run, config: Path) -> None:
+    base = ["compare", PR, "--from", FROM, "--to", TO]
+    for extra in (["--no-diff", "--no-diff"], ["--no-diff=yes"]):
+        done = go(run_forgectl, config, *base, *extra)
+        assert done.returncode == 2 and "Traceback" not in done.stderr
+        assert "--no-diff" in done.stderr
+
+
+@pytest.mark.parametrize("command", ["diff", "files", "show", "snapshot"])
+def test_no_diff_belongs_to_compare_only(run_forgectl: Run, config: Path, command: str) -> None:
+    done = go(run_forgectl, config, command, PR, "--no-diff")
+    assert done.returncode == 2 and "Traceback" not in done.stderr
+    assert "--no-diff" in done.stderr
+
+
 def test_compare_of_an_unknown_commit_is_unavailable_exit_0(
     run_forgectl: Run, fake_forges: FakeForges, config: Path
 ) -> None:
@@ -128,3 +170,22 @@ def test_compare_of_an_unknown_commit_is_unavailable_exit_0(
     out = json.loads(done.stdout)
     schemas.validate_cli_output("compare", out)
     assert (out["status"], out["diff"]) == ("unavailable", None)
+
+
+def _compare_doc(status: str, **extra: Any) -> dict[str, Any]:
+    return {"pr": "github.com/o/r#1", "from_sha": FROM, "to_sha": TO, "status": status, **extra}
+
+
+def test_the_compare_schema_takes_a_missing_diff_and_still_judges_a_present_one() -> None:
+    for status in ("ahead", "behind", "diverged", "identical", "unavailable"):
+        schemas.validate(_compare_doc(status), "forgectl/cli/compare.json")
+    schemas.validate(_compare_doc("ahead", diff="d"), "forgectl/cli/compare.json")
+    for bad in (
+        _compare_doc("ahead", diff=None),
+        _compare_doc("behind", diff="d"),
+        _compare_doc("identical", diff="d"),
+        _compare_doc("ahead", diff=3),
+        _compare_doc("ahead", extra=1),
+    ):
+        with pytest.raises(Exception):  # noqa: B017, PT011 (jsonschema's error type)
+            schemas.validate(bad, "forgectl/cli/compare.json")
