@@ -443,7 +443,7 @@ forgectl never deletes a branch. The host's own setting decides (`delete_branch_
 For `review`, `comment`, `reply`, `approve`, and `resolve` and `unresolve` where a step applies:
 
 1. **Usage:** open the input with `O_NOFOLLOW` and `O_NONBLOCK`, so a FIFO fails `fstat`'s regular-file check rather than hanging; it must be a regular file by `fstat`, or `-`, read through its file descriptor. Parent components are not checked: a caller passing a path under a directory someone else can write must freeze the file first. The same open applies to `audit.jsonl`, `log.jsonl` and `--result-file`. At most limit + 1 bytes are read. `review --file` reads at most 16 MiB; past that, exit 2 `body_too_large`, `details.index: null`. UTF-8 is strict: invalid bytes exit 2. Parse. Then [neutralize](#neutralizing), alter marker-shaped text ([Dedupe key](#dedupe-key)), add the marker, and check size, on each body separately.
-   - Limits: GitHub review body and issue comment: 262144 bytes; inline comment: 1 MiB. GitLab: 1 MiB. Over the limit exits 2 (`body_too_large`, `details.index`, `details.limit`).
+   - Limits: GitHub review body and issue comment: 262144 bytes; inline comment: 1 MiB, which includes a `reply` to a `gh:rt:` or `gh:rc:` id (judged from the id, before any host is read). GitLab: 1 MiB. Over the limit exits 2 (`body_too_large`, `details.index`, `details.limit`).
    - `review --file` is JSON, validated by schema. All of these exit 2 (`usage`), naming the field: unparsable, unreadable, an empty `comment` or `reply` body, an [empty review](#review), `request_changes` with no body.
 2. **Audit writable; identity; read the PR.** An interactive run [pins here](#human-actions). Then, in this order:
    - `not_open` for `review` and `approve`: exit 20 on any state other than `open`, so merged PRs too. `comment` and `reply` are allowed on a closed PR. `resolve` and `unresolve` have no state rule.
@@ -496,7 +496,7 @@ Every inline comment is checked against the diff, before anything is posted. A c
 - **Marker-shaped text.** Case-insensitive `forgectl:dedupe:` has its second colon replaced by `-`, before the real marker is added; `markers_removed` counts occurrences. It applies to every post, with or without a key.
 - **Where.** A review's body, or, with a null body on GitHub, a body holding only the marker. On GitLab, the body's note, or the last inline comment if the body is null. `comment`, `reply`: their body. `approve`: GitHub the review's body; GitLab the note.
 - **Match.** The exact last non-empty line of a comment by the authenticated account's id, on raw text, before sanitizing. Searched: GitHub issue comments, review comments and submitted review bodies; GitLab notes. Pending reviews and drafts are not searched. An incomplete search exits 12 (`upstream_error`), never "not found".
-- **Hit.** `already_posted: true`, `ids` holding the matching comment, and `review_id`. Exit 0 under [Post order](#post-order)'s rule; on GitLab the state step runs when needed, and on GitHub a needed one [exits `outcome_partial`](#post-order); `follow_up_done` is true when this run performed one.
+- **Hit.** `already_posted: true`, `ids` holding the matching comment, and `review_id`. For `comment` and `reply` a hit lists every matching id in `ids`, a `gh:r:` review body's id included, and leaves `review_id` null: only `review` sets `review_id`. Exit 0 under [Post order](#post-order)'s rule; on GitLab the state step runs when needed, and on GitHub a needed one [exits `outcome_partial`](#post-order); `follow_up_done` is true when this run performed one.
 
 Two simultaneous runs can both post; the key covers retries after a timeout, not races.
 
@@ -641,9 +641,13 @@ Output: `{pr, action, ids, thread_ids, review_id, already_posted, follow_up_done
 
 `comment <pr> --body-file <path|-> [--dedupe-key K] [--yes] [--dry-run] [--actor A] [--decision-id D]... [--override-escalation]`
 
+Posts one general comment (GitHub: an issue comment; GitLab: a note). It follows [Post order](#post-order): there is no head check, and a closed PR is allowed. Output: `{pr, action, ids, thread_ids, review_id, already_posted, follow_up_done, neutralized_lines, markers_removed, warnings, head_sha, dry_run}`. `ids` holds the new comment's id, `thread_ids` is `[]` (the note answer of GitLab and the comment answer of GitHub name no thread), `review_id` is null. An empty body, or one with only whitespace, exits 2 (`usage`). `--body-file -` reads the inherited stdin to EOF, in a real run and under `--dry-run`; the regular-file check applies only to a path.
+
 ### `reply`
 
 `reply <pr> --to <id> --body-file <path|-> [--dedupe-key K] [--yes] [--dry-run] [--actor A] [--decision-id D]... [--override-escalation]`
+
+Output: as for `comment`, plus `threaded`. `thread_ids` holds the thread the reply joined: the `gh:rt:` id on GitHub when `--to` is a thread (`[]` for a review comment, whose thread is not read), and the discussion on GitLab. A `--to` that is a reply goes to the thread's root on GitHub. On GitLab a `gl:n:` id is found by walking the MR's discussions, and a system note is not a comment (exit 10).
 
 `--to` takes a comment, thread or review id ([Identifiers](#identifiers)). A reply to a GitHub review comment joins its thread; GitHub normalizes a reply-to-a-reply to the root. GitHub has no threads on general comments or review bodies, so a reply to a `gh:ic:` or `gh:r:` id posts a new general comment and reports `threaded: false`. `threaded` is always in the output. An unknown id exits 10.
 
