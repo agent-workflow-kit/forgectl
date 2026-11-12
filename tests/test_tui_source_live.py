@@ -166,7 +166,7 @@ def test_only_the_three_read_commands_are_ever_run() -> None:
     source.snapshot(PR1)
     source.diff(PR1)
     assert {c[0] for c in run.calls} == {"prs", "snapshot", "diff"}
-    assert not hasattr(source, "merge") and not hasattr(source, "comment")
+    assert not hasattr(source, "comment") and not hasattr(source, "review")
 
 
 def test_a_failing_row_leaves_the_others_alone() -> None:

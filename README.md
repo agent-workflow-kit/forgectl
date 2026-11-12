@@ -63,7 +63,7 @@ forgectl merge github.com/org/repo#42 --expected-head <sha> --expected-base main
 | `comment`, `reply` | post a comment; reply to a thread |
 | `approve` | approve (not yet implemented, #28) |
 | `resolve`, `unresolve` | resolve or reopen a review thread (`gh:rt:` or `gl:d:` id); reports `changed` |
-| `browse` | read-only terminal browser of your open PRs and MRs; needs the `tui` extra |
+| `browse` | terminal browser of your open PRs and MRs, with `m` to merge the selected one; needs the `tui` extra |
 | `export` | audit records |
 
 Writes are confirm-by-default: without a TTY and without `--yes` they exit 13. Outside an interactive run, `merge`, `review` and `approve` need `--expected-head` and `--expected-base`. To see a host's raw answer, use `gh api` or `glab api`.
