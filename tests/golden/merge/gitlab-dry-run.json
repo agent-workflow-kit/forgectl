@@ -1,0 +1,21 @@
+{
+  "already_merged": false,
+  "auto_merge_enabled": false,
+  "dry_run": true,
+  "merge_commit_sha": null,
+  "merged": false,
+  "merged_head_sha": null,
+  "method": null,
+  "plan": {
+    "auto": false,
+    "base_ref": "main",
+    "blocked_by": [],
+    "expected_base": "main",
+    "expected_head": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "head_sha": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "method": null,
+    "override_blocks": false
+  },
+  "pr": "gitlab.com/user-9/proj#7",
+  "would_refuse": null
+}

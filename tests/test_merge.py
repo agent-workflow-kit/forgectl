@@ -1377,21 +1377,6 @@ def test_a_human_with_failing_ci_and_no_override_is_not_ready_although_the_host_
     assert_no_write(rig)
 
 
-def test_a_gitlab_backend_is_refused_before_any_read_hook_or_audit_record(
-    rig: Rig, tmp_path: Path
-) -> None:
-    marker = tmp_path / "ran"
-    # the real wiring: gitlab.com binds to the GitLab backend through the factory
-    rig.config_text = "hosts:\n  gitlab.com:\n    token_env: MERGE_TOKEN\n"
-    done = rig.run(
-        pr="gitlab.com/user-9/proj#7", extra_config=hook_config("pre-merge", f"touch {marker}")
-    )
-    assert done.code == 1 and done.error["code"] == "internal"
-    assert "not implemented yet" in done.error["message"]
-    assert rig.forges.calls() == [] and rig.audit() == []
-    assert not marker.exists()
-
-
 # -- goldens -----------------------------------------------------------------------------------
 
 
