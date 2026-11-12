@@ -28,7 +28,7 @@
         "null"
       ],
       "x-untrusted": true,
-      "description": "Untrusted: the sanitized unified diff from from_sha to to_sha: present on ahead, empty on identical, null on behind, diverged and unavailable. Absent when `--no-diff` is given: the key is then not there at all, and the same rules hold for it whenever it is present."
+      "description": "Untrusted: the sanitized unified diff from from_sha to to_sha: present on ahead, empty on identical, null on behind, diverged and unavailable. Absent when `--no-diff` is given: the key is then not there at all, and the same rules hold for it whenever it is present. The output carries no marker of the flag, so the schema cannot require the key: a consumer that did not pass `--no-diff` treats a missing `diff` as a contract break."
     }
   },
   "additionalProperties": false,

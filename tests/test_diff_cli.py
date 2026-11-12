@@ -145,6 +145,42 @@ def test_compare_default_output_still_carries_the_diff_key(
     assert isinstance(out["diff"], str)
 
 
+@pytest.mark.parametrize("status", ["identical", "ahead", "behind", "diverged", "unavailable"])
+def test_compare_default_mode_always_carries_the_diff_key_for_every_status(
+    run_forgectl: Run, fake_forges: FakeForges, config: Path, status: str
+) -> None:
+    fake_forges.answer("gh", PR_ENDPOINT, body=pull())
+    to = TO
+    if status == "identical":
+        to = FROM  # equal shas are answered without a compare request
+    elif status == "unavailable":
+        fake_forges.answer("gh", endpoint_re=r"/compare/", status=404, body={"message": "no"})
+    else:
+        doc = recording("compare-ahead")
+        doc.update(
+            status=status,
+            ahead_by=2 if status in ("ahead", "diverged") else 0,
+            behind_by=3 if status in ("behind", "diverged") else 0,
+        )
+        fake_forges.answer("gh", endpoint_re=r"/compare/", body=doc, times=1)
+        if status == "ahead":
+            fake_forges.answer(
+                "gh", endpoint_re=r"/compare/", body_text=(RECORDINGS / "pull.diff").read_text()
+            )
+    done = go(run_forgectl, config, "compare", PR, "--from", FROM, "--to", to)
+    assert done.returncode == 0, done.stderr
+    out = json.loads(done.stdout)
+    schemas.validate_cli_output("compare", out)
+    assert out["status"] == status
+    assert "diff" in out
+    if status == "identical":
+        assert out["diff"] == ""
+    elif status == "ahead":
+        assert isinstance(out["diff"], str)
+    else:
+        assert out["diff"] is None
+
+
 def test_compare_no_diff_is_given_once_and_takes_no_value(run_forgectl: Run, config: Path) -> None:
     base = ["compare", PR, "--from", FROM, "--to", TO]
     for extra in (["--no-diff", "--no-diff"], ["--no-diff=yes"]):

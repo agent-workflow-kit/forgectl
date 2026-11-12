@@ -473,7 +473,7 @@ def compare_result(
         _compare_identity(data.get("html_url"), target, pull.project)
         status = _compare_status(data)
         listed = None
-        if status == "ahead" or "files" in data:
+        if not no_diff and (status == "ahead" or "files" in data):
             listed = len(_list(data.get("files"), "the listed files"))
         return status, listed
 

@@ -719,6 +719,35 @@ def test_no_diff_ahead_reads_no_diff_and_leaves_the_key_out(
     assert h.script.kinds == ["pull", "compare"]  # the diff request is never made
 
 
+@pytest.mark.parametrize("files", [None, "gone", {"a": 1}])
+def test_no_diff_ahead_is_answered_without_checking_the_files_shape(
+    cmake: Callable[..., RouterHarness], files: Any
+) -> None:
+    doc = compare_doc("ahead", 2, 0)
+    if files == "gone":
+        del doc["files"]
+    else:
+        doc["files"] = files
+    h = cmake(compare=doc)
+    result = h.backend.compare(REF, FROM, TO, no_diff=True)
+    assert isinstance(result, CompareResult)
+    assert (result.status, "diff" in result.to_dict()) == ("ahead", False)
+    assert h.script.kinds == ["pull", "compare"]
+
+
+@pytest.mark.parametrize("files", [None, "gone", {"a": 1}])
+def test_default_ahead_with_a_malformed_files_list_is_still_refused(
+    cmake: Callable[..., RouterHarness], files: Any
+) -> None:
+    doc = compare_doc("ahead", 2, 0)
+    if files == "gone":
+        del doc["files"]
+    else:
+        doc["files"] = files
+    h = cmake(compare=doc)
+    assert raises(lambda: cmp(h)).code != ""
+
+
 def test_no_diff_does_not_fail_on_a_diff_the_host_would_cut(
     cmake: Callable[..., RouterHarness],
 ) -> None:

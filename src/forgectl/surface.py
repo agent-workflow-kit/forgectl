@@ -451,7 +451,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-diff",
         dest="no_diff",
         action=_OnceFlag,
-        help="answer with the status only: no diff is read or printed",
+        help="answer with the status only: no `diff` key is printed"
+        " (GitHub also skips the diff request)",
     )
 
     p = add("access", "whether a user has write access to a repo")
