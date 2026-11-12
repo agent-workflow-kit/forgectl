@@ -159,6 +159,16 @@ def no_leaked_write_flag() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def no_leaked_log_rotation() -> Iterator[None]:
+    """The process-level log rotation limits (set from the config) never leak between tests."""
+    from forgectl import jsonlog
+
+    jsonlog.set_rotation(jsonlog.Rotation())
+    yield
+    jsonlog.set_rotation(jsonlog.Rotation())
+
+
+@pytest.fixture(autouse=True)
 def no_leaked_children() -> Iterator[None]:
     """Fail a test that leaves a child of this process behind (torn down after ``procs``)."""
     before = direct_children()
