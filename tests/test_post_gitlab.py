@@ -299,8 +299,10 @@ def mr_with(**changes: Any) -> dict[str, Any]:
 def test_a_failing_project_id_read_leaves_no_trace_and_sends_nothing(
     rig: Rig, status: int, body: Any, code: str | None
 ) -> None:
+    marker = rig.tmp / "hook-ran"
+    hook = json.dumps(f"touch {marker}")
     rig.config.write_text(
-        rig.config.read_text() + 'hooks:\n  post-post:\n    - cmd: "touch hook-ran"\n', "utf-8"
+        rig.config.read_text() + f"hooks:\n  post-post:\n    - cmd: {hook}\n", "utf-8"
     )
     rig.poster_mr_get(status, body)
     done = rig.run()
@@ -308,7 +310,7 @@ def test_a_failing_project_id_read_leaves_no_trace_and_sends_nothing(
     if code is not None:
         assert done.error["code"] == code
     assert rig.posts() == [] and rig.audit() == []
-    assert not (rig.tmp / "hook-ran").exists() and not Path("hook-ran").exists()
+    assert not marker.exists()
 
 
 def test_a_dry_run_comment_reads_the_project_id_too(rig: Rig) -> None:

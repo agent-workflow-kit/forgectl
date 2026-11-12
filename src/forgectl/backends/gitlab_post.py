@@ -153,9 +153,9 @@ class GitLabPoster:
             known = positive_int(_obj(data).get("id"))
             return Posted(() if known is None else (f"gl:n:{known}",), thread, True)
         note = created_id(data, where)
-        # UNVERIFIED (#34): GitLab documents ``noteable_type`` and ``noteable_iid`` on a note; an
-        # answer that names another noteable is not the answer to this write, and absent fields
-        # are accepted.
+        # live-unverified: #34: GitLab documents ``noteable_type`` and ``noteable_iid`` on a note;
+        # an answer that names another noteable is not the answer to this write, and absent
+        # fields are accepted.
         kind, number = data.get("noteable_type"), data.get("noteable_iid")
         if ("noteable_type" in data and kind != "MergeRequest") or (
             "noteable_iid" in data and str(number) != iid
