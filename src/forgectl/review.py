@@ -1049,7 +1049,7 @@ class ReviewRun:
             if noted is not None:
                 return noted
         elif prep.has_text and not self.hits:
-            per_body, found, warnings, deleted_rest = self._post_drafts(pr)
+            per_body, found, warnings, after_publish_error = self._post_drafts(pr)
             done.landed = True
             done.warnings.extend(warnings)
             if not warnings:

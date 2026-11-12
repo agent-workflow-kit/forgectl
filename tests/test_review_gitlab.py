@@ -822,6 +822,21 @@ def test_a_failed_relist_after_an_unproven_creation_says_drafts_of_unknown_ids_m
     assert [r["result"] for r in gl.audit()] == ["attempted", "failed"]
 
 
+@pytest.mark.parametrize("status", [401, 422])
+def test_a_failed_relist_after_a_definitive_creation_refusal_does_not_say_unknown_ids(
+    gl: Gl, status: int
+) -> None:
+    happy(gl)
+    gl.create_fails(status, {"message": "no"})
+    gl.drafts([])
+    get(gl.forges, DRAFTS, {"message": "down"}, status=400, nth=2)
+    gl.forges._rules.insert(0, gl.forges._rules.pop())
+    gl.forges._write_script()
+    done = gl.run()
+    assert done.code != 0
+    assert "unknown ids" not in done.error["message"]
+
+
 def test_a_publish_error_with_only_some_own_drafts_gone_deletes_the_rest_and_reads_back(
     gl: Gl,
 ) -> None:
@@ -833,9 +848,29 @@ def test_a_publish_error_with_only_some_own_drafts_gone_deletes_the_rest_and_rea
     done = gl.run()
     assert done.code == 12 and done.error["code"] == "quick_action_ran"
     assert done.error["details"] == {"ids": ["gl:n:601"]}
+    assert "the publish was not answered" in done.error["message"]
+    assert "gl:n:601" in done.error["message"]
+    assert "the state step was not run" in done.error["message"]
+    assert "forgectl deleted the unpublished drafts itself" not in done.error["message"]
     assert gl.endpoints("DELETE") == [f"{DRAFTS}/12"]
     assert [r["result"] for r in gl.audit()] == ["attempted", "quick_action_ran"]
     assert gl.audit()[-1]["ids"] == ["gl:n:601"]
+
+
+def test_a_publish_error_with_all_own_drafts_gone_and_a_body_missing_claims_no_deletion(
+    gl: Gl,
+) -> None:
+    happy(gl)
+    gl.drafts([], [draft(11), draft(12)], [])
+    gl.publish(status=500, body={"message": "timeout"})
+    gl.discussions(mine_published([(601, D1, "use c here")]))  # the body did not land
+    done = gl.run()
+    assert done.code == 12 and done.error["code"] == "quick_action_ran"
+    assert done.error["details"] == {"ids": ["gl:n:601"]}
+    assert "gl:n:601" in done.error["message"]
+    assert "the publish was not answered" in done.error["message"]
+    assert "forgectl deleted the unpublished drafts itself" not in done.error["message"]
+    assert gl.endpoints("DELETE") == []
 
 
 def test_a_publish_error_with_some_own_drafts_gone_and_the_rest_undeletable_is_outcome_unknown(
