@@ -28,8 +28,8 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 from .backends import github_diff, gitlab_diff
 from .backends.github_diff import RawFile, RawFiles
@@ -39,7 +39,10 @@ from .identifiers import PrRef
 from .reads import ReadEnv
 from .sanitize import sanitize_line
 
-_HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+if TYPE_CHECKING:
+    from .backends.gitlab import GitLabBackend
+
+_HUNK = re.compile(r"^@@ -([0-9]{1,9})(?:,([0-9]{1,9}))? \+([0-9]{1,9})(?:,([0-9]{1,9}))? @@")
 _NO_NEWLINE = "\\ No newline at end of file"
 SIDES = ("left", "right")
 
@@ -72,12 +75,15 @@ class DiffLine:
 @dataclass(frozen=True, slots=True)
 class Hunk:
     lines: tuple[DiffLine, ...]
+    _old: dict[int, DiffLine] = field(init=False, repr=False, compare=False)
+    _new: dict[int, DiffLine] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_old", {n.old: n for n in self.lines if n.old is not None})
+        object.__setattr__(self, "_new", {n.new: n for n in self.lines if n.new is not None})
 
     def find(self, side: str, number: int) -> DiffLine | None:
-        for line in self.lines:
-            if (line.new if side == "right" else line.old) == number:
-                return line
-        return None
+        return (self._new if side == "right" else self._old).get(number)
 
 
 def _bad_patch() -> ForgectlError:
@@ -93,6 +99,7 @@ def parse_patch(patch: str) -> tuple[Hunk, ...]:
     hunks: list[Hunk] = []
     current: list[DiffLine] = []
     old_left = new_left = old_pos = new_pos = 0
+    old_next = new_next = 0  # the first line the next hunk may start at
     last = ""
     for row in rows:
         if row == _NO_NEWLINE:
@@ -112,6 +119,10 @@ def parse_patch(patch: str) -> tuple[Hunk, ...]:
             new_left = 1 if header.group(4) is None else int(header.group(4))
             if old_left == 0 and new_left == 0:
                 raise _bad_patch()
+            if old_pos < old_next or new_pos < new_next:
+                raise _bad_patch()  # a hunk must start past the one before, on both sides
+            old_next = old_pos + (old_left or 1)
+            new_next = new_pos + (new_left or 1)
             last = ""
             continue
         marker = row[:1]
@@ -177,7 +188,7 @@ class Placement:
     def gitlab_position(self, pin: MrPin) -> dict[str, Any]:
         """The comment's text position for a draft note: the MR's three shas, both paths, both
         line numbers paired from the diff (None on the side a line is not on), the computed
-        ``line_code``, and for a range ``line_range``."""
+        ``line_code``, and for a range ``line_range``. UNVERIFIED until #31."""
         if pin.start_sha is None:
             raise ForgectlError("upstream_error", "the merge request has no start sha")
         position: dict[str, Any] = {
@@ -199,7 +210,8 @@ class Placement:
         return position
 
     def _point(self, line: DiffLine) -> dict[str, Any]:
-        kind = {" ": None, "-": "old", "+": "new"}[line.kind]
+        # UNVERIFIED until #31: new for an added line, otherwise old
+        kind = "new" if line.kind == "+" else "old"
         return {
             "line_code": line_code(self.path, line),
             "type": kind,
@@ -230,12 +242,15 @@ def _file_for(candidates: list[RawFile], side: str) -> RawFile | None:
     return candidates[0] if len(candidates) == 1 else None
 
 
+def _fields_ok(comment: InlineComment) -> bool:
+    """The checks that hold whatever the file is."""
+    if comment.side not in SIDES or comment.line < 1:
+        return False
+    return comment.start_line is None or 1 <= comment.start_line <= comment.line
+
+
 def _place(comment: InlineComment, file: RawFile, hunks: tuple[Hunk, ...]) -> Placement | None:
     first = comment.line if comment.start_line is None else comment.start_line
-    if comment.start_line is not None and not 1 <= comment.start_line <= comment.line:
-        return None
-    if comment.line < 1:
-        return None
     for hunk in hunks:
         end = hunk.find(comment.side, comment.line)
         if end is None:
@@ -273,6 +288,9 @@ def validate(comments: Sequence[InlineComment], files: RawFiles) -> list[Placeme
     invalid: list[dict[str, Any]] = []
     unlisted = 0
     for comment in comments:
+        if not _fields_ok(comment):
+            invalid.append(_finding(comment))
+            continue
         candidates = by_path.get(comment.path)
         if candidates is None:
             if files.ended or comment.path in old_paths:
@@ -281,7 +299,7 @@ def validate(comments: Sequence[InlineComment], files: RawFiles) -> list[Placeme
                 unlisted += 1
             continue
         file = _file_for(candidates, comment.side)
-        if comment.side not in SIDES or file is None or file.patch is None:
+        if file is None or file.patch is None:
             invalid.append(_finding(comment))
             continue
         hunks = parsed.get(id(file))
@@ -320,30 +338,46 @@ class Checked:
     pin: MrPin | None = None  # GitLab: the shas a position needs
 
 
-def _whole_list_refused(err: ForgectlError) -> ForgectlError:
+def _list_refused(err: ForgectlError) -> ForgectlError:
     """A host's refusal of the whole list (a 4xx other than auth and absence) is ``too_large``;
-    every other failure, a 5xx or a network one included, keeps its own code."""
+    every other failure, a 5xx or a network one included, keeps its own code. Only the list's own
+    call goes through this: a 4xx on the pull or MR read stays ``host_rejected``."""
     if err.code == "host_rejected":
         return refused("too_large", "the host refused to list this pull request's files")
     return err
 
 
+def _cut(raw: RawFiles) -> RawFiles:
+    return RawFiles(raw.files, False, raw.reason or "the listed files do not add up to the total")
+
+
 def check_github(env: ReadEnv, ref: PrRef, comments: Sequence[InlineComment]) -> Checked:
     target = env.hosts.target(ref.host)
-    try:
-        pull, raw = github_diff._stable(
-            env, target, ref, lambda _p: github_diff.list_files(env, target, ref)
-        )
-    except ForgectlError as err:
-        raise _whole_list_refused(err) from None
+
+    def fetch(_pull: github_diff.Pull) -> RawFiles:
+        try:
+            return github_diff.list_files(env, target, ref)
+        except ForgectlError as err:
+            raise _list_refused(err) from None
+
+    pull, raw = github_diff._stable(env, target, ref, fetch, need_changed_files=True)
+    if not (raw.ended and len(raw.files) == pull.changed_files):
+        raw = _cut(raw)
     return Checked(pull.head_sha, tuple(validate(comments, raw)))
 
 
-def check_gitlab(gl: Any, ref: PrRef, comments: Sequence[InlineComment]) -> Checked:
-    try:
-        pin, raw = gitlab_diff.read_raw_files(gl, ref)
-    except ForgectlError as err:
-        raise _whole_list_refused(err) from None
+def check_gitlab(gl: GitLabBackend, ref: PrRef, comments: Sequence[InlineComment]) -> Checked:
+    target = gl._hosts.target(ref.host)
+
+    def fetch(pin: MrPin) -> RawFiles:
+        try:
+            return gitlab_diff.list_files(gl, target, ref, pin).raw()
+        except ForgectlError as err:
+            raise _list_refused(err) from None
+
+    pin, raw = gitlab_diff._stable(gl, target, ref, fetch)
+    if not (raw.ended and not pin.overflow and pin.changes == len(raw.files)):
+        raw = _cut(raw)
     return Checked(pin.head_sha, tuple(validate(comments, raw)), pin)
 
 

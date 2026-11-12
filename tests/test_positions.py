@@ -232,6 +232,20 @@ def test_a_finding_wins_over_an_unlisted_file() -> None:
     assert [i["index"] for i in err.details["invalid"]] == [1]  # type: ignore[index]
 
 
+@pytest.mark.parametrize(
+    "comment",
+    [
+        C(0, "zzz.py", 0),
+        C(0, "zzz.py", -3),
+        C(0, "zzz.py", 1, "weird"),
+        C(0, "zzz.py", 3, "right", 4),
+        C(0, "zzz.py", 3, "right", 0),
+    ],
+)
+def test_a_locally_invalid_comment_on_an_unlisted_file_is_invalid_not_too_large(comment: C) -> None:
+    assert bad(comment, ended=False)[0]["index"] == 0
+
+
 def test_every_finding_is_listed_in_order() -> None:
     comments = [C(0, "a.py", 2), C(1, "a.py", 99), C(2, "nope.py", 1), C(3, "a.py", 3, "left", 1)]
     err = codes(lambda: pos.validate(comments, listed(file())))
@@ -282,6 +296,46 @@ def test_a_path_listed_twice_with_the_same_status_is_invalid() -> None:
 def test_a_mangled_patch_is_upstream_error_never_a_valid_line(patch: str) -> None:
     err = codes(lambda: pos.validate([C(0, "a.py", 1)], listed(file(patch=patch))))
     assert err.code == "upstream_error"
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        "@@ -10 +10 @@\n-a\n+b\n@@ -1 +1 @@\n-c\n+d\n",  # out of order
+        "@@ -1,3 +1,3 @@\n a\n-b\n+c\n d\n@@ -3 +3 @@\n-x\n+y\n",  # overlaps on both sides
+        "@@ -1,2 +1,2 @@\n a\n-b\n+c\n@@ -5 +2 @@\n-x\n+y\n",  # new side overlaps
+        "@@ -1,2 +1,2 @@\n a\n-b\n+c\n@@ -2 +5 @@\n-x\n+y\n",  # old side overlaps
+        "@@ -1 +1 @@\n-a\n+b\n@@ -1 +1 @@\n-c\n+d\n",  # the same place twice
+    ],
+)
+def test_hunks_that_do_not_start_past_the_one_before_are_upstream_error(patch: str) -> None:
+    err = codes(lambda: pos.parse_patch(patch))
+    assert err.code == "upstream_error"
+
+
+def test_ordinary_multi_hunk_patches_still_parse() -> None:
+    assert len(pos.parse_patch("@@ -1 +1 @@\n-a\n+b\n@@ -3 +3 @@\n-c\n+d\n")) == 2
+    assert len(pos.parse_patch("@@ -1 +1 @@\n-a\n+b\n@@ -2,0 +3 @@\n+x\n")) == 2
+    assert len(pos.parse_patch("@@ -1,0 +1 @@\n+a\n@@ -2,0 +3 @@\n+x\n")) == 2
+    assert len(pos.parse_patch(TWO_HUNKS)) == 2
+
+
+def test_a_huge_digit_string_in_a_hunk_header_is_upstream_error() -> None:
+    huge = ("1" * 5000, "2" * 5000)
+    for patch in (f"@@ -{huge[0]} +1 @@\n-a\n", f"@@ -1 +{huge[0]},{huge[1]} @@\n+a\n"):
+        assert codes(lambda p=patch: pos.parse_patch(p)).code == "upstream_error"
+
+
+def test_many_comments_on_a_large_hunk_are_found_quickly() -> None:
+    import time
+
+    count = 100_000
+    patch = f"@@ -1,{count} +1,{count} @@\n" + " x\n" * count
+    comments = [C(n, "a.py", count - n) for n in range(300)]
+    started = time.monotonic()
+    placed = pos.validate(comments, listed(file(patch=patch)))
+    assert time.monotonic() - started < 5
+    assert [p.line for p in placed][:2] == [count, count - 1]
 
 
 def test_an_empty_patch_has_no_lines() -> None:
@@ -377,7 +431,7 @@ def test_the_gitlab_position_of_a_range_carries_line_range() -> None:
     position = ok(C(0, "n.py", 3, "right", 1), renamed).gitlab_position(pin)
     assert (position["old_path"], position["new_path"]) == ("o.py", "n.py")
     span = position["line_range"]
-    assert (span["start"]["type"], span["start"]["new_line"]) == (None, 1)
+    assert (span["start"]["type"], span["start"]["new_line"]) == ("old", 1)  # a context line
     assert (span["end"]["type"], span["end"]["new_line"], span["end"]["old_line"]) == (
         "new",
         3,
@@ -385,6 +439,20 @@ def test_the_gitlab_position_of_a_range_carries_line_range() -> None:
     )
     assert span["end"]["line_code"] == position["line_code"]
     assert span["start"]["line_code"] == f"{sha('n.py')}_1_1"
+
+
+def test_a_range_point_is_new_on_an_added_line_and_old_on_a_removed_or_context_line() -> None:
+    from forgectl.backends.gitlab_diff import MrPin
+
+    pin = MrPin(101, "user-9/proj", "h" * 40, "b" * 40, "s" * 40, "d" * 40, 1, False)
+
+    def types(start: int, end: int, side: str = "right") -> tuple[str, str]:
+        span = ok(C(0, "a.py", end, side, start)).gitlab_position(pin)["line_range"]
+        return span["start"]["type"], span["end"]["type"]
+
+    assert types(1, 2) == ("old", "new")  # context, added
+    assert types(2, 4) == ("new", "old")  # added, context
+    assert types(2, 3, "left") == ("old", "old")  # removed, context
 
 
 def test_a_gitlab_position_without_a_start_sha_is_upstream_error() -> None:
@@ -541,3 +609,85 @@ def test_gitlab_a_5xx_on_the_diffs_is_upstream_error(fake_gitlab: Any, tmp_path:
     backend = make_backend(fake_gitlab, tmp_path)
     err = codes(lambda: pos.check_gitlab(backend, gl_ref(), [C(0, "a.py", 1)]))
     assert (err.code, err.exit_code) == ("upstream_error", 12)
+
+
+# -- a list that ended short is a cut list --------------------------------------------------
+
+
+def _short_gitlab(fake_gitlab: Any, tmp_path: Path, **doc: Any) -> Any:
+    from .test_gitlab_diff import setup
+
+    return setup(fake_gitlab, tmp_path, pages=[[entry("a.py", TWO_HUNKS)]], mr=mr_doc(**doc))
+
+
+@pytest.mark.parametrize("changes", ["1000+", "5"])
+def test_gitlab_a_list_that_ended_short_is_cut(
+    fake_gitlab: Any, tmp_path: Path, changes: str
+) -> None:
+    backend = _short_gitlab(fake_gitlab, tmp_path, changes_count=changes)
+    err = codes(lambda: pos.check_gitlab(backend, gl_ref(), [C(0, "other.py", 1)]))
+    assert (err.code, err.reason) == ("refused", "too_large")
+    assert pos.check_gitlab(backend, gl_ref(), [C(0, "a.py", 2)]).placements[0].line == 2
+    assert codes(lambda: pos.check_gitlab(backend, gl_ref(), [C(0, "a.py", 99)])).code == (
+        "invalid_position"
+    )
+
+
+def test_gitlab_a_complete_list_still_calls_an_unlisted_file_invalid(
+    fake_gitlab: Any, tmp_path: Path
+) -> None:
+    backend = _short_gitlab(fake_gitlab, tmp_path, changes_count="1")
+    err = codes(lambda: pos.check_gitlab(backend, gl_ref(), [C(0, "other.py", 1)]))
+    assert err.code == "invalid_position"
+
+
+def test_github_a_list_that_ended_short_is_cut(make_github: Callable[..., RouterHarness]) -> None:
+    h = make_github(pull={**pull(), "changed_files": 5}, files=[item("a.py", patch=TWO_HUNKS)])
+    err = codes(lambda: pos.check_github(h.env, REF, [C(0, "other.py", 1)]))
+    assert (err.code, err.reason) == ("refused", "too_large")
+    assert pos.check_github(h.env, REF, [C(0, "a.py", 2)]).placements[0].line == 2
+    assert codes(lambda: pos.check_github(h.env, REF, [C(0, "a.py", 99)])).code == (
+        "invalid_position"
+    )
+
+
+def test_github_a_complete_list_still_calls_an_unlisted_file_invalid(
+    make_github: Callable[..., RouterHarness],
+) -> None:
+    h = make_github(pull={**pull(), "changed_files": 1}, files=[item("a.py", patch=TWO_HUNKS)])
+    err = codes(lambda: pos.check_github(h.env, REF, [C(0, "other.py", 1)]))
+    assert err.code == "invalid_position"
+
+
+# -- only the list's own refusal is too_large -----------------------------------------------
+
+
+def test_github_a_4xx_on_the_pull_read_is_host_rejected(
+    make_github: Callable[..., RouterHarness],
+) -> None:
+    from .test_github_show import http
+
+    h = make_github(pull=http(422, b'{"message":"no"}'), files=[item("a.py", patch=TWO_HUNKS)])
+    err = codes(lambda: pos.check_github(h.env, REF, [C(0, "a.py", 2)]))
+    assert err.code == "host_rejected"
+
+
+def test_gitlab_a_4xx_on_the_mr_read_is_host_rejected(fake_gitlab: Any, tmp_path: Path) -> None:
+    from .gitlab_support import make_backend, mr_path
+
+    fake_gitlab.on(mr_path(), status=400, body={"message": "no"})
+    backend = make_backend(fake_gitlab, tmp_path)
+    err = codes(lambda: pos.check_gitlab(backend, gl_ref(), [C(0, "a.py", 1)]))
+    assert err.code == "host_rejected"
+
+
+def test_gitlab_a_4xx_on_the_diffs_is_too_large(fake_gitlab: Any, tmp_path: Path) -> None:
+    from .gitlab_support import make_backend, mr_path, recording
+    from .test_gitlab_diff import DIFFS
+
+    fake_gitlab.on(mr_path(), mr_doc(changes_count="1"))
+    fake_gitlab.on("projects/101", recording("project"))
+    fake_gitlab.on(DIFFS, status=400, body={"message": "too big"})
+    backend = make_backend(fake_gitlab, tmp_path)
+    err = codes(lambda: pos.check_gitlab(backend, gl_ref(), [C(0, "a.py", 1)]))
+    assert (err.code, err.reason) == ("refused", "too_large")
