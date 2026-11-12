@@ -1146,7 +1146,7 @@ def test_a_patch_redirected_by_a_301_reaches_the_gateway_as_the_gets_answer(
 ) -> None:
     """gh and glab turn a 301/302/303 into a body-less GET and show only its answer: the
     gateway cannot see the redirect, so a write's proof must reject the GET's answer
-    (TODO(#24) in gateway.py)."""
+    (``post_base.created_id`` does it for the text posts)."""
     fake_forges.answer("gh", endpoint_re="pulls/1$", method="PATCH", redirect="/x", status=301)
     fake_forges.answer("gh", endpoint="x", method="GET", body={"number": 1, "title": "old"})
     gateway = make_gateway(fake_forges)
@@ -1170,6 +1170,19 @@ def test_a_post_redirected_by_a_301_to_a_200_where_201_is_documented_is_outcome_
             write=True, shape="object", expect_status=frozenset({201}),
         )  # fmt: skip
     assert raised.value.code == "outcome_unknown"
+
+
+@pytest.mark.parametrize("status", [200, 201])
+def test_a_write_whose_2xx_answer_is_a_list_is_host_rejected_whatever_the_status(
+    fake_forges: FakeForges, status: int
+) -> None:
+    fake_forges.answer("gh", endpoint_re="comments$", method="POST", status=status, body=[])
+    with pytest.raises(ForgectlError) as raised:
+        make_gateway(fake_forges).api(
+            GH, "POST", ["repos", "o", "r", "issues", "1", "comments"], body={"body": "hi"},
+            write=True, shape="object", expect_status=frozenset({201}),
+        )  # fmt: skip
+    assert raised.value.code == "host_rejected"
 
 
 @pytest.mark.parametrize("status", [307, 308])
