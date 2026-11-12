@@ -59,7 +59,7 @@ forgectl merge github.com/org/repo#42 --expected-head <sha> --expected-base main
 | `comments`, `reviews`, `ci` | threads, reviews, checks |
 | `access`, `whoami` | write access of a user; authenticated user per host |
 | `merge` | merge, on GitHub and GitLab (on GitLab the project's merge method setting decides; `--method squash` is sent only after the checks); `--auto` arms auto-merge, for a human only, as the head allows |
-| `review` | post a review (not yet implemented, #26 GitHub, #27 GitLab) |
+| `review` | post a review (not yet implemented, #26 GitHub, #27 GitLab; the position check for its inline comments is done, #25) |
 | `comment`, `reply` | post a comment; reply to a thread |
 | `approve` | approve (not yet implemented, #28) |
 | `resolve`, `unresolve` | threads (not yet implemented, #29) |
