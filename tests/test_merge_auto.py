@@ -313,6 +313,42 @@ def test_a_pr_armed_while_the_dialog_was_open_is_a_no_op(rig: Rig) -> None:
     gh.assert_no_write(rig)
 
 
+def test_an_armed_run_stays_an_arm_run_when_the_reread_shows_nothing_blocking(rig: Rig) -> None:
+    mutation(rig, errors="Pull request is in clean status")
+    rig.reads(gh.doc(ci="pending"), gh.doc())
+    done = interactive(rig, "--auto")
+    assert done.code == 20 and done.error["reason"] == "auto_merge_unavailable"
+    assert rig.puts() == []
+    assert len(mutations(rig)) == 1
+    assert [r["result"] for r in rig.audit()] == ["attempted", "failed"]
+
+
+def test_an_armed_run_whose_reread_is_clean_still_arms_when_the_host_accepts(rig: Rig) -> None:
+    mutation(rig)
+    rig.reads(gh.doc(ci="pending"), gh.doc(), armed_doc())
+    done = interactive(rig, "--auto")
+    assert done.code == 0, done.err
+    assert done.json["auto_merge_enabled"] is True and done.json["merged"] is False
+    assert rig.puts() == []
+    assert len(mutations(rig)) == 1
+
+
+def test_a_pr_armed_after_the_pre_merge_hooks_ran_exits_0_with_no_record_and_no_post_hooks(
+    rig: Rig, tmp_path: Path
+) -> None:
+    pre, post = tmp_path / "pre.json", tmp_path / "post.json"
+    rig.reads(gh.doc(ci="pending"), armed_doc(ci="pending"))
+    config = gl.hook_config("pre-merge", f"cat > {pre}") + gl.hook_config(
+        "post-merge", f"cat > {post}"
+    ).replace("hooks:\n", "")
+    done = interactive(rig, "--auto", extra_config=config)
+    assert done.code == 0, done.err
+    assert done.json["auto_merge_enabled"] is True
+    assert pre.exists() and not post.exists()
+    assert rig.audit() == []
+    gh.assert_no_write(rig)
+
+
 def test_the_hooks_see_auto_and_the_post_payload_matches_the_output(
     rig: Rig, tmp_path: Path
 ) -> None:
@@ -480,6 +516,19 @@ def test_gitlab_a_405_on_a_failed_pipeline_does_not_merge(glrig: gl.Rig) -> None
     assert done.error["code"] in ("refused", "host_rejected")
     assert len(glrig.puts()) == 1
     assert [r["result"] for r in glrig.audit()] == ["attempted", "failed"]
+
+
+def test_gitlab_a_405_that_reads_armed_at_the_sent_head_is_armed_even_with_blockers(
+    glrig: gl.Rig,
+) -> None:
+    version(glrig, "17.11.0")
+    glrig.script(gl.mr(status="ci_still_running"), armed_mr(status="ci_must_pass"), failing=False)
+    glrig.put(405, {"message": "405 Method Not Allowed"})
+    done = glrig.run("--auto", actor="human:me", method="merge")
+    assert done.code == 0, done.err
+    assert done.json["auto_merge_enabled"] is True
+    assert len(glrig.puts()) == 1
+    assert [r["result"] for r in glrig.audit()] == ["attempted", "auto_merge_enabled"]
 
 
 def test_gitlab_a_failed_pipeline_seen_before_the_write_is_refused(glrig: gl.Rig) -> None:

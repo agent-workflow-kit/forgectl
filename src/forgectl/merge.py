@@ -243,6 +243,7 @@ class MergeRun:
         method: str | None = None,
         resolved: bool = False,
         plain: bool = False,
+        keep_arm: bool = False,
     ) -> Verdict:
         """The table of step 4. ``earlier`` is the blockers of the first run when this is the
         re-read of step 7: a blocker that was not there then refuses even under
@@ -250,7 +251,9 @@ class MergeRun:
         run's verdict: kept (a resolved ``None``, the host deciding, included), or refused if the
         repo no longer allows it, never resolved again. ``plain`` is set on that re-read when the
         first run was a ``--auto`` that merges at once (GitHub, nothing blocking): arming is then
-        not what the human confirmed, so any new blocker refuses."""
+        not what the human confirmed, so any new blocker refuses. ``keep_arm`` is set there when
+        the first run armed: the arm mode is fixed after the first read, so it never becomes a
+        plain merge."""
         pr = read.pr
         # a --dry-run refusal reports what was read, and the caller's method until it resolves
         self._remember(read, self.args.method if not resolved else method)
@@ -307,7 +310,7 @@ class MergeRun:
                 )
         if auto and pr.auto_merge.enabled:
             return Verdict(False, method, blockers, armed=True)
-        arm = auto and (pr.backend != "github" or bool(blockers))
+        arm = auto and (keep_arm or pr.backend != "github" or bool(blockers))
         return Verdict(False, method, blockers, arm=arm)
 
     def _check_pin(self, pr: PR) -> None:
@@ -383,6 +386,7 @@ class MergeRun:
                 method=method,
                 resolved=True,
                 plain=bool(self.args.auto) and not first_verdict.arm,
+                keep_arm=first_verdict.arm,
             )
             if verdict.already_merged:
                 self._log("info", "already_merged", {"decision_ids": self.decision_ids})
@@ -669,6 +673,14 @@ class MergeRun:
             return self._unexpected(pr)
         if answer.kind == "base_modified":
             return Outcome("failed", error=rejected)
+        if (
+            self.arm
+            and pr.state == "open"
+            and pr.auto_merge.enabled
+            and pr.head.sha == self.sha
+            and base_matches(pr, self.base)
+        ):  # armed at the head and base sent: the arming stands whatever blocks the merge now
+            return Outcome("auto_merge_enabled", pr=pr)
         blockers = sorted_blockers(pr.blocked_by)
         if pr.state == "open" and Blocker(BlockerCode.OTHER, "locked") in blockers:
             # a merge is running: not a blocker to refuse on, poll like a 5xx
