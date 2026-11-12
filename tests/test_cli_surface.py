@@ -627,6 +627,7 @@ def good_resolve(inv: Invocation) -> dict[str, Any]:
         "action": "resolve",
         "thread_id": "gh:rt:abc",
         "resolved": True,
+        "changed": True,
         "dry_run": False,
     }
 
