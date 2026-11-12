@@ -924,21 +924,3 @@ def test_a_head_that_moves_during_a_hook_is_caught_by_the_re_read(rv: ReviewRig)
     done = rv.run(extra_config=hook_config("pre-post", "exit 0"))
     assert done.code == 20 and done.error["reason"] == "stale_head"
     assert rv.posts() == []
-
-
-# -- GitLab ---------------------------------------------------------------------------------------
-
-
-def test_review_on_gitlab_fails_as_not_implemented_until_27(rv: ReviewRig) -> None:
-    rv.input({"event": "comment", "body": "words"})
-    config = rv.base.config("  gitlab.com:\n    token_env: POST_TOKEN\n")
-    argv = ["review", "gitlab.com/user-9/proj#7", "--json", "--config", str(config)]
-    argv += ["--file", str(rv.file)]
-    argv += ["--expected-head", HEAD, "--expected-base", "main", "--actor", "auto:bot", "--yes"]
-    rv.monkeypatch.setattr(sys, "stdin", io.StringIO(""))
-    code = main(argv, tty=NO_TTY)
-    captured = rv.capsys.readouterr()
-    assert code == 1
-    error = json.loads(captured.out)["error"]
-    assert error["code"] == "internal" and "#27" in error["message"]
-    assert rv.calls() == []
