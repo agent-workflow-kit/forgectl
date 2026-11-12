@@ -30,7 +30,12 @@ from .post_base import NODE, PAGE_SIZE, collect, created_id
 
 OK = frozenset({200})
 EVENTS = {"comment": "COMMENT", "request_changes": "REQUEST_CHANGES", "approve": "APPROVE"}
-_PENDING = re.compile(r"pending\s+review", re.IGNORECASE)
+# UNVERIFIED until #34: GitHub's documented sentence, "User can only have one pending review per
+# pull request"; anchored so a position error that merely says "pending review" is not read as it.
+_PENDING = re.compile(r"only\s+have\s+one\s+pending\s+review", re.IGNORECASE)
+# The state each event's answer must carry; PENDING (or anything else) is not a submitted review.
+# UNVERIFIED until #34.
+STATES = {"comment": "COMMENTED", "request_changes": "CHANGES_REQUESTED", "approve": "APPROVED"}
 
 
 @dataclass(frozen=True)
@@ -85,9 +90,9 @@ class GitHubReviewer:
         )
         if response.status == 422:  # nothing landed: GitHub refused the whole review
             raise self._refusal(response.data, pr, target, owner, name, account_id)
-        return self._proven(response.data, target, pr, commit_id)
+        return self._proven(response.data, target, pr, commit_id, event)
 
-    def _proven(self, data: Any, target: Target, pr: m.PR, commit_id: str) -> Submitted:
+    def _proven(self, data: Any, target: Target, pr: m.PR, commit_id: str, event: str) -> Submitted:
         where = "review"
         rest_id = created_id(data, where)
         node = data.get("node_id")
@@ -100,6 +105,11 @@ class GitHubReviewer:
             raise ForgectlError(
                 "outcome_unknown",
                 f"{where}: the answer does not carry the commit sent; the write may have landed",
+            )
+        if data.get("state") != STATES[event]:
+            raise ForgectlError(
+                "outcome_unknown",
+                f"{where}: the answer is not a submitted {event} review; it may have landed",
             )
         verify_identity(
             data.get("html_url"),
@@ -125,7 +135,7 @@ class GitHubReviewer:
             elif isinstance(entry, dict) and isinstance(entry.get("message"), str):
                 texts.append(entry["message"])
         shown = shown_text("; ".join(texts), target.token, limit=200)
-        if _PENDING.search(shown) is None:
+        if not any(_PENDING.search(text) for text in texts):
             where = f"{target.host}/repos/{owner}/{name}/pulls/{pr.number}/reviews"
             suffix = f": {shown}" if shown else ""
             return ForgectlError(

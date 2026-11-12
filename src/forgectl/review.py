@@ -63,11 +63,11 @@ STATE_EVENTS = ("approve", "request_changes")
 # -- the input -----------------------------------------------------------------------------------
 
 
-def _too_large(limit: int, index: int | None) -> ForgectlError:
+def _too_large(limit: int, index: int | None, what: str | None = None) -> ForgectlError:
+    what = what or ("the review body" if index is None else f"inline comment {index}")
     return ForgectlError(
         "body_too_large",
-        f"the {'review body' if index is None else f'inline comment {index}'} is larger than "
-        f"{limit} bytes",
+        f"{what} is larger than {limit} bytes",
         details={"index": index, "limit": limit},
     )
 
@@ -352,6 +352,7 @@ class ReviewRun:
         self._account = ""
         self._checked_head: str | None = None
         self._placements: tuple[positions.Placement, ...] = ()
+        self._attempt_record: audit.Attempt | None = None
 
     # -- helpers -------------------------------------------------------------------------------
 
@@ -420,7 +421,7 @@ class ReviewRun:
     def _prepare(self) -> Prepared:
         raw = read_input(self.args.file, FILE_LIMIT + 1)
         if len(raw) > FILE_LIMIT:
-            raise _too_large(FILE_LIMIT, None)
+            raise _too_large(FILE_LIMIT, None, "the review file")
         return prepare(parse_input(raw), self.args.dedupe_key, self.ref.backend)
 
     def _read(self) -> PR:
@@ -624,6 +625,9 @@ class ReviewRun:
 
     # -- steps 9 to 12 -------------------------------------------------------------------------
 
+    # TODO(#29): switch to the shared post.py write helpers once the #29 refactor lands
+    # (_post_hooks, _write and _attempt repeat post.py's audit window, hooks and signal handling)
+
     @staticmethod
     def _audit_ids(outcome: Outcome) -> list[str]:
         head = [outcome.review.review_id] if outcome.review else []
@@ -658,6 +662,7 @@ class ReviewRun:
         audit_error: ForgectlError | None = None
         signalled = False
         with audit.Attempt(self.directory, context) as attempt:
+            self._attempt_record = attempt
             attempt.begin()  # a failure here is audit_unavailable and nothing has been sent
             outcome = self._attempt(pr)
             try:
@@ -721,6 +726,8 @@ class ReviewRun:
             account_id=self._account,
         )
         done = Outcome("approved" if prep.event == "approve" else "posted", review, landed=True)
+        if self._attempt_record is not None:  # a signal from here on still records the proven id
+            self._attempt_record.unknown_ids = [review.review_id]
         # step 11: the read-back; a read that fails is a warning, the review has landed
         try:
             ids = self.reviewer.read_comments(pr, review)
