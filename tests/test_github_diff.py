@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from forgectl.backends.github_diff import COMPARE_FILE_CAP
 from forgectl.errors import ForgectlError
 from forgectl.gateway import ProcessResult
 from forgectl.model import CompareResult, DiffResult, FilesResult
@@ -705,6 +706,79 @@ def test_behind_and_diverged_have_a_null_diff_and_no_diff_request(
     result = cmp(h)
     assert (result.status, result.diff) == (status, None)
     assert h.script.kinds == ["pull", "compare"]
+
+
+def test_no_diff_ahead_reads_no_diff_and_leaves_the_key_out(
+    cmake: Callable[..., RouterHarness],
+) -> None:
+    h = cmake(compare=compare_doc("ahead", 2, 0, files=listed(2)))
+    result = h.backend.compare(REF, FROM, TO, no_diff=True)
+    assert isinstance(result, CompareResult)
+    assert result.status == "ahead"
+    assert "diff" not in result.to_dict()
+    assert h.script.kinds == ["pull", "compare"]  # the diff request is never made
+
+
+@pytest.mark.parametrize("files", [None, "gone", {"a": 1}])
+def test_no_diff_ahead_is_answered_without_checking_the_files_shape(
+    cmake: Callable[..., RouterHarness], files: Any
+) -> None:
+    doc = compare_doc("ahead", 2, 0)
+    if files == "gone":
+        del doc["files"]
+    else:
+        doc["files"] = files
+    h = cmake(compare=doc)
+    result = h.backend.compare(REF, FROM, TO, no_diff=True)
+    assert isinstance(result, CompareResult)
+    assert (result.status, "diff" in result.to_dict()) == ("ahead", False)
+    assert h.script.kinds == ["pull", "compare"]
+
+
+@pytest.mark.parametrize("files", [None, "gone", {"a": 1}])
+def test_default_ahead_with_a_malformed_files_list_is_still_refused(
+    cmake: Callable[..., RouterHarness], files: Any
+) -> None:
+    doc = compare_doc("ahead", 2, 0)
+    if files == "gone":
+        del doc["files"]
+    else:
+        doc["files"] = files
+    h = cmake(compare=doc)
+    assert raises(lambda: cmp(h)).code != ""
+
+
+def test_no_diff_does_not_fail_on_a_diff_the_host_would_cut(
+    cmake: Callable[..., RouterHarness],
+) -> None:
+    # at the file cap the diff is `too_large`; the status alone is still a real answer
+    h = cmake(compare=compare_doc("ahead", 2, 0, files=listed(COMPARE_FILE_CAP)))
+    result = h.backend.compare(REF, FROM, TO, no_diff=True)
+    assert (result.status, "diff" in result.to_dict()) == ("ahead", False)
+    assert h.script.kinds == ["pull", "compare"]
+
+
+@pytest.mark.parametrize(
+    "status,ahead,behind",
+    [("behind", 0, 3), ("diverged", 2, 3), ("identical", 0, 0)],
+)
+def test_no_diff_keeps_every_other_status(
+    cmake: Callable[..., RouterHarness], status: str, ahead: int, behind: int
+) -> None:
+    result = cmake(compare=compare_doc(status, ahead, behind, files=[])).backend.compare(
+        REF, FROM, TO, no_diff=True
+    )
+    assert result.status == status
+    assert "diff" not in result.to_dict()
+
+
+def test_no_diff_of_an_unknown_commit_is_unavailable_and_equal_shas_are_identical(
+    cmake: Callable[..., RouterHarness],
+) -> None:
+    gone = cmake(compare=http(404, {"message": "Not Found"}))
+    assert gone.backend.compare(REF, FROM, TO, no_diff=True).status == "unavailable"
+    same = cmake().backend.compare(REF, FROM, FROM, no_diff=True)
+    assert (same.status, "diff" in same.to_dict()) == ("identical", False)
 
 
 def test_identical_by_the_host_has_an_empty_diff(cmake: Callable[..., RouterHarness]) -> None:

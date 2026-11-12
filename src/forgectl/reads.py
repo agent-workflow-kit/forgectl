@@ -190,5 +190,7 @@ def diff(inv: registry.Invocation) -> dict[str, Any]:
 @registry.register("compare")
 def compare(inv: registry.Invocation) -> dict[str, Any]:
     ref = _bound(inv, "compare")
-    result = backend_for(ref, make_env(inv)).compare(ref, inv.args.from_sha, inv.args.to_sha)
+    result = backend_for(ref, make_env(inv)).compare(
+        ref, inv.args.from_sha, inv.args.to_sha, no_diff=inv.args.no_diff
+    )
     return result.to_dict()
