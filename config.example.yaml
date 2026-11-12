@@ -93,6 +93,14 @@ browse: {}
 #   detail_collapsed: [changes]
 #   query: "authored AND NOT draft ORDER BY age DESC"
 
+# `log`. forgectl rotates log.jsonl by size: before a line would take it over max_bytes (65536 to
+# 1073741824, default 10 MiB) it becomes log.jsonl.1, and the older files shift up to
+# log.jsonl.<keep> (keep: 1 to 100, default 3); the oldest is deleted. audit.jsonl is never rotated.
+log: {}
+# log:
+#   max_bytes: 10485760
+#   keep: 3
+
 # Hooks, each a list of entries (default []). cmd runs through sh -c in its own process group.
 # Exit 0 continues; on a pre- hook, exit 13 escalates and any other failure or a timeout vetoes;
 # post- failures are logged and warned, never fatal. The payload is JSON on stdin and never holds

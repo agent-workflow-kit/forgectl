@@ -48,6 +48,13 @@ from yaml.parser import ParserError
 from yaml.scanner import ScannerError
 
 from .errors import ForgectlError
+from .jsonlog import (
+    DEFAULT_KEEP,
+    DEFAULT_MAX_BYTES,
+    MAX_KEEP,
+    MAX_MAX_BYTES,
+    MIN_MAX_BYTES,
+)
 from .limits import MAX_DURATION_SECONDS
 
 __all__ = [
@@ -284,6 +291,13 @@ class Browse(_Model):
     query: BrowseQuery = ""  # the starting filter and order of the list; empty: none
 
 
+class Log(_Model):
+    max_bytes: Annotated[int, Field(strict=True, ge=MIN_MAX_BYTES, le=MAX_MAX_BYTES)] = (
+        DEFAULT_MAX_BYTES  # log.jsonl rotates before it would pass this size
+    )
+    keep: Annotated[int, Field(strict=True, ge=1, le=MAX_KEEP)] = DEFAULT_KEEP  # rotated files
+
+
 class Hooks(_Model):
     pre_merge: PreHooks = Field(default=(), alias="pre-merge")
     post_merge: PostHooks = Field(default=(), alias="post-merge")
@@ -302,6 +316,7 @@ class Config(_Model):
     hidden_repos: HiddenRepos = ()
     activity: Activity = Field(default_factory=Activity)
     browse: Browse = Field(default_factory=Browse)
+    log: Log = Field(default_factory=Log)
     hooks: Hooks = Field(default_factory=Hooks)
 
 
