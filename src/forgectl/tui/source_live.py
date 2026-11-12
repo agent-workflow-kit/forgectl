@@ -265,9 +265,9 @@ class LiveSource:
 
     def detail(self, pr: str, *, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
         """The ``snapshot`` object of one PR from one bulk read (``snapshots --bulk-only
-        --lookup`` of that PR: a single GraphQL request on GitHub, a single lookup on GitLab),
-        for the detail pane, which paints from the snapshot it already holds and is refreshed
-        by this.
+        --lookup`` of that PR: a GraphQL request on GitHub plus one small read of the checks'
+        ``isRequired`` (#136), a single lookup on GitLab), for the detail pane, which paints
+        from the snapshot it already holds and is refreshed by this.
 
         Raises ``ForgectlError`` when the bulk reader cannot read the PR whole (``upstream_error``
         naming the reason code of ``failed``), so the caller reads ``snapshot`` instead.
@@ -279,7 +279,6 @@ class LiveSource:
             if isinstance(item, dict) and item.get("pr") == pr:
                 if item.get("complete") is not True:
                     raise ForgectlError("upstream_error", "detail: the bulk read is not whole")
-                # TODO(#136): a GitHub check's `required` is null in a bulk item (D-37)
                 return item
         reason = "no item"
         for entry in answer.get("failed") or []:
