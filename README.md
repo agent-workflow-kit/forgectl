@@ -4,7 +4,7 @@ Normalized access to pull/merge requests across GitHub and GitLab: read them, po
 
 ## Status
 
-Implemented and released (see [CHANGELOG.md](CHANGELOG.md) for the version). Available now: the reads (`prs`, `show`, `snapshot`, `snapshots`, `poll`, `diff`, `files`, `compare`, `comments`, `reviews`, `ci`, `access`, `whoami`), `browse`, `export` and `merge` on GitHub and GitLab. Not yet implemented: `merge --auto` (#23), `comment` and `reply` (#24), `review` on GitLab (#27), `approve` (#28), and `resolve` and `unresolve` (#29); they parse but fail with an `internal` error. The contract is [docs/interface.md](docs/interface.md). Rationale and live-verification results are in [docs/design.md](docs/design.md); the staged plan is in [docs/plan.md](docs/plan.md).
+Implemented and released (see [CHANGELOG.md](CHANGELOG.md) for the version). Available now: the reads (`prs`, `show`, `snapshot`, `snapshots`, `poll`, `diff`, `files`, `compare`, `comments`, `reviews`, `ci`, `access`, `whoami`), `browse`, `export` and `merge` on GitHub and GitLab. Not yet implemented: `merge --auto` (#23), `reply` (#24), `review` on GitLab (#27), `approve` (#28), and `resolve` and `unresolve` (#29); they parse but fail with an `internal` error. The contract is [docs/interface.md](docs/interface.md). Rationale and live-verification results are in [docs/design.md](docs/design.md); the staged plan is in [docs/plan.md](docs/plan.md).
 
 ## Layer
 

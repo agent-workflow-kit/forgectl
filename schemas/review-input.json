@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "forgectl/review-input.json",
   "title": "review --file input",
-  "description": "The agent-written input of review. Every text passes through neutralizing before posting. Attribution footers are the caller's. forgectl also checks what a schema cannot: start_line <= line, an empty review (event comment with neither body nor comments; approve with neither is allowed).",
+  "description": "The agent-written input of review. Every text passes through neutralizing before posting. Attribution footers are the caller's. forgectl also checks what a schema cannot: start_line <= line, an empty review (event comment with neither body nor comments; approve with neither is allowed). The parser is also stricter than this schema, by design: it refuses an empty or whitespace-only body string, a whitespace-only comment body, a float line or start_line (even 2.0 or 1e2), a repeated key, NaN, a lone surrogate, and a dedupe key given with neither body nor comments.",
   "type": "object",
   "properties": {
     "event": {

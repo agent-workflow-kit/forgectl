@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -18,9 +20,11 @@ from typing import Any
 import jsonschema
 import pytest
 
+from forgectl import audit as audit_module
 from forgectl import review as review_module
+from forgectl.backends.github_review import GitHubReviewer
 from forgectl.cli import main
-from forgectl.errors import ForgectlError
+from forgectl.errors import ForgectlError, SignalExit
 
 from .harness import golden, schemas
 from .harness.safety import assert_call_safe
@@ -50,6 +54,7 @@ OTHER_HEAD = "4" * 40
 # old: 1 ctx, 2 removed, 3 ctx   new: 1 ctx, 2 added, 3 ctx
 PATCH = "@@ -1,3 +1,3 @@\n a\n-b\n+c\n d"
 MARKER = "<!-- forgectl:dedupe:key-1 -->"
+STATES = {"comment": "COMMENTED", "request_changes": "CHANGES_REQUESTED", "approve": "APPROVED"}
 
 
 def review_created(**kw: Any) -> dict[str, Any]:
@@ -94,7 +99,14 @@ class ReviewRig:
         answer_get(self.base.forges, f"{PULL}/files", body=files, page=1)
 
     def posted(self, comment_nodes: tuple[str, ...] = ()) -> None:
-        self.base.forges.answer("gh", REVIEWS, method="POST", status=200, body=review_created())
+        state = "COMMENTED"
+        try:  # the answer's state follows the event the file asks for
+            state = STATES[json.loads(self.file.read_text("utf-8"))["event"]]
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        self.base.forges.answer(
+            "gh", REVIEWS, method="POST", status=200, body=review_created(state=state)
+        )
         items = [{"node_id": n} for n in comment_nodes]
         for page in range(1, len(items) // 100 + 2):
             answer_get(
@@ -256,6 +268,29 @@ def test_the_schema_and_the_parser_agree_on_what_a_file_may_hold() -> None:
         except ForgectlError:
             ours = False
         assert validator.is_valid(doc) == ours, doc
+
+
+STRICTER = [
+    {"event": "comment", "body": ""},
+    {"event": "comment", "body": " \n\t"},
+    {"event": "comment", "comments": [inline(body="  ")]},
+    '{"event": "comment", "comments": [{"path": "a", "line": 2.0, "body": "x"}]}',
+    '{"event": "comment", "comments": [{"path": "a", "line": 1e2, "body": "x"}]}',
+    '{"event": "comment", "comments": [{"path": "a", "line": 2, "start_line": 1.0, "body": "x"}]}',
+    '{"event": "comment", "body": "x", "body": "y"}',
+    '{"event": "comment", "body": "\\ud800"}',
+]
+
+
+@pytest.mark.parametrize("doc", STRICTER)
+def test_the_parser_is_intentionally_stricter_than_the_schema(doc: Any) -> None:
+    """Documented in interface.md `review` and the schema description: the schema alone accepts
+    each of these, and the parser refuses it with exit 2 (the text posted must be the text
+    meant)."""
+    schema = json.loads(Path("schemas/review-input.json").read_text("utf-8"))
+    text = doc if isinstance(doc, str) else json.dumps(doc)
+    assert jsonschema.Draft202012Validator(schema).is_valid(json.loads(text))
+    usage_of(text)
 
 
 def test_the_canonical_form_is_the_documented_json() -> None:
@@ -564,6 +599,24 @@ def test_a_422_after_the_local_check_passed_is_host_rejected(rv: ReviewRig) -> N
     assert [r["result"] for r in rv.audit()] == ["attempted", "failed"]
 
 
+def test_a_position_422_that_says_pending_review_is_still_host_rejected(rv: ReviewRig) -> None:
+    rv.input({"event": "comment", "comments": [inline()]})
+    rv.diff()
+    rv.forges.answer(
+        "gh",
+        REVIEWS,
+        method="POST",
+        status=422,
+        body={
+            "message": "Unprocessable Entity",
+            "errors": [{"message": "pending review comment position is invalid"}],
+        },
+    )
+    done = rv.run()
+    assert done.code == 12 and done.error["code"] == "host_rejected"
+    assert [r["result"] for r in rv.audit()] == ["attempted", "failed"]
+
+
 def test_a_pending_review_422_names_the_review_in_the_way(rv: ReviewRig) -> None:
     rv.input({"event": "comment", "body": "x"})
     rv.forges.answer(
@@ -620,6 +673,27 @@ def test_an_answer_without_the_proof_is_never_reported_posted(
     rv.forges.answer("gh", REVIEWS, method="POST", status=200, body=review_created(**changes))
     done = rv.run()
     assert done.code == 12 and done.error["code"] in ("outcome_unknown", "wrong_host_response")
+    assert rv.audit()[-1]["result"] == "outcome_unknown"
+
+
+@pytest.mark.parametrize(
+    ("event", "state"),
+    [
+        ("comment", "PENDING"),
+        ("comment", None),
+        ("comment", "APPROVED"),
+        ("approve", "COMMENTED"),
+        ("request_changes", "COMMENTED"),
+    ],
+)
+def test_an_answer_whose_state_is_not_the_event_is_outcome_unknown(
+    rv: ReviewRig, event: str, state: str | None
+) -> None:
+    """UNVERIFIED until #34: that the answer's `state` is COMMENTED, CHANGES_REQUESTED, APPROVED."""
+    rv.input({"event": event, "body": "x"})
+    rv.forges.answer("gh", REVIEWS, method="POST", status=200, body=review_created(state=state))
+    done = rv.run()
+    assert done.code == 12 and done.error["code"] == "outcome_unknown"
     assert rv.audit()[-1]["result"] == "outcome_unknown"
 
 
@@ -855,6 +929,7 @@ def test_a_file_over_16_mib_is_body_too_large_with_a_null_index(rv: ReviewRig) -
     done = rv.run()
     assert done.code == 2 and done.error["code"] == "body_too_large"
     assert done.error["details"] == {"index": None, "limit": 16 * 1024 * 1024}
+    assert "review file" in done.error["message"] and "review body" not in done.error["message"]
     assert rv.calls() == []
 
 
@@ -924,6 +999,146 @@ def test_a_head_that_moves_during_a_hook_is_caught_by_the_re_read(rv: ReviewRig)
     done = rv.run(extra_config=hook_config("pre-post", "exit 0"))
     assert done.code == 20 and done.error["reason"] == "stale_head"
     assert rv.posts() == []
+
+
+# -- write failure paths -------------------------------------------------------------------------
+
+
+def test_an_audit_failure_after_the_write_is_audit_failed_and_post_hooks_still_run(
+    rv: ReviewRig, tmp_path: Path
+) -> None:
+    marker = tmp_path / "ran"
+    audit_file = Path(os.environ["XDG_STATE_HOME"]) / "forgectl" / "audit.jsonl"
+    rv.input({"event": "comment", "body": "words"})
+    rv.posted()
+    original = review_module.ReviewRun._send
+
+    def then_lock(self: Any, pr: Any) -> Any:
+        outcome = original(self, pr)
+        audit_file.chmod(stat.S_IRUSR)  # the real second append now fails
+        return outcome
+
+    rv.monkeypatch.setattr(review_module.ReviewRun, "_send", then_lock)
+    try:
+        done = rv.run(extra_config=hook_config("post-post", f"touch {marker}"))
+    finally:
+        audit_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    assert done.code == 12
+    assert done.error["code"] == "audit_failed"
+    assert done.error["details"] == {"outcome": "posted"}
+    assert [r["result"] for r in rv.audit()] == ["attempted"]
+    assert marker.exists()
+
+
+def test_a_signal_before_the_outcome_is_recorded_is_outcome_unknown_with_no_post_hook(
+    rv: ReviewRig, tmp_path: Path
+) -> None:
+    marker = tmp_path / "ran"
+    rv.input({"event": "comment", "body": "words"})
+
+    def signalled(*_a: Any, **_k: Any) -> Any:
+        raise SignalExit(15)
+
+    rv.monkeypatch.setattr(GitHubReviewer, "submit", signalled)
+    done = rv.run(extra_config=hook_config("post-post", f"touch {marker}"))
+    assert done.code == 12 and done.error["code"] == "outcome_unknown"
+    assert [r["result"] for r in rv.audit()] == ["attempted", "outcome_unknown"]
+    assert not marker.exists()
+
+
+def test_a_signal_after_the_outcome_is_recorded_keeps_the_record_and_runs_no_post_hook(
+    rv: ReviewRig, tmp_path: Path
+) -> None:
+    marker = tmp_path / "ran"
+    rv.input({"event": "comment", "body": "words"})
+    rv.posted()
+    original = audit_module.Attempt.finish
+
+    def then_signal(self: Any, result: str, **kw: Any) -> None:
+        original(self, result, **kw)
+        if result != "outcome_unknown":
+            raise SignalExit(15)
+
+    rv.monkeypatch.setattr(audit_module.Attempt, "finish", then_signal)
+    rv.run(extra_config=hook_config("post-post", f"touch {marker}"))
+    assert [r["result"] for r in rv.audit()] == ["attempted", "posted"]
+    assert not marker.exists()
+
+
+def test_a_bug_after_the_write_is_outcome_unknown_and_the_post_hook_still_runs(
+    rv: ReviewRig, tmp_path: Path
+) -> None:
+    marker = tmp_path / "ran"
+    rv.input({"event": "comment", "body": "words"})
+    rv.posted()
+
+    def broken(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("bug")
+
+    rv.monkeypatch.setattr(GitHubReviewer, "read_comments", broken)
+    done = rv.run(extra_config=hook_config("post-post", f"touch {marker}"))
+    assert done.code == 12 and done.error["code"] == "outcome_unknown"
+    assert [r["result"] for r in rv.audit()] == ["attempted", "outcome_unknown"]
+    assert marker.exists()
+
+
+@pytest.mark.parametrize("event", ["comment", "approve"])
+def test_a_signal_during_the_read_back_keeps_the_proven_review_id(
+    rv: ReviewRig, event: str
+) -> None:
+    rv.input({"event": event, "body": "words"})
+    rv.posted()
+
+    def signalled(*_a: Any, **_k: Any) -> Any:
+        raise SignalExit(15)
+
+    rv.monkeypatch.setattr(GitHubReviewer, "read_comments", signalled)
+    done = rv.run()
+    assert done.code == 12 and done.error["code"] == "outcome_unknown"
+    last = rv.audit()[-1]
+    assert last["result"] == "outcome_unknown" and last["ids"] == [f"gh:r:{NODE}"]
+
+
+def test_a_signal_during_the_post_approval_read_keeps_the_proven_review_id(
+    rv: ReviewRig,
+) -> None:
+    rv.input({"event": "approve", "body": "words"})
+    rv.posted()
+
+    class Wrapped:
+        def __init__(self, inner: Any) -> None:
+            self.inner = inner
+            self.reads = 0
+
+        def get_pr(self, *a: Any, **k: Any) -> Any:
+            self.reads += 1
+            if self.reads > 1:
+                raise SignalExit(15)
+            return self.inner.get_pr(*a, **k)
+
+    original_init = review_module.ReviewRun.__init__
+
+    def init(self: Any, inv: Any) -> None:
+        original_init(self, inv)
+        self.backend = Wrapped(self.backend)
+
+    rv.monkeypatch.setattr(review_module.ReviewRun, "__init__", init)
+    done = rv.run()
+    assert done.code == 12 and done.error["code"] == "outcome_unknown"
+    last = rv.audit()[-1]
+    assert last["result"] == "outcome_unknown" and last["ids"] == [f"gh:r:{NODE}"]
+
+
+def test_a_pre_post_escalation_is_exit_13_and_an_override_is_audited(rv: ReviewRig) -> None:
+    rv.input({"event": "comment", "body": "words"})
+    done = rv.run(extra_config=hook_config("pre-post", "exit 13"))
+    assert done.code == 13 and rv.posts() == []
+    assert rv.audit() == []
+    rv.posted()
+    done = rv.run("--override-escalation", actor="human:me",
+                  extra_config=hook_config("pre-post", "exit 13"))  # fmt: skip
+    assert done.code == 0, done.err
+    assert rv.audit()[0]["override"] == ["override_escalation"]
 
 
 # -- GitLab ---------------------------------------------------------------------------------------

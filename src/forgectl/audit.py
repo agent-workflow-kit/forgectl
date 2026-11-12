@@ -285,6 +285,9 @@ class Attempt:
         #: ``audit_failed`` when the outcome append failed, kept so a signal delivered as the
         #: append returns does not lose it.
         self.finish_error: ForgectlError | None = None
+        #: ids proven before the outcome is known; the ``outcome_unknown`` that ``__exit__``
+        #: records (a signal, or a bug) carries them.
+        self.unknown_ids: list[str] = []
 
     @property
     def finished(self) -> bool:
@@ -382,7 +385,7 @@ class Attempt:
         if self._finished:
             return False
         try:
-            self.finish("outcome_unknown")
+            self.finish("outcome_unknown", ids=self.unknown_ids)
         except SignalExit as late:  # held during the append, it replaces the one in flight
             late.write_attempted = True
             if self.finish_error is not None:  # the append failed: audit_failed carries it
