@@ -883,6 +883,8 @@ class ReviewRun:
                     if f"gl:d:{f.discussion}" not in threads:
                         threads.append(f"gl:d:{f.discussion}")
                 done.thread_ids = threads
+                if self._attempt_record is not None:  # a signal from here on keeps the ids
+                    self._attempt_record.unknown_ids = list(done.ids)
                 if any(f is None for f in per_body):  # a sent body that did not come back intact
                     done.result = "quick_action_ran"
                     done.error = ForgectlError(

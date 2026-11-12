@@ -727,3 +727,61 @@ def test_the_endpoints_are_paths_the_fake_knows(gl: Gl) -> None:
     """A guard on the helper itself: the draft regexes do not shadow each other."""
     assert re.match(rf"^{re.escape(DRAFTS)}(\?|$)", DRAFTS + "?page=1")
     assert not re.match(rf"^{re.escape(DRAFTS)}(\?|$)", PUBLISH)
+
+
+# -- the failure paths shared with GitHub's -----------------------------------------------------
+
+
+def test_an_unexpected_error_after_the_publish_is_outcome_unknown_with_the_audit_closed(
+    gl: Gl, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    happy(gl)
+    from forgectl.backends.gitlab_review import GitLabReviewer
+
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("a bug")
+
+    monkeypatch.setattr(GitLabReviewer, "read_back", boom)
+    done = gl.run()
+    assert done.code == 12 and done.error["code"] == "outcome_unknown"
+    assert [r["result"] for r in gl.audit()] == ["attempted", "outcome_unknown"]
+    assert PUBLISH in gl.endpoints("POST")
+
+
+def test_a_draft_answer_with_other_text_is_not_believed(gl: Gl) -> None:
+    gl.input({"event": "comment", "comments": [inline()]})
+    gl.forges.answer(
+        "glab",
+        DRAFTS,
+        method="POST",
+        status=201,
+        body={"id": 51, "author_id": ME, "note": "something else"},
+    )
+    gl.drafts(
+        [], [draft(51, note="use c here", position={"new_path": "src/app.py", "new_line": 2})]
+    )
+    gl.deleted(51)
+    done = gl.run()
+    assert done.code == 12 and done.error["code"] == "host_rejected"
+    assert gl.endpoints("DELETE") == [f"{DRAFTS}/51"]
+    assert PUBLISH not in gl.endpoints("POST")
+
+
+def test_a_pre_post_hook_runs_and_the_review_still_posts_after_the_reread(gl: Gl) -> None:
+    gl.base.config.write_text(
+        gl.base.config.read_text("utf-8") + 'hooks:\n  pre-post:\n    - cmd: "exit 0"\n', "utf-8"
+    )
+    happy(gl)
+    done = gl.run()
+    assert done.code == 0, done.err
+    assert gl.endpoints("POST").count(PUBLISH) == 1
+
+
+def test_a_pre_post_hook_veto_writes_nothing(gl: Gl) -> None:
+    gl.base.config.write_text(
+        gl.base.config.read_text("utf-8") + 'hooks:\n  pre-post:\n    - cmd: "exit 11"\n', "utf-8"
+    )
+    happy(gl)
+    done = gl.run()
+    assert done.code == 11
+    assert gl.writes() == [] and gl.audit() == []

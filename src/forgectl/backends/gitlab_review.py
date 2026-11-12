@@ -129,7 +129,17 @@ class GitLabReviewer:
             shape="object",
             expect_status=CREATED,
         )
-        return created_id(response.data, "draft_notes")
+        ident = created_id(response.data, "draft_notes")
+        # live-unverified: #34: the answer echoes the text sent; an answer that names other text is
+        # not the answer to this write (absent is accepted)
+        stored = response.data.get("note")
+        if stored is not None and not (isinstance(stored, str) and same_text(note, stored)):
+            raise ForgectlError(
+                "wrong_host_response",
+                "draft_notes: the answer holds other text than was sent",
+                details={"observed": "another draft text"},
+            )
+        return ident
 
     def delete_draft(self, pr: m.PR, draft_id: int) -> None:
         target, base = self._base(pr)
@@ -236,7 +246,9 @@ class GitLabReviewer:
         # live-unverified: #34: the approvals object names the MR's iid; absent is accepted
         if "iid" in data and str(data.get("iid")) != base[-1]:
             raise ForgectlError(
-                "wrong_host_response", "approve: the answer belongs to another merge request"
+                "wrong_host_response",
+                "approve: the answer belongs to another merge request",
+                details={"observed": "another merge request"},
             )
 
 
