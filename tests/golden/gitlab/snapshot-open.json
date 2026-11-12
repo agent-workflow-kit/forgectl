@@ -109,6 +109,7 @@
     "reset_at": null
   },
   "repo": "gitlab.com/user-9/proj",
+  "repo_id": "gid://gitlab/Project/101",
   "review_decision": "approved",
   "review_requests": [
     {

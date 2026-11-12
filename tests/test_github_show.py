@@ -1231,6 +1231,24 @@ def test_a_renamed_repository_on_the_same_host_is_accepted_with_its_canonical_pa
     assert pr.pr == "github.com/user-7/renamed-repo#7"
     assert pr.url == "https://github.com/user-7/renamed-repo/pull/7"
     assert pr.pr_id == "PR_kwDOexample0007"
+    assert pr.repo_id == "R_kgDOexample7"  # the id is what survives the rename
+
+
+@pytest.mark.parametrize("bad", [None, 7, "a b", "R" * 129, ""])
+def test_a_repository_id_that_is_not_a_node_id_is_malformed(
+    make: Callable[..., Harness], bad: Any
+) -> None:
+    def change(_: dict[str, Any], repo: dict[str, Any]) -> None:
+        repo["id"] = bad
+
+    assert failure(make, mutated(change)).code == "upstream_error"
+
+
+def test_a_missing_repository_id_is_malformed(make: Callable[..., Harness]) -> None:
+    def change(_: dict[str, Any], repo: dict[str, Any]) -> None:
+        del repo["id"]
+
+    assert failure(make, mutated(change)).code == "upstream_error"
 
 
 def test_another_pull_request_number_is_malformed(make: Callable[..., Harness]) -> None:

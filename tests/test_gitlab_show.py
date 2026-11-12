@@ -188,6 +188,7 @@ def test_a_renamed_project_is_read_through_its_old_path_and_reported_canonically
     assert read.pr.pr == "gitlab.com/user-9/proj#7"
     assert read.pr.repo == "gitlab.com/user-9/proj"
     assert read.pr.pr_id == "gid://gitlab/MergeRequest/90001"  # stable across renames
+    assert read.pr.repo_id == "gid://gitlab/Project/101"
 
 
 def test_an_answer_from_another_host_is_wrong_host_response(

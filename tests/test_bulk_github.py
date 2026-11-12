@@ -571,14 +571,16 @@ def test_an_absent_pr_field_gives_the_pr_up_but_a_null_author_is_fine(
     assert field in got.unresolved[REF].message
 
 
-def test_an_absent_repository_field_gives_the_pr_up(fake_forges: FakeForges) -> None:
+@pytest.mark.parametrize("field", ["mergeCommitAllowed", "id"])
+def test_an_absent_repository_field_gives_the_pr_up(fake_forges: FakeForges, field: str) -> None:
     def answer(request: dict[str, Any]) -> Any:
         doc = bulk_answer(7)
-        del doc["data"]["p0"]["mergeCommitAllowed"]
+        del doc["data"]["p0"][field]
         return doc
 
     got = read_bulk(rig(fake_forges, BulkRouter(answer)).env, "github.com", [REF], now=lambda: NOW)
     assert got.snapshots == {} and got.unresolved[REF].code == BULK_UNAVAILABLE
+    assert f"lacks: {field}" in got.unresolved[REF].message
 
 
 def test_a_null_author_is_a_ghost_and_still_read(fake_forges: FakeForges) -> None:

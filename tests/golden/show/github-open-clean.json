@@ -51,6 +51,7 @@
   "pr": "github.com/user-7/example-repo#7",
   "pr_id": "PR_kwDOexample0007",
   "repo": "github.com/user-7/example-repo",
+  "repo_id": "R_kgDOexample7",
   "review_decision": "approved",
   "state": "open",
   "title": "Add the widget parser",

@@ -46,6 +46,7 @@ from .github import (
     _opt_obj,
     _Pages,
     _project,
+    _repo_node_id,
     _req_sha,
     _req_ts,
     _str,
@@ -74,6 +75,7 @@ query ForgectlPrs($q: String!, $first: Int!, $after: String) {
         title
         state
         isDraft
+        createdAt
         updatedAt
         author { ...ActorFields }
         labels(first: 100) {
@@ -85,7 +87,7 @@ query ForgectlPrs($q: String!, $first: Int!, $after: String) {
         baseRefName
         headRepository { nameWithOwner }
         isCrossRepository
-        repository { nameWithOwner }
+        repository { id nameWithOwner }
       }
     }
   }
@@ -262,7 +264,9 @@ def _item(env: ReadEnv, target: Target, node: dict[str, Any], *, more: bool) -> 
             is_fork=_opt_bool(node.get("isCrossRepository")) if head_path is not None else None,
         ),
         base_ref=sanitize_line(_str(node.get("baseRefName"), "the base branch")),
+        created_at=_req_ts(node.get("createdAt"), "the creation time"),
         updated_at=_req_ts(node.get("updatedAt"), "the update time"),
+        repo_id=_repo_node_id(repository.get("id")),
     )
 
 

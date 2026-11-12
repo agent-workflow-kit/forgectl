@@ -546,6 +546,7 @@ class _Run:
         pr = m.PR(
             pr=f"{host_path}#{number}",
             repo=host_path,
+            repo_id=gl._project_gid(project_id),
             pr_id=f"gid://gitlab/MergeRequest/{mr_id}",
             number=number,
             url=f"https://{target.host}{target.api_prefix}/{canonical}/-/merge_requests/{number}",
