@@ -978,6 +978,16 @@ def test_compare_and_access_refuse_inconsistent_shapes() -> None:
         m.AccessResult("github.com/o/r", "bob", None, None, "project_member", None)
 
 
+def test_compare_without_a_diff_has_no_diff_key_and_validates() -> None:
+    p = "github.com/o/r#7"
+    for status in ("ahead", "behind", "diverged", "identical", "unavailable"):
+        out = m.CompareResult(p, OLD, H, status, None, omit_diff=True).to_dict()  # type: ignore[arg-type]
+        assert "diff" not in out
+        validate(out, "forgectl/cli/compare.json")
+    with pytest.raises(ValueError):
+        m.CompareResult(p, OLD, H, "ahead", "d", omit_diff=True)
+
+
 def test_renamed_file_needs_previous_path() -> None:
     with pytest.raises(ValueError):
         m.FileChange("b", None, "renamed", 0, 0)

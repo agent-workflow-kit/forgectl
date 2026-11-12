@@ -1142,9 +1142,13 @@ class CompareResult:
     to_sha: str
     status: CompareStatus
     diff: str | None
+    omit_diff: bool = False  # `compare --no-diff` (#44): the `diff` key is left out of the output
 
     def __post_init__(self) -> None:
-        if self.status in ("behind", "diverged", "unavailable"):
+        if self.omit_diff:
+            if self.diff is not None:
+                raise ValueError("a compare without a diff has no diff text")
+        elif self.status in ("behind", "diverged", "unavailable"):
             if self.diff is not None:
                 raise ValueError(f"compare status {self.status!r} has no diff")
         elif self.diff is None:
@@ -1153,13 +1157,15 @@ class CompareResult:
             raise ValueError("an identical compare has an empty diff")
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "pr": self.pr,
             "from_sha": self.from_sha,
             "to_sha": self.to_sha,
             "status": self.status,
-            "diff": self.diff,
         }
+        if not self.omit_diff:
+            out["diff"] = self.diff
+        return out
 
 
 @dataclass(frozen=True, slots=True)

@@ -58,6 +58,7 @@ HANDLER_MODULES: tuple[str, ...] = (
     "forgectl.poll",  # poll (#118)
     "forgectl.post",  # comment, reply (#24)
     "forgectl.review",  # review on GitHub (#26)
+    "forgectl.resolve",  # resolve, unresolve (#29)
 )
 
 _loaded = False

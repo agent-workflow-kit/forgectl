@@ -769,6 +769,60 @@ def test_compare_asks_both_ways_in_the_target_project(fake: FakeGitLab, tmp_path
     ]
 
 
+def test_no_diff_ahead_has_no_diff_key_and_parses_no_entry(
+    fake: FakeGitLab, tmp_path: Path
+) -> None:
+    # entries that make the diff `too_large` (a cut file) or malformed are never looked at
+    forward = cmp_doc("2", ["2"], [entry("a", "", too_large=True), "not an entry"])
+    backend = setup(fake, tmp_path)
+    compare_routes(fake, forward, cmp_doc("1", []))
+    result = backend.compare(ref(), FROM, TO, no_diff=True)
+    assert result.status == "ahead"
+    assert "diff" not in result.to_dict()
+
+
+def test_no_diff_ahead_at_the_file_cap_is_still_ahead(fake: FakeGitLab, tmp_path: Path) -> None:
+    forward = cmp_doc("2", ["2"], [entry(f"f{i}") for i in range(gd.COMPARE_FILE_CAP)])
+    backend = setup(fake, tmp_path)
+    compare_routes(fake, forward, cmp_doc("1", []))
+    assert backend.compare(ref(), FROM, TO, no_diff=True).status == "ahead"
+
+
+@pytest.mark.parametrize(
+    "forward,backward,status",
+    [
+        (cmp_doc("2", []), cmp_doc("1", ["1"]), "behind"),
+        (cmp_doc("2", ["2"]), cmp_doc("1", ["1"]), "diverged"),
+        (
+            cmp_doc("2", [], compare_same_ref=True),
+            {**cmp_doc("2", [], compare_same_ref=True), "commit": None},
+            "identical",
+        ),
+    ],
+)
+def test_no_diff_keeps_the_other_statuses(
+    fake: FakeGitLab, tmp_path: Path, forward: Any, backward: Any, status: str
+) -> None:
+    backend = setup(fake, tmp_path)
+    compare_routes(fake, forward, backward)
+    result = backend.compare(ref(), FROM, TO, no_diff=True)
+    assert result.status == status
+    assert "diff" not in result.to_dict()
+
+
+def test_no_diff_still_refuses_a_timed_out_comparison(fake: FakeGitLab, tmp_path: Path) -> None:
+    backend = setup(fake, tmp_path)
+    compare_routes(fake, cmp_doc("2", ["2"], compare_timeout=True), cmp_doc("1", []))
+    error = raises(lambda: backend.compare(ref(), FROM, TO, no_diff=True))
+    assert (error.code, error.reason) == ("refused", "too_large")
+
+
+def test_no_diff_with_the_same_sha_is_identical(fake: FakeGitLab, tmp_path: Path) -> None:
+    result = setup(fake, tmp_path).compare(ref(), FROM, FROM, no_diff=True)
+    assert (result.status, "diff" in result.to_dict()) == ("identical", False)
+    assert fake.count(COMPARE) == 0
+
+
 def test_compare_behind(fake: FakeGitLab, tmp_path: Path) -> None:
     result = compare(fake, tmp_path, cmp_doc("2", []), cmp_doc("1", ["1"]))
     assert (result.status, result.diff) == ("behind", None)

@@ -288,3 +288,89 @@ def safe_style(style: object) -> bool:
             return False
         i += 1
     return bool(words)
+
+
+class MergeSource(FakeSource):
+    """A ``FakeSource`` that can merge: ``merge`` records its call and answers from ``script``,
+    a list of answers (a dict, or an exception to raise) taken in order, the last one repeating.
+    ``gate``, when set, blocks the real write (not the dry run) until it is released."""
+
+    def __init__(self, *, script: list[Any] | None = None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.script: list[Any] = list(script or [])
+        self.merges: list[dict[str, Any]] = []
+        self.gate: threading.Event | None = None
+        self.in_write = threading.Event()
+        self.dry_gate: threading.Event | None = None  # blocks the dry run until released
+        self.in_dry_run = threading.Event()
+        self.unavailable: str | None = None  # what ``merge_unavailable`` answers
+
+    def merge_unavailable(self) -> str | None:
+        return self.unavailable
+
+    def merge(
+        self,
+        pr: str,
+        *,
+        head: str,
+        base: str,
+        method: str | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        call = {"pr": pr, "head": head, "base": base, "method": method, "dry_run": dry_run}
+        self.merges.append(call)
+        self.calls.append(("merge", call))
+        if dry_run:
+            self.in_dry_run.set()
+            if self.dry_gate is not None:
+                self.dry_gate.wait(10.0)
+        if not dry_run:
+            self.in_write.set()
+            if self.gate is not None:
+                self.gate.wait(10.0)
+        answer = self.script[min(len(self.merges), len(self.script)) - 1] if self.script else None
+        if isinstance(answer, BaseException):
+            raise answer
+        if answer is not None:
+            return copy.deepcopy(answer)
+        return merge_plan(pr, head, base, method) if dry_run else merge_done(pr, method)
+
+
+def merge_plan(
+    pr: str, head: str, base: str, method: str | None, *, blocked: list[Any] | None = None
+) -> dict[str, Any]:
+    method = method or "squash"
+    return {
+        "pr": pr,
+        "merged": False,
+        "already_merged": False,
+        "auto_merge_enabled": False,
+        "merged_head_sha": None,
+        "merge_commit_sha": None,
+        "method": method,
+        "dry_run": True,
+        "would_refuse": None,
+        "plan": {
+            "head_sha": head,
+            "expected_head": head,
+            "expected_base": base,
+            "base_ref": base,
+            "auto": False,
+            "override_blocks": False,
+            "blocked_by": blocked or [],
+            "method": method,
+        },
+    }
+
+
+def merge_done(pr: str, method: str | None) -> dict[str, Any]:
+    return {
+        "pr": pr,
+        "merged": True,
+        "already_merged": False,
+        "auto_merge_enabled": False,
+        "merged_head_sha": SHA_A,
+        "merge_commit_sha": "c" * 40,
+        "method": method or "squash",
+        "dry_run": False,
+    }

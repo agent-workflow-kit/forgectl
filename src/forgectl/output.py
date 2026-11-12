@@ -104,6 +104,7 @@ def would_refuse_result(command: str, args: Namespace, err: ForgectlError) -> di
             "action": command,
             "thread_id": sanitize_line(str(args.thread)),
             "resolved": None,
+            "changed": False,
             "dry_run": True,
             "would_refuse": refusal,
         }

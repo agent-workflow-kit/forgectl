@@ -1484,7 +1484,8 @@ class Gateway:
         # A redirected write (a 301/302/303 the CLIs followed as a body-less GET) is caught by the
         # endpoint's documented status and proof, never by this call: the text posts check the
         # 201 and an integer id (backends/post_base.py ``created_id``), merge by step 9's re-read.
-        # TODO(#29): PUT discussions must match the requested ``resolved``.
+        # ``resolve`` and ``unresolve`` check their PUT and mutation answers for the requested state
+        # (backends/gitlab_resolve.py, backends/github_resolve.py).
         # TODO(#27): DELETE draft notes and bulk_publish by read-back.
         with private_dirs(self.environ, config=target.token is not None) as dirs:
             env = build_environment(self.environ, dirs=dirs, backend=target.backend, target=target)
