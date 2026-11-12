@@ -54,8 +54,12 @@ def _tty() -> Tty:
 
 def _run(args: Namespace, tty: Tty) -> dict[str, Any] | RecordStream:
     command: str = args.command
+    # A run starts from the default log limits, not those of an earlier run in this process.
+    jsonlog.set_rotation(jsonlog.Rotation())
     # Config first: a bad config or FORGECTL_* value ends the run before any command logic.
     loaded = load_config(getattr(args, "config", None), env=os.environ)
+    log = loaded.config.log
+    jsonlog.set_rotation(jsonlog.Rotation(max_bytes=log.max_bytes, keep=log.keep))
     # The closed host list: an undeclared host exits 20 here, before any handler or process.
     bind_args(args, loaded.config)
     timeout = loaded.timeout_for(getattr(args, "timeout", None))
