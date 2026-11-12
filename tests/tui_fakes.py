@@ -301,6 +301,12 @@ class MergeSource(FakeSource):
         self.merges: list[dict[str, Any]] = []
         self.gate: threading.Event | None = None
         self.in_write = threading.Event()
+        self.dry_gate: threading.Event | None = None  # blocks the dry run until released
+        self.in_dry_run = threading.Event()
+        self.unavailable: str | None = None  # what ``merge_unavailable`` answers
+
+    def merge_unavailable(self) -> str | None:
+        return self.unavailable
 
     def merge(
         self,
@@ -314,6 +320,10 @@ class MergeSource(FakeSource):
         call = {"pr": pr, "head": head, "base": base, "method": method, "dry_run": dry_run}
         self.merges.append(call)
         self.calls.append(("merge", call))
+        if dry_run:
+            self.in_dry_run.set()
+            if self.dry_gate is not None:
+                self.dry_gate.wait(10.0)
         if not dry_run:
             self.in_write.set()
             if self.gate is not None:

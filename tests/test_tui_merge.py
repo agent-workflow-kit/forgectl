@@ -366,27 +366,190 @@ def test_hostile_forge_text_in_the_dialog_is_plain() -> None:
     assert src.merges[0]["base"] == base
 
 
-def test_quit_waits_for_a_merge_in_flight() -> None:
+async def wait_for(event: threading.Event, pilot: Pilot[None]) -> None:
+    for _ in range(100):
+        if event.is_set():
+            return
+        await pilot.pause(0.02)
+    raise AssertionError("the call never started")
+
+
+@pytest.mark.parametrize("key", ["q", "ctrl+q"])
+def test_every_quit_path_waits_for_a_write_in_flight(key: str) -> None:
     src = source()
     src.gate = threading.Event()
 
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
         await press_m(app, pilot)
         await pilot.press("y")
-        for _ in range(100):  # the write has started on its worker thread
-            if src.in_write.is_set():
-                break
-            await pilot.pause(0.02)
-        assert src.in_write.is_set()
-        await pilot.press("q")
+        await wait_for(src.in_write, pilot)  # the write has started on its worker thread
+        await pilot.press(key)
         await pilot.pause()
         assert app.is_running
         assert "merge is in progress" in status(app)
+        app.exit()  # an explicit exit() is refused the same way
+        await pilot.pause()
+        assert app.is_running
         src.gate.set()  # type: ignore[union-attr]
         await settle(app, pilot)
         assert f"merged {PR1}" in status(app)
 
     assert drive(src, script).result()["merged"] == [PR1]
+
+
+def test_q_during_the_dry_run_check_quits() -> None:
+    src = source()
+    src.dry_gate = threading.Event()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("m")
+        await wait_for(src.in_dry_run, pilot)
+        await pilot.press("q")
+        await pilot.pause()
+        assert not app.is_running
+        src.dry_gate.set()  # type: ignore[union-attr]
+
+    drive(src, script)
+    assert writes(src) == []
+
+
+def test_q_while_the_dialog_is_open_is_not_refused_as_a_write() -> None:
+    src = source()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await press_m(app, pilot)
+        assert isinstance(app.screen, MergeScreen)
+        assert app._merging and not app._writing
+        app.action_quit_app()
+        await pilot.pause()
+        assert "merge is in progress" not in status(app)
+        assert not app.is_running
+
+    drive(src, script)
+    assert writes(src) == []
+
+
+def test_m_during_a_merge_in_flight_is_refused() -> None:
+    src = source()
+    src.gate = threading.Event()
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await press_m(app, pilot)
+        await pilot.press("y")
+        await wait_for(src.in_write, pilot)
+        await pilot.press("m")
+        await pilot.pause()
+        assert "a merge is already in progress" in status(app)
+        src.gate.set()  # type: ignore[union-attr]
+        await settle(app, pilot)
+        assert len(src.merges) == 2  # one dry run and one write, no second check
+
+    drive(src, script)
+
+
+def test_a_second_dry_run_after_a_method_pick_is_refused() -> None:
+    needed = ForgectlError("method_required", "name a method", details={"allowed": ["squash"]})
+    src = source([needed, needed])
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await press_m(app, pilot)
+        await pilot.press("1")
+        await pilot.press("y")
+        await settle(app, pilot)
+        assert "method_required" in status(app)
+        assert len(src.merges) == 2 and writes(src) == []
+        assert not app._merging
+
+    drive(src, script)
+
+
+def test_merging_is_reset_after_an_internal_exception_and_m_works_again() -> None:
+    src = source([RuntimeError("boom with forge text")])
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await press_m(app, pilot)
+        await settle(app, pilot)
+        assert "merge internal: RuntimeError" in status(app)
+        assert "forge text" not in status(app)
+        assert not app._merging and not app._writing
+        src.script = []
+        await press_m(app, pilot)
+        assert isinstance(app.screen, MergeScreen)
+        await pilot.press("escape")
+        await settle(app, pilot)
+
+    drive(src, script)
+
+
+def test_an_exception_after_the_write_started_says_the_outcome_is_not_known() -> None:
+    src = source([None, RuntimeError("boom")])
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await press_m(app, pilot)
+        await pilot.press("y")
+        await settle(app, pilot)
+        assert "merge internal: RuntimeError" in status(app)
+        assert "outcome is not known, read the PR again" in status(app)
+
+    assert drive(src, script).result()["merged"] == []
+
+
+def test_an_exception_before_the_write_does_not_claim_an_unknown_outcome() -> None:
+    src = source([RuntimeError("boom")])
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await press_m(app, pilot)
+        await settle(app, pilot)
+        assert "not known" not in status(app)
+
+    drive(src, script)
+
+
+def test_m_during_the_re_read_is_refused() -> None:
+    gate = threading.Event()
+    reading = threading.Event()
+
+    class Slow(MergeSource):
+        def snapshot(self, pr: str) -> dict[str, Any]:
+            if self.in_write.is_set():  # the re-read after the write
+                reading.set()
+                gate.wait(10.0)
+            return super().snapshot(pr)
+
+    src = Slow(
+        authored=[make_item(1, title="Mine")],
+        requested=[],
+        snapshots={PR1: make_snapshot(1, title="Mine"), PR2: make_snapshot(2)},
+    )
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await press_m(app, pilot)
+        await pilot.press("y")
+        await wait_for(reading, pilot)
+        assert app._merging and not app._writing
+        await pilot.press("m")
+        await pilot.pause()
+        assert "a merge is already in progress" in status(app)
+        gate.set()
+        await settle(app, pilot)
+        assert not app._merging
+
+    drive(src, script)
+    assert len(src.merges) == 2
+
+
+def test_no_terminal_refuses_m_before_any_call() -> None:
+    src = source()
+    src.unavailable = "merge needs a terminal on stdin and stderr"
+
+    async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
+        await pilot.press("m")
+        await pilot.pause()
+        assert "merge needs a terminal on stdin and stderr" in status(app)
+        assert not app._merging
+
+    drive(src, script)
+    assert src.merges == []
 
 
 def test_the_result_stays_on_the_status_line_until_the_next_key() -> None:

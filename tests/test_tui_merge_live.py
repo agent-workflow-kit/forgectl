@@ -9,6 +9,7 @@ import pytest
 
 from forgectl import registry
 from forgectl.errors import ForgectlError
+from forgectl.humanactions import Tty
 from forgectl.tui.source_live import LiveSource, in_process_merge_runner
 
 from .harness import schemas
@@ -29,7 +30,7 @@ def rig(
 
 def source(rig: Rig) -> LiveSource:
     path = rig.config("me:\n  name: tester\n")
-    return LiveSource(config_path=str(path))
+    return LiveSource(config_path=str(path), tty=lambda: Tty(stdin=True, stderr=True))
 
 
 def test_a_merge_goes_through_the_command_as_a_human_on_a_tty(rig: Rig) -> None:
@@ -135,3 +136,41 @@ def test_the_read_runner_still_refuses_merge() -> None:
     with pytest.raises(ForgectlError) as caught:
         in_process_runner(None, {})(["merge", PR, "--yes"])
     assert caught.value.code == "internal"
+
+
+def test_a_dry_run_logs_command_done_like_the_command_line(rig: Rig) -> None:
+    """`cli._dispatch` logs `command_done` at info for every successful write command, a dry run
+    included (`_success_level`): the runner does the same."""
+    from forgectl import cli
+
+    assert cli._success_level("merge", verbose=False) == "info"
+    rig.reads(doc())
+    source(rig).merge(PR, head=HEAD, base=BASE, method="squash", dry_run=True)
+    done = [r for r in rig.log() if r["event"] == "command_done"]
+    assert [(r["level"], (r["details"] or {}).get("command")) for r in done] == [("info", "merge")]
+
+
+@pytest.mark.parametrize("tty", [Tty(False, True), Tty(True, False), Tty(False, False)])
+def test_without_a_terminal_on_stdin_and_stderr_merge_is_refused_before_any_call(
+    rig: Rig, tty: Tty
+) -> None:
+    path = rig.config("me:\n  name: tester\n")
+    src = LiveSource(config_path=str(path), tty=lambda: tty)
+    assert src.merge_unavailable() == "merge needs a terminal on stdin and stderr"
+    rig.reads(doc())
+    rig.put()
+    with pytest.raises(ForgectlError):
+        src.merge(PR, head=HEAD, base=BASE, method="squash")
+    assert rig.puts() == [] and rig.audit() == [] and rig.calls() == []
+
+
+def test_with_a_terminal_merge_is_available(rig: Rig) -> None:
+    assert source(rig).merge_unavailable() is None
+
+
+def test_the_real_terminal_is_the_default_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: False, raising=False)
+    assert LiveSource(lambda argv: {}, merge_runner=lambda argv: {}).merge_unavailable() is not None

@@ -44,6 +44,7 @@ from __future__ import annotations
 import contextlib
 import os
 import signal
+import sys
 import threading
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
@@ -141,16 +142,36 @@ def in_process_runner(
     return run
 
 
+NO_TERMINAL = "merge needs a terminal on stdin and stderr"
+
+
+def real_tty() -> Tty:
+    """The terminal state of this process: whether stdin and stderr are terminals."""
+
+    def isatty(stream: Any) -> bool:
+        try:
+            return bool(stream.isatty())
+        except (AttributeError, ValueError):  # no such method, or a closed stream
+            return False
+
+    return Tty(stdin=isatty(sys.stdin), stderr=isatty(sys.stderr))
+
+
 def in_process_merge_runner(
     config_path: str | None = None,
     environ: Mapping[str, str] | None = None,
     timeout: float | None = None,
+    tty: Callable[[], Tty] | None = None,
 ) -> Runner:
-    """A runner for the ``merge`` command only, mirroring ``cli._run`` for a write: config, the
-    closed host list, the human-action gate with a terminal on stdin and stderr (so the actor is
-    ``human:<me.name>`` with ``actor_source: tty``), then the registered handler. ``browse`` always
-    passes ``--yes`` with ``--expected-head`` and ``--expected-base`` after its own dialog, so the
-    command line dialog never runs and a stale PR is refused by the command itself."""
+    """A runner for the ``merge`` command only, mirroring ``cli._dispatch`` and ``cli._run`` for a
+    write: config, the closed host list, the human-action gate with the real terminal state of
+    stdin and stderr (``tty``, injectable for tests), then the registered handler, then
+    ``command_done`` at info for every success, a dry run included, as ``cli._success_level`` does
+    for a write command. A run without a terminal on both is refused before anything is read or
+    written, so the audit never claims ``actor_source: tty`` for a process that has none.
+    ``browse`` always passes ``--yes`` with ``--expected-head`` and ``--expected-base`` after its
+    own dialog, so the command line dialog never runs and a stale PR is refused by the command
+    itself."""
 
     def run(argv: list[str]) -> dict[str, Any]:
         args: Namespace | None = None
@@ -158,13 +179,14 @@ def in_process_merge_runner(
             args = parse(argv)
             if args.command != "merge":
                 raise ForgectlError("internal", f"{args.command}: not the merge command")
+            terminal = (tty or real_tty)()
+            if not (terminal.stdin and terminal.stderr):
+                raise ForgectlError("usage", NO_TERMINAL)
             registry.load_handlers()
             with _LOAD_LOCK:
                 cfg = load_config(config_path, env=environ if environ is not None else os.environ)
             bind_args(args, cfg.config)
-            human = build_context(
-                args, Tty(stdin=True, stderr=True), me_name=cfg.config.me.name or default_me_name()
-            )
+            human = build_context(args, terminal, me_name=cfg.config.me.name or default_me_name())
             handler = registry.HANDLERS.get("merge")
             if handler is None:
                 raise ForgectlError("internal", "merge: not implemented")
@@ -180,8 +202,7 @@ def in_process_merge_runner(
             )
             if not isinstance(out, dict):
                 raise ForgectlError("internal", "merge: the handler gave no object")
-            if not human.dry_run:
-                cli._log("info", "command_done", args, {"command": "merge"})
+            cli._log("info", "command_done", args, {"command": "merge"})
             return out
         except ForgectlError as err:
             _log_failure(err, args)
@@ -235,9 +256,13 @@ class LiveSource:
         config_path: str | None = None,
         timeout: float | None = None,
         merge_runner: Runner | None = None,
+        tty: Callable[[], Tty] | None = None,
     ) -> None:
         self._runner = runner or in_process_runner(config_path, timeout=timeout)
-        self._merge_runner = merge_runner or in_process_merge_runner(config_path, timeout=timeout)
+        self._tty = tty or real_tty
+        self._merge_runner = merge_runner or in_process_merge_runner(
+            config_path, timeout=timeout, tty=self._tty
+        )
         self._cond = threading.Condition()
         self._closed = False
         self._calls: list[_Call] = []
@@ -343,6 +368,12 @@ class LiveSource:
         if reason in HOST_STOPS:  # the code of the stop itself: a stopped host is not asked again
             raise HostStopped(reason, f"detail: the host stopped the bulk read ({reason})")
         raise ForgectlError("upstream_error", f"detail: the bulk read failed ({reason})")
+
+    def merge_unavailable(self) -> str | None:
+        """Why ``merge`` cannot run here (stdin or stderr is not a terminal), else None. The app
+        asks before it starts a merge, so nothing is called."""
+        terminal = self._tty()
+        return None if terminal.stdin and terminal.stderr else NO_TERMINAL
 
     def merge(
         self,

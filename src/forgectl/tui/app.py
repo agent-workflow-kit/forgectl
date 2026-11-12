@@ -51,6 +51,11 @@ PREFETCH_KEEP = 3  # a read ahead is cancelled when its row is further than this
 # The help is data, one logical line per entry; the widgets wrap it to the terminal width. Adding a
 # key is one new row here (and its Binding). A test compares these keys with BrowseApp.BINDINGS;
 # a binding whose Textual key name differs from its label needs a KEY_LABELS entry in that test.
+# Codes of a merge failure that prove no write happened, even after the real call started.
+NO_WRITE_CODES = frozenset(
+    {"refused", "vetoed", "escalated", "usage", "invalid_pr", "method_required"}
+)
+
 HELP_KEYS: list[tuple[str, str]] = [
     ("q", "quit"),
     ("?", "this help"),
@@ -73,8 +78,8 @@ HELP_KEYS: list[tuple[str, str]] = [
         "merge the PR in the detail pane, else the highlighted one: the merge command checks it "
         "first (a stale head or base, a blocker and an unresolved method are refused), a dialog "
         "shows the repo, number, head, base and method, and `y` merges; a PR with a blocker gets "
-        "no merge and no override (the status line names the CLI command); quit waits for a "
-        "merge in flight",
+        "no merge and no override (the status line names the CLI command); needs a terminal; "
+        "quit waits only while the write runs",
     ),
     ("left", "scroll the list sideways by one column (or h); the PR and note columns stay"),
     ("right", "scroll the list sideways by one column the other way (or l)"),
@@ -391,7 +396,8 @@ class BrowseApp(App[None]):
         self.intent = "back"
         self.selected: str | None = None
         self.merged: list[str] = []  # the PRs this session merged with `m`, in order
-        self._merging = False  # a merge (its check, dialog or write) is in progress
+        self._merging = False  # a merge (check, dialog, write and re-read) blocks a second `m`
+        self._writing = False  # the real merge call is in flight: the only time quitting waits
         self._merge_note: str | None = None  # the last merge result, kept until the next key
         self._rows: list[Row] = []
         self._visible: list[Row] = []
@@ -489,7 +495,12 @@ class BrowseApp(App[None]):
 
     def exit(self, *args: Any, **kwargs: Any) -> None:
         """`q`, ctrl+q and explicit exit() callers go through here: the timer stops first, so
-        no tick can start a worker once the app is shutting down."""
+        no tick can start a worker once the app is shutting down. While the real merge call is in
+        flight every quit path is refused (the call is not cut off half way); a check or an open
+        dialog does not hold the app."""
+        if self._writing:
+            self._status("a merge is in progress: wait for its result before quitting")
+            return
         if self.refresh_timer is not None:
             self.refresh_timer.stop()
             self.refresh_timer = None
@@ -1721,7 +1732,7 @@ class BrowseApp(App[None]):
     # -- actions --------------------------------------------------------------------------
 
     def action_quit_app(self) -> None:
-        if self._merging:  # quitting kills the host call: a merge is never cut off half way
+        if self._writing:  # quitting kills the host call: a merge write is never cut off half way
             self._status("a merge is in progress: wait for its result before quitting")
             return
         self._snap_token += 1  # reads that have not started yet are skipped
@@ -1847,6 +1858,11 @@ class BrowseApp(App[None]):
         if not callable(merge):
             self._status("not merged: this source cannot merge")
             return
+        unavailable = getattr(self.source, "merge_unavailable", None)
+        why = unavailable() if callable(unavailable) else None
+        if why:  # e.g. no terminal on stdin and stderr: asked before any call
+            self._status(f"not merged: {safe.line(why, 200)}")
+            return
         snap = self._snaps.get(pr)
         head = _text_at(snap, "head", "sha")
         base = _text_at(snap, "base", "ref")
@@ -1871,12 +1887,14 @@ class BrowseApp(App[None]):
         return f"not_ready: {codes}; no merge from here: run `forgectl merge {safe.line(pr)}`"
 
     @staticmethod
-    def _refusal(err: ForgectlError) -> str:
+    def _refusal(err: ForgectlError, *, wrote: bool = False) -> str:
         """A refusal or failure of the merge command, for the status line: its code (and
-        reason), then its message."""
+        reason), then its message. After the real call started, anything but a refusal that
+        proves nothing was written says the outcome is not known."""
         code = f"{err.code}/{err.reason}" if err.reason else err.code
         text = f"merge {safe.line(code, 60)}: {safe.line(err.message, 200)}"
-        if err.exit_code == 12:  # the write may have landed: the PR is read again, never assumed
+        # the write may have landed: the PR is read again, never assumed
+        if err.exit_code == 12 or (wrote and err.code not in NO_WRITE_CODES):
             text += "; the outcome is not known, read the PR again"
         return text
 
@@ -1917,11 +1935,14 @@ class BrowseApp(App[None]):
                 return
             final = plan.get("method") if isinstance(plan.get("method"), str) else None
             wrote = True
+            self._writing = True
             try:
                 out = await in_thread(self._merge_call, pr, head, base, final, False)
             except ForgectlError as err:
-                self._merge_result(self._refusal(err))
+                self._merge_result(self._refusal(err, wrote=True))
                 return
+            finally:
+                self._writing = False
             if out.get("merged") is True and not out.get("already_merged"):
                 if pr not in self.merged:
                     self.merged.append(pr)
@@ -1934,11 +1955,17 @@ class BrowseApp(App[None]):
         except Cancelled:
             return
         except Exception as exc:  # a source bug: the type only, never forge text
-            self._merge_result(f"merge {self._internal(exc)}")
+            text = f"merge {self._internal(exc)}"
+            if wrote:
+                text += "; the outcome is not known, read the PR again"
+            self._merge_result(text)
         finally:
-            self._merging = False
-            if wrote and self.is_running:
-                await self._reread(pr)  # whatever the outcome, the row shows what the host says
+            try:
+                if wrote and self.is_running:
+                    await self._reread(pr)  # whatever the outcome, the row shows the host's word
+            finally:
+                self._writing = False
+                self._merging = False  # only now: a second `m` waits for the re-read too
 
     def _merge_call(
         self, pr: str, head: str, base: str, method: str | None, dry_run: bool
