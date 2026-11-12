@@ -14,8 +14,11 @@ records exactly one outcome, then runs the ``post-merge`` hooks and exits. A sig
 outcome is recorded records ``outcome_unknown`` and exits 12 (``cli.py``), without hooks; a signal
 after it stops the remaining hooks and the run ends with the recorded outcome. Never 128+N.
 
-TODO(#23): ``--auto`` (the GitHub ``enablePullRequestAutoMerge`` mutation, GitLab's flags, the
-``already armed`` row, the ``--auto`` rows of the checks and the head-match availability step).
+``--auto`` (#23) is the same sequence with three additions: the head-match availability of step 2
+(``check_auto`` of the backend, before any read), the ``--auto`` rows of the checks (``draft``,
+``conflicts`` and ``checks_failing`` refuse; the others are what arming is for; an armed PR is a
+no-op) and an outcome of "armed" beside "merged" in step 9. GitHub merges at once when nothing
+blocks and otherwise arms; GitLab always sends its auto flag and its host decides which.
 GitLab (#22) is the same sequence: ``backends/gitlab_merge.py`` owns its write, and a backend may
 offer ``check_method`` (a refusal of a method the read shows it cannot get, applied with the other
 checks) and ``merged_method`` (the method that merged, where the host has none to send).
@@ -52,6 +55,8 @@ from .sanitize import sanitize_line
 #: The seconds slept before each verification read after the first (interface: 1 s, 2 s, 3 s,
 #: 4 s: up to 10 s). Tests replace ``_sleep``.
 VERIFY_DELAYS = (1.0, 2.0, 3.0, 4.0)
+#: What ``--auto`` refuses on (interface: Merge order, step 4): arming cannot help these.
+AUTO_REFUSES = frozenset({BlockerCode.DRAFT, BlockerCode.CONFLICTS, BlockerCode.CHECKS_FAILING})
 _MARKER = re.compile(r"<U\+[0-9A-F]{4,6}>")
 _sleep = time.sleep
 
@@ -81,6 +86,8 @@ class Verdict:
     already_merged: bool
     method: str | None
     blockers: tuple[Blocker, ...]  # what blocked a merge that --override-blocks overrides
+    armed: bool = False  # --auto and auto-merge is already armed: nothing is sent
+    arm: bool = False  # the write arms auto-merge (--auto, and not a plain merge on GitHub)
 
 
 def _dicts(blockers: tuple[Blocker, ...]) -> list[dict[str, str]]:
@@ -172,6 +179,7 @@ class MergeRun:
         self.backend: Backend = backend_for(ref, self.env)
         self.directory: Path = self._state_dir()
         self.escalated = False
+        self.arm = False  # set at the write: the call arms auto-merge
         self.decision_ids: list[str] = list(self.human.decision_ids)
         self._plan_fields: dict[str, Any] | None = None  # what a --dry-run refusal reports
 
@@ -234,12 +242,15 @@ class MergeRun:
         earlier: tuple[Blocker, ...] | None,
         method: str | None = None,
         resolved: bool = False,
+        plain: bool = False,
     ) -> Verdict:
         """The table of step 4. ``earlier`` is the blockers of the first run when this is the
         re-read of step 7: a blocker that was not there then refuses even under
         ``--override-blocks``. ``resolved`` is set on the re-read, where ``method`` is the first
         run's verdict: kept (a resolved ``None``, the host deciding, included), or refused if the
-        repo no longer allows it, never resolved again."""
+        repo no longer allows it, never resolved again. ``plain`` is set on that re-read when the
+        first run was a ``--auto`` that merges at once (GitHub, nothing blocking): arming is then
+        not what the human confirmed, so any new blocker refuses."""
         pr = read.pr
         # a --dry-run refusal reports what was read, and the caller's method until it resolves
         self._remember(read, self.args.method if not resolved else method)
@@ -250,11 +261,12 @@ class MergeRun:
         self._check_pin(pr)
         if pr.state == "merged":
             return Verdict(True, None, ())
-        if pr.merge_queue is not False and not self.human.is_human:
+        auto = bool(self.args.auto)
+        if pr.merge_queue is not False and (auto or not self.human.is_human):
             raise refused(
                 "no_head_match",
-                "a merge queue (or an unknown queue setting) needs a human: a non-human actor "
-                "cannot rely on the head check",
+                "a merge queue (or an unknown queue setting) needs a human and no --auto: a "
+                "non-human actor or an armed auto-merge cannot rely on the head check",
             )
         if not resolved:
             method = resolve_method(self.inv, pr)
@@ -265,14 +277,27 @@ class MergeRun:
             check(pr, method)
         blockers = self._effective_blockers(read)
         self._remember(read, method)
-        if blockers and not self.args.override_blocks:
+        if auto:
+            stopping = [b for b in blockers if b.code in AUTO_REFUSES]
+            if stopping:
+                raise refused(
+                    "not_ready",
+                    "the pull request cannot be armed: "
+                    + ", ".join(b.code.value for b in stopping),
+                    details={"blocked_by": _dicts(blockers)},
+                )
+        elif blockers and not self.args.override_blocks:
             raise refused(
                 "not_ready",
                 "the pull request is not ready: " + ", ".join(b.code.value for b in blockers),
                 details={"blocked_by": _dicts(blockers)},
             )
         if earlier is not None:
-            new = [b for b in blockers if b not in earlier]
+            new = [
+                b
+                for b in blockers
+                if b not in earlier and (not auto or plain or b.code in AUTO_REFUSES)
+            ]
             if new:
                 raise refused(
                     "not_ready",
@@ -280,7 +305,10 @@ class MergeRun:
                     + ", ".join(b.code.value for b in new),
                     details={"blocked_by": _dicts(blockers)},
                 )
-        return Verdict(False, method, blockers)
+        if auto and pr.auto_merge.enabled:
+            return Verdict(False, method, blockers, armed=True)
+        arm = auto and (pr.backend != "github" or bool(blockers))
+        return Verdict(False, method, blockers, arm=arm)
 
     def _check_pin(self, pr: PR) -> None:
         if pr.head.sha != self.expected_head:
@@ -300,9 +328,6 @@ class MergeRun:
 
     def run(self) -> dict[str, Any]:
         args = self.args
-        if args.auto:
-            # TODO(#23): --auto
-            raise ForgectlError("internal", "merge --auto: not implemented yet")
         if args.override_blocks and not self.human.is_human:  # the gate already refused it
             raise usage("--override-blocks is human-only")
         try:
@@ -315,6 +340,9 @@ class MergeRun:
             raise
 
     def _run(self) -> dict[str, Any]:
+        # step 2: can --auto keep the head match on this host? Before any read.
+        if self.args.auto:
+            self._check_auto_availability()
         # step 3: the audit file is checked before the PR is read
         audit.check_writable(self.directory)
         first = self._read()
@@ -323,6 +351,8 @@ class MergeRun:
         verdict = self._check(first, earlier=None)
         if verdict.already_merged:
             return self._already_merged_output(first.pr)
+        if verdict.armed:
+            return self._armed_output(first.pr, verdict)
         # step 5: confirmation. A dry run stops here; any other run without one is exit 13.
         dialog = require_confirmation(self.human)
         if self.human.dry_run:
@@ -332,6 +362,7 @@ class MergeRun:
         # step 6: pre-merge hooks (a veto or escalation raises). The method is fixed from here:
         # what the dialog showed and the hooks saw is what is written.
         method = verdict.method
+        first_verdict = verdict
         pre = hooks.run_pre_hooks(
             self.env.gateway,
             "pre-merge",
@@ -351,11 +382,33 @@ class MergeRun:
                 earlier=self._effective_blockers(first),
                 method=method,
                 resolved=True,
+                plain=bool(self.args.auto) and not first_verdict.arm,
             )
             if verdict.already_merged:
                 self._log("info", "already_merged", {"decision_ids": self.decision_ids})
                 return self._already_merged_output(current.pr)
+            if verdict.armed:
+                self._log("info", "already_armed", {"decision_ids": self.decision_ids})
+                return self._armed_output(current.pr, verdict)
         return self._write(current, verdict, method)
+
+    def _check_auto_availability(self) -> None:
+        """Step 2: the head-match availability of ``--auto``, which each host answers itself."""
+        check = getattr(self.backend, "check_auto", None)
+        if check is None:  # fail closed: a backend that cannot say keeps the head match unknown
+            raise ForgectlError("internal", "merge --auto: the backend has no head-match check")
+        try:
+            warnings = check(
+                self.ref,
+                head_given=self.expected_head is not None,
+                interactive=self.human.interactive,
+            )
+        except ForgectlError as err:
+            if err.exit_code == 20:  # a --dry-run reports the refusal with no read behind it
+                self._plan_fields = {}
+            raise
+        for text in warnings:
+            output.warn(text)
 
     def _pin(self, pr: PR) -> None:
         """An interactive run takes the first read's head and base as given, each only where its
@@ -369,6 +422,15 @@ class MergeRun:
 
     # -- step 5: the dialog --------------------------------------------------------------------
 
+    def _auto_lines(self, pr: PR, verdict: Verdict) -> list[str]:
+        if not self.args.auto:
+            return []
+        if pr.backend == "github" and verdict.arm:
+            return ["  auto:    arm auto-merge: any later head can merge"]
+        if pr.backend == "github":
+            return ["  auto:    nothing blocks: merge at once"]
+        return ["  auto:    arm auto-merge, or merge at once if the pipeline passed"]
+
     def _dialog(self, read: PrRead, verdict: Verdict) -> bool:
         pr = read.pr
         blockers = ", ".join(b.code.value for b in verdict.blockers) or "none"
@@ -378,6 +440,7 @@ class MergeRun:
             f"  head:    {pr.head.sha}",
             f"  base:    {pr.base.ref}",
             f"  method:  {verdict.method or 'the host decides'}",
+            *self._auto_lines(pr, verdict),
             f"  ci:      {ci}",
             f"  blocked: {blockers}",
         ]
@@ -401,7 +464,7 @@ class MergeRun:
             "head_sha": pr.head.sha,
             "actor": self.human.actor,
             "action": "merge",
-            "auto": False,
+            "auto": bool(self.args.auto),
             "method": method,
             "base_ref": pr.base.ref,
             "expected_head": self.sha,
@@ -430,8 +493,8 @@ class MergeRun:
         outcome: Outcome,
     ) -> None:
         # already merged by someone else: what merged is unknown
-        if outcome.already:
-            shown = None
+        if outcome.already or outcome.result == "auto_merge_enabled":
+            shown = None  # nothing merged by this run: the output reports no method either
         elif outcome.pr is not None:
             shown = self._reported(outcome.pr, method)  # what the output reports
         else:
@@ -460,6 +523,12 @@ class MergeRun:
 
     def _write(self, current: PrRead, verdict: Verdict, method: str | None) -> dict[str, Any]:
         pr = current.pr
+        self.arm = verdict.arm
+        if verdict.arm and pr.backend == "github":
+            output.warn(
+                "auto-merge will merge any later head of this pull request once its checks pass; "
+                "GitHub checks the head only when it is armed"
+            )
         overrides: list[str] = []
         if self.args.override_blocks and verdict.blockers:
             overrides.append("override_blocks")
@@ -538,7 +607,10 @@ class MergeRun:
 
     def _merge_and_verify(self, current: PrRead, method: str | None) -> Outcome:
         try:
-            answer = self.backend.merge(current.pr, sha=self.sha, method=method)
+            if self.arm:
+                answer = self.backend.merge(current.pr, sha=self.sha, method=method, auto=True)
+            else:
+                answer = self.backend.merge(current.pr, sha=self.sha, method=method)
         except ForgectlError as err:
             if err.code == "outcome_unknown":  # a 5xx, a timeout, a protocol failure: step 9
                 return self._verify(accepted=False, why=err)
@@ -547,6 +619,15 @@ class MergeRun:
             return self._verify(accepted=True, why=None)
         if answer.kind == "stale_head":
             return Outcome("failed", error=self._stale_head())
+        if answer.kind == "auto_unavailable":
+            return Outcome(
+                "failed",
+                error=refused(
+                    "auto_merge_unavailable",
+                    "the host will not arm auto-merge here: run merge without --auto",
+                    details={"observed": answer.message or "no reason given"},
+                ),
+            )
         if answer.kind == "locked":  # a 423: like a 5xx, only a read decides
             return self._verify(accepted=False, why=self._locked(answer))
         return self._after_405(answer)
@@ -645,6 +726,10 @@ class MergeRun:
                 return self._unexpected(pr)
             if pr.state == "closed":
                 break  # a closed PR does not merge later
+            if self.arm and pr.auto_merge.enabled:  # armed counts, at the head and base sent
+                if pr.head.sha == self.sha and base_matches(pr, self.base):
+                    return Outcome("auto_merge_enabled", pr=pr)
+                return self._armed_elsewhere(pr)
         if accepted:
             seen = "not seen" if last is None else f"{last.state}, head {last.head.sha}"
             return Outcome(
@@ -668,6 +753,17 @@ class MergeRun:
             ),
         )
 
+    def _armed_elsewhere(self, pr: PR) -> Outcome:
+        text = f"armed at head {pr.head.sha} on base {pr.base.ref}"
+        return Outcome(
+            "outcome_unknown",
+            error=ForgectlError(
+                "merge_unverified",
+                f"auto-merge is armed, but not at the expected head and base: {text}",
+                details={"observed": text, "head_sha": pr.head.sha},
+            ),
+        )
+
     def _unexpected(self, pr: PR) -> Outcome:
         observed = {"head_sha": pr.head.sha, "base_ref": pr.base.ref}
         text = f"merged at head {pr.head.sha} into base {pr.base.ref}"
@@ -687,6 +783,8 @@ class MergeRun:
     def _merged_output(self, outcome: Outcome, method: str | None) -> dict[str, Any]:
         pr = outcome.pr
         assert pr is not None
+        if outcome.result == "auto_merge_enabled":
+            return self._armed_result(dry=False)
         return {
             "pr": self.pr_id,
             "merged": True,
@@ -697,6 +795,30 @@ class MergeRun:
             "method": None if outcome.already else self._reported(pr, method),
             "dry_run": False,
         }
+
+    def _armed_result(self, *, dry: bool) -> dict[str, Any]:
+        """Armed, not merged: nothing merged yet, so no merged sha, merge commit or method."""
+        return {
+            "pr": self.pr_id,
+            "merged": False,
+            "already_merged": False,
+            "auto_merge_enabled": True,
+            "merged_head_sha": None,
+            "merge_commit_sha": None,
+            "method": None,
+            "dry_run": dry,
+        }
+
+    def _armed_output(self, pr: PR, verdict: Verdict) -> dict[str, Any]:
+        """``--auto`` and already armed (interface: step 4): exit 0, no host call, no audit
+        record, no hooks. A method is ignored, with a warning."""
+        if self.args.method is not None:
+            output.warn("auto-merge is already armed: the method named is ignored")
+        out = self._armed_result(dry=self.human.dry_run)
+        if self.human.dry_run:
+            out["would_refuse"] = None
+            out["plan"] = self._plan_for(pr, verdict.method, verdict.blockers)
+        return out
 
     def _reported(self, pr: PR, method: str | None) -> str | None:
         """What merged: the method sent, or what the backend derives from the merged PR where the
@@ -730,7 +852,7 @@ class MergeRun:
             if self.expected_base is None
             else sanitize_line(self.expected_base),
             "base_ref": pr.base.ref,
-            "auto": False,
+            "auto": bool(self.args.auto),
             "override_blocks": bool(self.args.override_blocks),
             "blocked_by": _dicts(blockers),
             "method": method,

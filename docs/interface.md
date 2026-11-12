@@ -392,7 +392,7 @@ Every `merge` follows one order:
    | `blocked_by` not empty, not `--auto`, no `--override-blocks` | exit 20, `not_ready`, `details.blocked_by` |
    | `--auto`, and `blocked_by` has `draft`, `conflicts` or `checks_failing` | exit 20, `not_ready` |
    | Non-human actor and `ci.state` not `passing` | exit 20, `not_ready`, `details.blocked_by`, including `{code: checks_absent}` when the state is `none` |
-   | `--auto` and already armed | exit 0, `auto_merge_enabled: true`, no host call, no audit record; a different method is ignored, with a warning |
+   | `--auto` and already armed | exit 0, `auto_merge_enabled: true`, no host call, no audit record, no hooks; a method named is ignored, with a warning (the armed method cannot be read back) |
 
 5. **Confirmation.** An interactive run gets a dialog on stderr with head, base, method, CI state (including "no checks on this head") and blockers; on a merge queue or train it warns. Not interactive and no `--yes`: exit 13 (`confirmation_required`). `--dry-run` stops here, prints the plan and needs neither.
 6. **`pre-merge` hooks** (veto 11, escalate 13).
@@ -625,7 +625,7 @@ The order and refusals are in [Merge order](#merge-order). `--expected-head` is 
 
 There is no flag for a merge message. Merge attribution is the audit record, plus a caller's own comment.
 
-Output: `{pr, merged, already_merged, auto_merge_enabled, merged_head_sha, merge_commit_sha, method, dry_run}`. `merged_head_sha` is the PR's own `merged_head_sha`, equal to the sha sent when this run merged; null while only armed.
+Output: `{pr, merged, already_merged, auto_merge_enabled, merged_head_sha, merge_commit_sha, method, dry_run}`. `merged_head_sha` is the PR's own `merged_head_sha`, equal to the sha sent when this run merged; null while only armed. An armed run reports `merged: false`, `auto_merge_enabled: true` and a null `method`; so does the `post-merge` payload (`result: auto_merge_enabled`). A dialog or hook that outlasts the state it saw refuses on a new blocker for a `--auto` that was to merge at once, and on a new `draft`, `conflicts` or `checks_failing` for one that was to arm.
 
 ### `review`
 
