@@ -534,7 +534,7 @@ With `--repo` or `--host` there is one target, so a failure uses the ordinary ex
 
 ### `show`
 
-`show <pr>`: the [PR object](#pr-object).
+`show <pr>`: the [PR object](#pr-object). Without `--json`, `body` prints as an indented [block](#human-output).
 
 ### `snapshot`
 
@@ -578,7 +578,7 @@ GitLab assembly (a contract `pr-comment` re-anchors against). Each file is one s
 
 ### `compare`
 
-`compare <pr> --from <sha> --to <sha>`: `{pr, from_sha, to_sha, status, diff}`, `status` being `ahead`, `behind`, `diverged`, `identical` or `unavailable` (a host no longer has it, or it is inaccessible). `diff` is the change from `from` to `to`: present on `ahead`, empty on `identical`, null on `behind`, `diverged` and `unavailable`. It is sanitized as for [`diff`](#diff). Shas only.
+`compare <pr> --from <sha> --to <sha>`: `{pr, from_sha, to_sha, status, diff}`, `status` being `ahead`, `behind`, `diverged`, `identical` or `unavailable` (a host no longer has it, or it is inaccessible). `diff` is the change from `from` to `to`: present on `ahead`, empty on `identical`, null on `behind`, `diverged` and `unavailable`. It is sanitized as for [`diff`](#diff). Shas only. Without `--json`, `diff` prints as an indented [block](#human-output).
 
 GitHub: the PR is read first, for its canonical path (a missing PR is `not_found`); then `/compare/<from>...<to>`, whose `status` is used; `diff` by the diff media type. GitLab: the MR is read first for its identity only (a missing MR is `not_found`; its `diff_refs`, `sha` and `changes_count` are not needed), then `/repository/compare` in the target project, `straight=false`, both ways. Commits only forward is `ahead`, only backward `behind`, both `diverged`. `identical` requires equal shas or the host's own `identical` status; an answer with no commits either way for two different shas is `unavailable`. A 404 is `unavailable`; other failures follow the read table. On GitLab an answer past forgectl's read cap one way is decided from the other: a cut backward answer (whose diffs are never used) gives `diverged` when the forward answer has commits, else `behind`; a cut forward answer gives `diverged` when the backward answer has commits, else `too_large`.
 
@@ -674,7 +674,16 @@ See [TUI](#tui).
 
 ### `export`
 
-`export [--since TIME]`: audit records, as JSONL; `--json` prints an array. `--since` takes RFC 3339 or a duration. A missing file gives empty output; a malformed line warns and is skipped. If the state directory or `audit.jsonl` exists but is refused (see [Files](#files)) or cannot be read, `export` exits 12 `audit_unavailable`.
+`export [--since TIME]`: audit records, as JSONL; `--json` prints an array. `--since` takes RFC 3339 or a duration. A missing file gives empty output; a malformed line warns and is skipped. The human form is the JSONL, one record per line, the same as without `--json` (see [Human output](#human-output)). If the state directory or `audit.jsonl` exists but is refused (see [Files](#files)) or cannot be read, `export` exits 12 `audit_unavailable`.
+
+## Human output
+
+Without `--json`, a result prints as `key: value` lines, one per top-level field in the schema's order. Every string is [sanitized](#sanitizing) and a value that is not a string is its JSON, so a tab or line feed inside a field is a marker and untrusted text cannot forge a line of its own. The `--json` form is unchanged by anything here.
+
+- **`diff`** prints the unified diff alone, as the backend sanitized it: LF, tab and a CR before LF stay raw, so its lines are the diff's own.
+- **`compare`** and **`show`** print one field as a block: `compare`'s `diff` and `show`'s `body`. The line is `key:`, followed by the text, one output line per line of the text, each indented by four spaces and sanitized on its own. An empty line is the indent alone, and the last line feed ends its line without adding an empty one, so the block has the text's line count and a diff keeps its line numbers. Because every line of the block is indented, a line of a body or a diff cannot start at the left margin and pass for a field. A CR that a diff kept before its LF is a visible `<U+000D>` marker in the block, so no raw control character reaches the terminal. A null (`compare` on `behind`, `diverged` or `unavailable`; `show` of a PR with no body) or an empty string stays on the key's line (`diff: null`).
+- **`export`** prints the JSON lines of the records, one per line, as it does with `--json` except that `--json` wraps them in an array. A record is sanitized and is plain ASCII, so it cannot hold a raw control character.
+- Every other command keeps the one-line form above. Its multi-line text fields (a comment's body, for example) show their line feeds as markers; `--json` is how a script or a reader gets their lines.
 
 ## Global flags
 
