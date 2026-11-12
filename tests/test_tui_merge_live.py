@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -171,6 +172,55 @@ def test_with_a_terminal_merge_is_available(rig: Rig) -> None:
 def test_the_real_terminal_is_the_default_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     import sys
 
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
-    monkeypatch.setattr(sys.stderr, "isatty", lambda: False, raising=False)
+    class Stream:
+        def __init__(self, fd: int) -> None:
+            self.fd = fd
+
+        def fileno(self) -> int:
+            return self.fd
+
+    monkeypatch.setattr(sys, "__stdin__", Stream(100))
+    monkeypatch.setattr(sys, "__stderr__", Stream(101))
+    monkeypatch.setattr(os, "isatty", lambda fd: fd == 100)
     assert LiveSource(lambda argv: {}, merge_runner=lambda argv: {}).merge_unavailable() is not None
+
+
+def test_the_probe_ignores_textuals_stderr_capture_while_the_app_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Textual swaps `sys.stderr` for a capture whose `isatty()` is always True; the default probe
+    must read the process's real descriptors, so a redirected stderr still refuses."""
+    import asyncio
+    import sys
+
+    from textual.app import App
+
+    class NotATty:
+        def isatty(self) -> bool:
+            return False
+
+        def fileno(self) -> int:
+            return 101
+
+    class Tty100:
+        def isatty(self) -> bool:
+            return True
+
+        def fileno(self) -> int:
+            return 100
+
+    monkeypatch.setattr(sys, "stdin", Tty100())
+    monkeypatch.setattr(sys, "__stdin__", Tty100())
+    monkeypatch.setattr(sys, "__stderr__", NotATty())
+    monkeypatch.setattr(os, "isatty", lambda fd: fd == 100)
+    seen: list[object] = []
+
+    async def go() -> None:
+        async with App().run_test():
+            seen.append(sys.stderr.isatty())
+            seen.append(
+                LiveSource(lambda argv: {}, merge_runner=lambda argv: {}).merge_unavailable()
+            )
+
+    asyncio.run(go())
+    assert seen == [True, "merge needs a terminal on stdin and stderr"]

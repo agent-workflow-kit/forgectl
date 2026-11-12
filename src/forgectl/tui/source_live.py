@@ -149,12 +149,14 @@ def real_tty() -> Tty:
     """The terminal state of this process: whether stdin and stderr are terminals."""
 
     def isatty(stream: Any) -> bool:
+        # The original streams, not ``sys.stdin``/``sys.stderr``: Textual replaces ``sys.stderr``
+        # with a capture whose ``isatty()`` is always True while the app runs.
         try:
-            return bool(stream.isatty())
-        except (AttributeError, ValueError):  # no such method, or a closed stream
+            return os.isatty(stream.fileno())
+        except (AttributeError, OSError, ValueError):  # missing, closed or no descriptor
             return False
 
-    return Tty(stdin=isatty(sys.stdin), stderr=isatty(sys.stderr))
+    return Tty(stdin=isatty(sys.__stdin__), stderr=isatty(sys.__stderr__))
 
 
 def in_process_merge_runner(
