@@ -102,8 +102,10 @@ class GitLabReviewer:
         for item in self._poster.pages(target, [*base, "draft_notes"]):
             ident = positive_int(item.get("id"))
             note = item.get("note")
-            if ident is None or not isinstance(note, str):
-                raise ForgectlError("upstream_error", "a draft note holds no usable id or text")
+            if ident is None:
+                raise ForgectlError("upstream_error", "a draft note holds no usable id")
+            if not isinstance(note, str):
+                note = ""  # a draft with an id and no text still counts as an existing draft
             position = item.get("position")
             out.append(
                 Draft(

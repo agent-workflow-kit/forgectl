@@ -310,6 +310,25 @@ def _mine(
     return None
 
 
+#: The host answers a failed draft creation or publish keeps as they are: the Reliability table's
+#: rows for 401, 403 (not a rate limit), 404 and 429 (or a rate-limit 403).
+_HOST_ANSWERS = frozenset({"auth_required", "permission_denied", "not_found", "rate_limited"})
+
+
+def _leftover_text(left: list[int], unknown: bool) -> str:
+    """What a failed post leaves on the merge request, for the end of an error message."""
+    out = ""
+    if left:
+        ids = ", ".join(str(i) for i in sorted(left))
+        out += f" (drafts left on the merge request: {ids})"
+    if unknown:
+        out += (
+            " (drafts of unknown ids may remain on the merge request: the re-list failed; "
+            "the next run exits 20 drafts_present until they are gone)"
+        )
+    return out
+
+
 class ReviewRun:
     def __init__(self, inv: registry.Invocation) -> None:
         if inv.human is None:  # cli gates every write command and passes its context
@@ -777,16 +796,24 @@ class ReviewRun:
         sent: list[Any],
         *,
         report_strangers: bool = True,
+        unproven: bool = False,
     ) -> ForgectlError:
         """Nothing was published: delete forgectl's own drafts (the ones whose creation was proven
         and any listed one with exactly the text and position sent that was not there before) and
-        return the error to raise, ``host_rejected`` naming any draft left behind."""
+        return the error to raise. ``unproven`` says a creation was not proven (a timeout, a 5xx or
+        an answer with no usable id), so a failed re-list leaves drafts of unknown ids behind.
+
+        The host's own answer for a 401, 403, 404 or 429 is kept (its code, details and
+        ``retry_after``); any other failure is ``host_rejected``. Either way the message names the
+        drafts left behind."""
         candidates = set(own)
         strangers: list[int] = []
+        relisted = True
         try:
             current = self.drafts.list_drafts(pr)
         except ForgectlError:
             current = []
+            relisted = False
         for draft in current:
             if draft.id in self._first_drafts or draft.id in candidates:
                 continue
@@ -800,16 +827,35 @@ class ReviewRun:
                 self.drafts.delete_draft(pr, ident)
             except ForgectlError:
                 left.append(ident)
+        unknown = unproven and not relisted
+        kept = why is not None and why.code in _HOST_ANSWERS
+        if kept:
+            assert why is not None
+            text = f"{why.message} (the review's draft notes were not published)"
+            leftover = _leftover_text(left, unknown)
+            return ForgectlError(
+                why.code,
+                text + leftover,
+                details=why.details,
+                retry_after=why.retry_after,
+            )
         status: int | None = None
         if why is not None and isinstance(why.details, dict):
             raw = why.details.get("status")
             status = raw if isinstance(raw, int) and not isinstance(raw, bool) else None
         text = f": {why.message}" if why is not None else ""
-        return host_rejected(
+        error = host_rejected(
             f"the review's draft notes were not published{text}",
             status=status,
             leftover=left,
         )
+        if unknown:
+            error = ForgectlError(
+                error.code,
+                error.message + _leftover_text([], True),
+                details=error.details,
+            )
+        return error
 
     def _post_drafts(self, pr: PR) -> tuple[list[Found | None], list[Found], list[str], bool]:
         """Steps 9 and 11 for the text: create the drafts, re-list, publish, read back. Returns
@@ -821,7 +867,14 @@ class ReviewRun:
             for note, position in sent:
                 own.append(self.drafts.create_draft(pr, note, position))
         except ForgectlError as err:
-            raise self._abandon(pr, own, err, sent) from None
+            raise self._abandon(pr, own, err, sent, unproven=True) from None
+        if len(set(own)) != len(own):
+            twice = ForgectlError(
+                "wrong_host_response",
+                "draft_notes: two creations answered with the same id",
+                details={"observed": "a repeated draft id"},
+            )
+            raise self._abandon(pr, sorted(set(own)), twice, sent)
         try:
             listed = {d.id for d in self.drafts.list_drafts(pr)}
             above = self.drafts.highest_note_id(pr)
@@ -850,9 +903,26 @@ class ReviewRun:
                     "the publish was not answered and the drafts could not be listed; "
                     "the review may have landed",
                 ) from None
-            if set(own) & remaining:
-                raise self._abandon(pr, sorted(set(own) & remaining), err, sent) from None
-            strict = True  # own drafts are gone: it published
+            still = set(own) & remaining
+            if still == set(own):
+                raise self._abandon(pr, sorted(still), err, sent) from None
+            # some or all of own are gone: the review landed at least in part. Delete what is
+            # left of it, then the read-back decides.
+            stuck = []
+            for ident in sorted(still):
+                try:
+                    self.drafts.delete_draft(pr, ident)
+                except ForgectlError:
+                    stuck.append(ident)
+            if stuck:
+                ids = ", ".join(str(i) for i in stuck)
+                raise ForgectlError(
+                    "outcome_unknown",
+                    "the publish was not answered and only part of the review's drafts are gone; "
+                    f"drafts left on the merge request that could not be deleted: {ids}; "
+                    "part of the review may have landed",
+                ) from None
+            strict = True
         bodies = [n for n, _ in sent]
         try:
             per_body, found = self.drafts.read_back(

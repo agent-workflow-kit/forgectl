@@ -345,6 +345,7 @@ def test_a_draft_already_there_is_drafts_present_and_nothing_is_written(gl: Gl) 
     assert done.code == 20 and done.error["reason"] == "drafts_present"
     assert done.error["details"] == {"count": 2}
     assert gl.writes() == [] and gl.audit() == []
+    schemas.validate_error_envelope(done.json)
 
 
 def test_a_dry_run_checks_drafts_and_stops(gl: Gl) -> None:
@@ -461,6 +462,8 @@ def test_a_failed_cleanup_reports_the_leftover_drafts(gl: Gl) -> None:
     done = gl.run()
     assert done.code == 12 and done.error["code"] == "host_rejected"
     assert done.error["details"]["leftover_drafts"] == 1
+    schemas.validate_error_envelope(done.json)
+    assert done.error["details"]["status"] is None  # the host gave no status
 
 
 def test_a_foreign_draft_at_the_relist_deletes_ours_and_is_drafts_present(gl: Gl) -> None:
@@ -559,6 +562,7 @@ def test_a_body_that_does_not_come_back_is_quick_action_ran_and_the_state_step_i
     assert done.code == 12 and done.error["code"] == "quick_action_ran"
     assert done.error["details"] == {"ids": ["gl:n:601"]}
     assert "graphql" not in gl.endpoints("POST")
+    schemas.validate_error_envelope(done.json)
     assert [r["result"] for r in gl.audit()] == ["attempted", "quick_action_ran"]
 
 
@@ -648,6 +652,7 @@ def test_a_failed_state_step_after_the_text_landed_is_outcome_partial(gl: Gl) ->
         "landed": {"ids": ["gl:n:602"], "thread_ids": [f"gl:d:{D2}"]},
         "failed": "approve",
     }
+    schemas.validate_error_envelope(done.json)
     assert [r["result"] for r in gl.audit()] == ["attempted", "outcome_partial"]
     assert gl.audit()[-1]["ids"] == ["gl:n:602"]
 
@@ -785,3 +790,191 @@ def test_a_pre_post_hook_veto_writes_nothing(gl: Gl) -> None:
     done = gl.run()
     assert done.code == 11
     assert gl.writes() == [] and gl.audit() == []
+
+
+# -- round 1: what a failed post leaves behind --------------------------------------------------
+
+PASS_THROUGH = [
+    (401, "auth_required"),
+    (403, "permission_denied"),
+    (404, "not_found"),
+    (429, "rate_limited"),
+]
+
+
+def test_a_failed_relist_after_an_unproven_creation_says_drafts_of_unknown_ids_may_remain(
+    gl: Gl,
+) -> None:
+    happy(gl)
+    gl.create_fails(502, {"message": "bad gateway"})
+    gl.created(11)
+    gl.drafts([])
+    get(gl.forges, DRAFTS, {"message": "down"}, status=400, nth=2)
+    gl.forges._rules.insert(0, gl.forges._rules.pop())
+    gl.forges._write_script()
+    gl.deleted(11)
+    done = gl.run()
+    assert done.code == 12 and done.error["code"] == "host_rejected"
+    assert "unknown ids may remain" in done.error["message"]
+    assert "drafts_present" in done.error["message"]
+    assert gl.endpoints("DELETE") == [f"{DRAFTS}/11"]  # the proven own draft is still deleted
+    assert PUBLISH not in gl.endpoints("POST")
+    assert [r["result"] for r in gl.audit()] == ["attempted", "failed"]
+
+
+def test_a_publish_error_with_only_some_own_drafts_gone_deletes_the_rest_and_reads_back(
+    gl: Gl,
+) -> None:
+    happy(gl)
+    gl.drafts([], [draft(11), draft(12)], [draft(12)])
+    gl.publish(status=500, body={"message": "timeout"})
+    gl.deleted(12)
+    gl.discussions(mine_published([(601, D1, "use c here")]))  # the body did not land
+    done = gl.run()
+    assert done.code == 12 and done.error["code"] == "quick_action_ran"
+    assert done.error["details"] == {"ids": ["gl:n:601"]}
+    assert gl.endpoints("DELETE") == [f"{DRAFTS}/12"]
+    assert [r["result"] for r in gl.audit()] == ["attempted", "quick_action_ran"]
+    assert gl.audit()[-1]["ids"] == ["gl:n:601"]
+
+
+def test_a_publish_error_with_some_own_drafts_gone_and_the_rest_undeletable_is_outcome_unknown(
+    gl: Gl,
+) -> None:
+    happy(gl)
+    gl.drafts([], [draft(11), draft(12)], [draft(12)])
+    gl.publish(status=500, body={"message": "timeout"})
+    gl.deleted(12, status=500)
+    done = gl.run()
+    assert done.code == 12 and done.error["code"] == "outcome_unknown"
+    assert "12" in done.error["message"]
+    assert [r["result"] for r in gl.audit()] == ["attempted", "outcome_unknown"]
+
+
+@pytest.mark.parametrize(("status", "code"), PASS_THROUGH)
+def test_a_draft_creation_answered_with_a_host_error_keeps_that_error(
+    gl: Gl, status: int, code: str
+) -> None:
+    happy(gl)
+    gl.create_fails(status, {"message": "nope"})
+    gl.created(11)
+    gl.drafts([], [{"id": 11, "author_id": ME, "note": "use c here"}])
+    gl.deleted(11)
+    done = gl.run()
+    assert done.error["code"] == code
+    assert gl.endpoints("DELETE") == [f"{DRAFTS}/11"]
+    assert PUBLISH not in gl.endpoints("POST")
+    assert [r["result"] for r in gl.audit()] == ["attempted", "failed"]
+
+
+@pytest.mark.parametrize(("status", "code"), PASS_THROUGH)
+def test_a_publish_answered_with_a_host_error_keeps_that_error(
+    gl: Gl, status: int, code: str
+) -> None:
+    happy(gl)
+    gl.drafts([], [draft(11), draft(12)])
+    gl.publish(status=status, body={"message": "nope"})
+    gl.deleted(11)
+    gl.deleted(12)
+    done = gl.run()
+    assert done.error["code"] == code
+    assert sorted(gl.endpoints("DELETE")) == [f"{DRAFTS}/11", f"{DRAFTS}/12"]
+    assert DISCUSSIONS not in gl.endpoints("GET")
+    assert [r["result"] for r in gl.audit()] == ["attempted", "failed"]
+
+
+def test_a_kept_host_error_names_the_drafts_that_could_not_be_deleted(gl: Gl) -> None:
+    happy(gl)
+    gl.drafts([], [draft(11), draft(12)])
+    gl.publish(status=401, body={"message": "nope"})
+    gl.deleted(11)
+    gl.deleted(12, status=500)
+    done = gl.run()
+    assert done.error["code"] == "auth_required"
+    assert "12" in done.error["message"]
+
+
+def test_a_draft_creation_rejected_with_a_status_reports_it_in_the_details(gl: Gl) -> None:
+    happy(gl)
+    gl.create_fails(422, {"message": "position is invalid"})
+    gl.created(11)
+    gl.drafts([], [{"id": 11, "author_id": ME, "note": "use c here"}])
+    gl.deleted(11)
+    done = gl.run()
+    assert done.error["code"] == "host_rejected"
+    assert done.error["details"]["status"] == 422
+
+
+def test_two_creations_answered_with_the_same_draft_id_are_not_believed(gl: Gl) -> None:
+    happy(gl)
+    gl.created(11, 11)
+    gl.drafts([], [draft(11)])
+    gl.deleted(11)
+    done = gl.run()
+    assert done.code == 12 and done.error["code"] == "host_rejected"
+    assert gl.endpoints("DELETE") == [f"{DRAFTS}/11"]
+    assert PUBLISH not in gl.endpoints("POST")
+    assert [r["result"] for r in gl.audit()] == ["attempted", "failed"]
+
+
+def test_a_draft_with_an_id_and_no_text_before_the_run_is_drafts_present(gl: Gl) -> None:
+    happy(gl)
+    gl.drafts([draft(5, note=None), {"id": 6, "author_id": ME}])
+    done = gl.run()
+    assert done.code == 20 and done.error["reason"] == "drafts_present"
+    assert done.error["details"] == {"count": 2}
+    assert gl.writes() == []
+
+
+def test_a_draft_with_no_usable_id_before_the_run_is_upstream_error(gl: Gl) -> None:
+    happy(gl)
+    gl.drafts([{"note": "x", "author_id": ME}])
+    done = gl.run()
+    assert done.code == 12 and done.error["code"] == "upstream_error"
+    assert gl.writes() == []
+
+
+def test_a_signal_between_the_drafts_and_the_publish_leaves_them_and_the_next_run_refuses(
+    gl: Gl, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from forgectl.backends.gitlab_review import GitLabReviewer
+    from forgectl.errors import SignalExit
+
+    happy(gl)
+
+    def signalled(*_a: Any, **_k: Any) -> Any:
+        raise SignalExit(15)
+
+    original = GitLabReviewer.bulk_publish
+    monkeypatch.setattr(GitLabReviewer, "bulk_publish", signalled)
+    done = gl.run()
+    assert done.code == 12 and done.error["code"] == "outcome_unknown"
+    assert [r["result"] for r in gl.audit()] == ["attempted", "outcome_unknown"]
+    assert gl.endpoints("DELETE") == []  # the drafts stay
+    monkeypatch.setattr(GitLabReviewer, "bulk_publish", original)
+    gl.drafts([draft(11), draft(12)])  # what the host now holds
+    again = gl.run()
+    assert again.code == 20 and again.error["reason"] == "drafts_present"
+    assert again.error["details"] == {"count": 2}
+
+
+def test_a_signal_after_the_read_back_keeps_the_matched_ids_in_the_audit_record(
+    gl: Gl, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from forgectl.backends.gitlab_review import GitLabReviewer
+    from forgectl.errors import SignalExit
+
+    gl.input({"event": "approve", "body": "overall", "comments": []})
+    gl.drafts([], [draft(12)])
+    gl.created(12)
+    gl.publish()
+    gl.discussions(mine_published([(602, D2, "overall")]))
+
+    def signalled(*_a: Any, **_k: Any) -> Any:
+        raise SignalExit(15)
+
+    monkeypatch.setattr(GitLabReviewer, "approve", signalled)
+    done = gl.run()
+    assert done.code == 12 and done.error["code"] == "outcome_unknown"
+    last = gl.audit()[-1]
+    assert last["result"] == "outcome_unknown" and last["ids"] == ["gl:n:602"]
