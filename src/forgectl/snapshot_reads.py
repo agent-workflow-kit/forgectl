@@ -18,10 +18,28 @@ def _bound(inv: registry.Invocation) -> PrRef:
     return ref
 
 
+def drop_bodies(snap: dict[str, Any]) -> dict[str, Any]:
+    """``snapshot --no-bodies`` (#141): the snapshot without the free text of the PR, its reviews
+    and its comments. The ``body`` keys are absent, not empty: an empty body is a real answer.
+    Only those three places are touched, so ids, authors, states, shas, ``ci``, ``activity`` and
+    ``incomplete`` are what the full snapshot has. The input is not changed."""
+    out = {k: v for k, v in snap.items() if k != "body"}
+    out["reviews"] = [{k: v for k, v in r.items() if k != "body"} for r in snap["reviews"]]
+    out["threads"] = [
+        {
+            **t,
+            "comments": [{k: v for k, v in c.items() if k != "body"} for c in t["comments"]],
+        }
+        for t in snap["threads"]
+    ]
+    return out
+
+
 @registry.register("snapshot")
 def snapshot(inv: registry.Invocation) -> dict[str, Any]:
     ref = _bound(inv)
-    return backend_for(ref, make_env(inv)).snapshot(ref).to_dict()
+    out = backend_for(ref, make_env(inv)).snapshot(ref).to_dict()
+    return drop_bodies(out) if inv.args.no_bodies else out
 
 
 @registry.register("comments")

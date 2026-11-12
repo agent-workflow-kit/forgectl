@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "forgectl/cli/snapshot.json",
   "title": "snapshot output",
-  "description": "The PR object plus the parts below. Lists have a fixed order, so two snapshots compare directly, excluding fetched_at and rate_limit.",
+  "description": "The PR object plus the parts below. Lists have a fixed order, so two snapshots compare directly, excluding fetched_at and rate_limit. With --no-bodies the body of the PR, of each review and of each comment is absent (never empty or null): all three are present or all three absent.",
   "type": "object",
   "allOf": [
     {
@@ -80,6 +80,41 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "required": [
+          "body"
+        ]
+      },
+      "then": {
+        "properties": {
+          "reviews": {
+            "items": {
+              "$ref": "../defs.json#/$defs/review"
+            }
+          },
+          "threads": {
+            "items": {
+              "$ref": "../defs.json#/$defs/thread"
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "reviews": {
+            "items": {
+              "$ref": "#/$defs/review_no_body"
+            }
+          },
+          "threads": {
+            "items": {
+              "$ref": "#/$defs/thread_no_body"
+            }
+          }
+        }
+      }
     }
   ],
   "unevaluatedProperties": false,
@@ -95,19 +130,13 @@
       "description": "false when the account cannot see team requests, so the absence of a team means nothing."
     },
     "reviews": {
-      "type": "array",
-      "items": {
-        "$ref": "../defs.json#/$defs/review"
-      }
+      "type": "array"
     },
     "latest_by_reviewer": {
       "$ref": "../defs.json#/$defs/latest_by_reviewer"
     },
     "threads": {
-      "type": "array",
-      "items": {
-        "$ref": "../defs.json#/$defs/thread"
-      }
+      "type": "array"
     },
     "ci": {
       "$ref": "../defs.json#/$defs/ci"
@@ -179,7 +208,6 @@
     "url",
     "backend",
     "title",
-    "body",
     "author",
     "state",
     "draft",
@@ -218,5 +246,178 @@
     "complete",
     "incomplete",
     "fetched_at"
-  ]
+  ],
+  "$defs": {
+    "review_no_body": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "../defs.json#/$defs/review/properties/id"
+        },
+        "author": {
+          "$ref": "../defs.json#/$defs/review/properties/author"
+        },
+        "state": {
+          "$ref": "../defs.json#/$defs/review/properties/state"
+        },
+        "commit_sha": {
+          "$ref": "../defs.json#/$defs/review/properties/commit_sha"
+        },
+        "submitted_at": {
+          "$ref": "../defs.json#/$defs/review/properties/submitted_at"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "author",
+        "state",
+        "commit_sha",
+        "submitted_at"
+      ],
+      "description": "A review of a snapshot read with --no-bodies: the review object without body."
+    },
+    "comment_no_body": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "../defs.json#/$defs/comment/properties/id"
+        },
+        "author": {
+          "$ref": "../defs.json#/$defs/comment/properties/author"
+        },
+        "created_at": {
+          "$ref": "../defs.json#/$defs/comment/properties/created_at"
+        },
+        "updated_at": {
+          "$ref": "../defs.json#/$defs/comment/properties/updated_at"
+        },
+        "minimized": {
+          "$ref": "../defs.json#/$defs/comment/properties/minimized"
+        },
+        "reply_to": {
+          "$ref": "../defs.json#/$defs/comment/properties/reply_to"
+        },
+        "review_id": {
+          "$ref": "../defs.json#/$defs/comment/properties/review_id"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "author",
+        "created_at",
+        "updated_at",
+        "minimized",
+        "reply_to",
+        "review_id"
+      ],
+      "description": "A comment of a snapshot read with --no-bodies: the comment object without body."
+    },
+    "thread_no_body": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "../defs.json#/$defs/id"
+        },
+        "resolvable": {
+          "type": "boolean"
+        },
+        "resolved": {
+          "type": "boolean",
+          "description": "false when not resolvable."
+        },
+        "outdated": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "null on GitLab: a consumer reads null as possibly outdated."
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-untrusted": true,
+          "description": "Untrusted: the file's path; null when the thread has no position.",
+          "x-one-line": true
+        },
+        "line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "null on an outdated thread and on a thread with no line."
+        },
+        "side": {
+          "enum": [
+            "left",
+            "right",
+            null
+          ]
+        },
+        "start_line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "commit_sha": {
+          "oneOf": [
+            {
+              "$ref": "../defs.json#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "comments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/comment_no_body"
+          },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "resolvable",
+        "resolved",
+        "outdated",
+        "path",
+        "line",
+        "side",
+        "start_line",
+        "commit_sha",
+        "comments"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "resolvable": {
+                "const": false
+              }
+            },
+            "required": [
+              "resolvable"
+            ]
+          },
+          "then": {
+            "properties": {
+              "resolved": {
+                "const": false
+              }
+            }
+          }
+        }
+      ],
+      "description": "A thread of a snapshot read with --no-bodies: its comments carry no body."
+    }
+  }
 }
