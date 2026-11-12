@@ -2,8 +2,10 @@
 
 The body is ``{sha}``, plus ``squash: true`` for ``--method squash`` and nothing else: GitLab has no
 per-merge method (the project's ``merge_method`` decides) and ``squash=false`` does nothing, so it
-is never sent. There is no merge message, no ``should_remove_source_branch`` and no
-``merge_when_pipeline_succeeds`` here (``--auto`` is #23's). forgectl never calls ``/rebase``: it
+is never sent. There is no merge message and no ``should_remove_source_branch``. ``--auto`` (#23)
+adds ``auto_merge=true`` on GitLab 17.11 or newer and ``merge_when_pipeline_succeeds=true`` before
+that (``auto_flag``): a running pipeline arms it, no pipeline or a passed one merges at once, and a
+failed, canceled or skipped one answers 405. forgectl never calls ``/rebase``: it
 would change the head. ``squash`` goes out only now, after ``merge.py``'s checks passed, because
 ``squash=true`` on a refused merge stays set on the MR.
 
@@ -36,6 +38,21 @@ ACCEPTED = frozenset(range(200, 300))
 #: The statuses mapped here instead of raised: a wrong ``sha`` and the refusals.
 MAPPED = frozenset({405, 406, 409, 422, 423})
 _PROJECT_METHODS = ("merge", "rebase_merge", "ff")
+#: The first version whose merge call takes ``auto_merge``; older ones take
+#: ``merge_when_pipeline_succeeds``.
+AUTO_MERGE_PARAM = (17, 11)
+#: The first version where a push cancels an armed auto-merge, so the sent ``sha`` is kept.
+PUSH_CANCELS_AUTO = (17, 7)
+
+
+def auto_flag(version: tuple[int, int] | None) -> str:
+    """The merge call's auto parameter for a host version (an unreadable one is refused before
+    this is asked)."""
+    if version is None:
+        raise ForgectlError(
+            "unsupported_host_version", "the host version cannot be read, so --auto is refused"
+        )
+    return "auto_merge" if version >= AUTO_MERGE_PARAM else "merge_when_pipeline_succeeds"
 
 
 @dataclass(frozen=True)
@@ -115,13 +132,16 @@ def put_merge(
     *,
     sha: str,
     method: str | None,
+    auto_param: str | None = None,
 ) -> m.MergeAnswer:
-    """Send the merge for ``pr`` once."""
+    """Send the merge for ``pr`` once; ``auto_param`` names the auto flag to set for ``--auto``."""
     if facts is None:
         raise ForgectlError("internal", "gitlab merge: the merge request was not read first")
     body: dict[str, Any] = {"sha": sha}
     if method == "squash":
         body["squash"] = True
+    if auto_param is not None:
+        body[auto_param] = True
     response = gateway.api(
         target,
         "PUT",

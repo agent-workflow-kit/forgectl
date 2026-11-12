@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from .. import model as m
-from ..errors import ForgectlError
+from ..errors import ForgectlError, refused
 from ..gateway import Target, verify_identity
 from ..identifiers import PrRef, RepoRef, bind_login
 from ..reads import SHOW_READINESS, ReadEnv
@@ -999,14 +999,27 @@ class GitHubBackend:
 
     # -- merge (the write; `github_merge.py` owns the call) ------------------------------------
 
-    def merge(self, pr: m.PR, *, sha: str, method: str | None) -> m.MergeAnswer:
-        return github_merge.put_merge(
+    def merge(self, pr: m.PR, *, sha: str, method: str | None, auto: bool = False) -> m.MergeAnswer:
+        write = github_merge.put_auto_merge if auto else github_merge.put_merge
+        return write(
             self._env.gateway,
             self._env.hosts.target(pr.repo.partition("/")[0]),
             pr,
             sha=sha,
             method=method,
         )
+
+    def check_auto(self, ref: PrRef, *, head_given: bool, interactive: bool) -> tuple[str, ...]:
+        """Head-match availability of ``--auto`` (interface: Merge order, step 2); no network
+        call. GitHub checks the head only once auto-merge is armed, so a caller-supplied expected
+        head cannot be honored: ``--auto`` there is for an interactive human only."""
+        if head_given:
+            raise refused(
+                "no_head_match",
+                "GitHub checks the head only when auto-merge is armed, so a later push would "
+                "merge unseen code: --auto cannot be combined with --expected-head",
+            )
+        return ()
 
     def list_prs(self, query: m.PrQuery, skip: Callable[[str], bool] | None = None) -> m.PrPage:
         from . import github_lists  # lazy: github_lists imports this module

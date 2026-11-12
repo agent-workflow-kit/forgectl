@@ -1119,12 +1119,6 @@ def test_no_token_reaches_any_output_on_success(rig: Rig) -> None:
 # -- unit: resolution --------------------------------------------------------------------------
 
 
-def test_auto_is_not_implemented_yet(rig: Rig) -> None:
-    done = rig.run("--auto", actor="human:me")
-    assert done.code == 1
-    assert rig.calls() == []
-
-
 # -- signals (a real process) ------------------------------------------------------------------
 
 

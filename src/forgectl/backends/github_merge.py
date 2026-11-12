@@ -16,6 +16,11 @@ Verified live (docs/design.md, Live verification): a ``sha`` that does not match
 409, and a merged PR with a wrong ``sha`` answers 200 ``merged: true``. UNVERIFIED until the live
 suite (#31, #32) checks it: the 200 answer of a fresh merge, the 405 wordings below, and what a
 merge queue answers.
+
+``--auto`` (#23) is ``enablePullRequestAutoMerge`` with ``expectedHeadOid`` set to the head the
+human saw (``put_auto_merge``). A refusal of the form ``in clean status`` or ``in unstable
+status``, or of a repository that does not allow auto-merge, is ``auto_unavailable``; a head that
+moved is ``stale_head``. Both wordings are UNVERIFIED until the live suite (#32) checks them.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ import re
 from typing import Any
 
 from .. import model as m
+from ..errors import ForgectlError
 from ..gateway import Gateway, Target, path_int, shown_text
 
 #: Any 2xx reaches verification; the status itself proves nothing.
@@ -77,3 +83,50 @@ def put_merge(
     if response.status in MAPPED:
         return classify(response.status, _message(response.data, target.token))
     return m.MergeAnswer("accepted", response.status)
+
+
+# -- --auto (#23) --------------------------------------------------------------------------------
+
+_ENABLE_AUTO_MERGE = """
+mutation($id: ID!, $head: GitObjectID!, $method: PullRequestMergeMethod) {
+  enablePullRequestAutoMerge(
+    input: {pullRequestId: $id, expectedHeadOid: $head, mergeMethod: $method}
+  ) {
+    clientMutationId
+  }
+}
+"""
+_AUTO_FIELD = "enablePullRequestAutoMerge"
+# "Pull request is in clean status", "Pull request is in unstable status", and a repository
+# that has auto-merge switched off ("Auto merge is not allowed for this repository") (UNVERIFIED)
+_AUTO_UNAVAILABLE = re.compile(
+    r"\bin (?:clean|unstable) status\b|\bauto[- ]?merge is not allowed\b"
+    r"|\bnot allowed for this repository\b",
+    re.IGNORECASE,
+)
+# "Expected head sha didn't match current head ref." and "Head branch was modified" (UNVERIFIED)
+_HEAD_MOVED = re.compile(
+    r"\bexpected head (?:oid|sha)\b|\bhead branch was modified\b", re.IGNORECASE
+)
+
+
+def put_auto_merge(
+    gateway: Gateway, target: Target, pr: m.PR, *, sha: str, method: str | None
+) -> m.MergeAnswer:
+    """Arm auto-merge for ``pr`` once, pinned to ``sha`` (``expectedHeadOid``). The one mapped
+    refusals are a moved head and an auto-merge the host will not arm; any other failure is the
+    gateway's, and the caller never retries."""
+    variables: dict[str, Any] = {"id": pr.pr_id, "head": sha, "method": None}
+    if method is not None:
+        variables["method"] = method.upper()
+    try:
+        gateway.graphql(target, _ENABLE_AUTO_MERGE, variables, write=True, mutation=_AUTO_FIELD)
+    except ForgectlError as err:
+        if err.code != "host_rejected":
+            raise
+        if _HEAD_MOVED.search(err.message):
+            return m.MergeAnswer("stale_head", 200, err.message)
+        if _AUTO_UNAVAILABLE.search(err.message):
+            return m.MergeAnswer("auto_unavailable", 200, err.message)
+        raise
+    return m.MergeAnswer("accepted", 200)
