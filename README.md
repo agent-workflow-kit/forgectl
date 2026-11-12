@@ -56,7 +56,8 @@ forgectl merge github.com/org/repo#42 --expected-head <sha> --expected-base main
 | `comments`, `reviews`, `ci` | threads, reviews, checks |
 | `access`, `whoami` | write access of a user; authenticated user per host |
 | `merge` | merge; `--auto` arms auto-merge, for a human only, as the head allows |
-| `review`, `comment`, `reply`, `approve` | posts |
+| `comment`, `reply` | post a comment; reply to a thread |
+| `review`, `approve` | posts (not yet implemented) |
 | `resolve`, `unresolve` | threads |
 | `browse` | optional TUI |
 | `export` | audit records |

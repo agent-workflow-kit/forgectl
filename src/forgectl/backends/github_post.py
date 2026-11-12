@@ -78,6 +78,9 @@ class GitHubPoster:
     def __init__(self, env: ReadEnv) -> None:
         self._env = env
 
+    def prepare(self, pr: m.PR) -> None:
+        """Nothing to read first on GitHub: the owner and name come from the PR."""
+
     # -- plumbing ------------------------------------------------------------------------------
 
     def _where(self, pr: m.PR) -> tuple[Target, str, str]:

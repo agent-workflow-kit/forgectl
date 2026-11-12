@@ -21,7 +21,7 @@ import pytest
 from forgectl.cli import main
 from forgectl.humanactions import Tty
 
-from .gitlab_support import TOKEN
+from .gitlab_support import TOKEN, mr_path, recording
 from .harness import golden, schemas
 from .harness.fixtures import forgectl_env
 from .harness.forges import Call, FakeForges
@@ -105,6 +105,15 @@ class Rig:
         code = main(argv, tty=NO_TTY)
         captured = self.capsys.readouterr()
         return Result(code, captured.out, captured.err)
+
+    def poster_mr_get(self, status: int = 200, body: Any = None) -> None:
+        """The MR's second GET (the poster's, after the PR read's) answers differently."""
+        self.forges.answer(
+            "glab", mr_path(), method="GET", nth=2, status=status, body=body or {"message": "x"}
+        )
+        rules = self.forges._rules
+        rules.insert(0, rules.pop())  # rules are tried in order: this one goes first
+        self.forges._write_script()
 
     def calls(self) -> list[Call]:
         return self.forges.calls("glab")
@@ -237,6 +246,75 @@ def test_a_redirected_note_post_ending_in_a_200_list_is_never_posted(rig: Rig) -
     get(rig.forges, "projects/101/other", [])
     done = rig.run()
     assert done.code == 12 and done.error["code"] in ("host_rejected", "outcome_unknown")
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"noteable_type": "Issue", "noteable_iid": 7},
+        {"noteable_type": "MergeRequest", "noteable_iid": 8},
+        {"noteable_iid": 8},
+        {"noteable_type": "Snippet"},
+    ],
+)
+def test_a_note_answer_for_another_noteable_is_wrong_host_response_and_unknown(
+    rig: Rig, extra: dict[str, Any]
+) -> None:
+    rig.post(NOTES, body=stored(**extra))
+    done = rig.run()
+    assert done.code == 12 and done.error["code"] == "wrong_host_response"
+    assert [r["result"] for r in rig.audit()] == ["attempted", "outcome_unknown"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{}, {"noteable_type": "MergeRequest", "noteable_iid": 7}, {"noteable_type": "MergeRequest"}],
+)
+def test_a_note_answer_for_this_mr_or_naming_no_noteable_is_accepted(
+    rig: Rig, extra: dict[str, Any]
+) -> None:
+    rig.post(NOTES, body=stored(**extra))  # live-unverified: #34 (the fields are documented)
+    assert rig.run().code == 0
+
+
+# -- the project id is read before anything is audited ---------------------------------------
+
+
+def mr_with(**changes: Any) -> dict[str, Any]:
+    data = recording("mr")
+    data["web_url"] = "https://gitlab.com/user-9/proj/-/merge_requests/7"
+    data.update(changes)
+    return data
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "code"),
+    [
+        (403, {"message": "no"}, "permission_denied"),
+        (200, mr_with(web_url="https://other.example.test/user-9/proj/-/merge_requests/7"), None),
+        (200, mr_with(iid=8), "upstream_error"),
+        (200, mr_with(project_id="x"), "upstream_error"),
+    ],
+)
+def test_a_failing_project_id_read_leaves_no_trace_and_sends_nothing(
+    rig: Rig, status: int, body: Any, code: str | None
+) -> None:
+    rig.config.write_text(
+        rig.config.read_text() + 'hooks:\n  post-post:\n    - cmd: "touch hook-ran"\n', "utf-8"
+    )
+    rig.poster_mr_get(status, body)
+    done = rig.run()
+    assert done.code == 12, done.err
+    if code is not None:
+        assert done.error["code"] == code
+    assert rig.posts() == [] and rig.audit() == []
+    assert not (rig.tmp / "hook-ran").exists() and not Path("hook-ran").exists()
+
+
+def test_a_dry_run_comment_reads_the_project_id_too(rig: Rig) -> None:
+    rig.poster_mr_get(403, {"message": "no"})
+    done = rig.run(yes=False, dry=True)
+    assert done.code != 0 and done.error["code"] == "permission_denied"
 
 
 # -- reply -------------------------------------------------------------------------------------

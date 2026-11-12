@@ -43,12 +43,20 @@ from .sanitize import sanitize_line
 
 #: Interface, Post order step 1: GitHub's review body and issue comment; GitLab's every body.
 GITHUB_COMMENT_LIMIT = 262144
+INLINE_COMMENT_LIMIT = 1024 * 1024
 GITLAB_LIMIT = 1024 * 1024
 _READ_CHUNK = 65536
 
 
-def limit_for(backend: str) -> int:
-    return GITHUB_COMMENT_LIMIT if backend == "github" else GITLAB_LIMIT
+def limit_for(backend: str, to: TypedId | None = None) -> int:
+    """The body limit. A GitHub reply to a review thread or review comment (``gh:rt:`` or
+    ``gh:rc:``) becomes an inline review comment, which takes 1 MiB; the id says so before any
+    host is read, and a reply to anything else is a general comment."""
+    if backend != "github":
+        return GITLAB_LIMIT
+    if to is not None and to.host_prefix == "gh" and to.kind in ("rt", "rc"):
+        return INLINE_COMMENT_LIMIT
+    return GITHUB_COMMENT_LIMIT
 
 
 # -- the input -----------------------------------------------------------------------------------
@@ -84,13 +92,18 @@ def read_input(source: str, cap: int) -> bytes:
     path under a directory someone else can write must freeze the file first."""
     if source == "-":
         stream = sys.stdin
+        if stream is None:  # closed standard input
+            raise usage("standard input cannot be read: it is closed")
+        buffer = getattr(stream, "buffer", None)
         try:
-            buffer = getattr(stream, "buffer", None)
-            if buffer is not None:
-                return bytes(buffer.read(cap))
-            return str(stream.read(cap)).encode("utf-8", errors="surrogatepass")
-        except (OSError, ValueError) as err:
+            data: Any = buffer.read(cap) if buffer is not None else stream.read(cap)
+        except (OSError, ValueError, TypeError) as err:
             raise usage(f"standard input cannot be read: {type(err).__name__}") from None
+        if data is None:  # a non-blocking stream with nothing to give
+            raise usage("standard input cannot be read: it has no data to give yet")
+        if isinstance(data, bytes):
+            return data
+        return str(data).encode("utf-8", errors="surrogatepass")
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
     try:
         fd = os.open(source, flags)
@@ -271,7 +284,7 @@ class PostRun:
         args = self.args
         # step 1: usage. The body is read, neutralized and sized before any host is touched.
         self.body = prepare_body(
-            args.body_file, limit=limit_for(self.ref.backend), key=args.dedupe_key
+            args.body_file, limit=limit_for(self.ref.backend, self.to), key=args.dedupe_key
         )
         # step 2: the audit file, the account, the PR, then --to within it
         audit.check_writable(self.directory)
@@ -279,6 +292,7 @@ class PostRun:
         user = self.env.call(lambda: self.env.hosts.authenticated_user(target))
         self._login = user.login
         pr = self._read()
+        self.poster.prepare(pr)  # nothing the write needs is read inside the audited window
         anchor = self._anchor(pr)
         # step 4: dedupe. A hit leaves no text to post and no state step: exit 0 here.
         if args.dedupe_key is not None:
@@ -308,6 +322,7 @@ class PostRun:
         # step 8: a slow gate may have outlasted what it saw
         if dialog or hooks.entries(self.inv.config.config, "pre-post"):
             pr = self._read()
+            self.poster.prepare(pr)
             anchor = self._anchor(pr)
         return self._write(pr, anchor, user.id)
 

@@ -1699,17 +1699,21 @@ class Gateway:
             ok_exit = result.returncode == 0 or (graphql and result.returncode == 1)
             if not ok_exit:
                 raise failure("upstream_error", f"{where}: {status} but exit {result.returncode}")
-            if write and expect_status is not None and status not in expect_status:
-                raise _error(
-                    "outcome_unknown",
-                    f"{where}: unexpected status {status}; the write may have landed",
-                )
             try:
                 data = _decode(raw, parse, tolerant=False)
             except ValueError:
                 raise failure(
                     "upstream_error", f"{where}: the answer is not valid UTF-8 JSON"
                 ) from None
+            if write and shape == "object" and isinstance(data, list):
+                # a list where one object is documented is a redirected GET's answer, whatever
+                # its status: the write did not land (Reliability)
+                self._check_shape(data, shape, where, status, write=write)
+            if write and expect_status is not None and status not in expect_status:
+                raise _error(
+                    "outcome_unknown",
+                    f"{where}: unexpected status {status}; the write may have landed",
+                )
             self._check_shape(data, shape, where, status, write=write)
             return Response(status, headers, data, result.returncode)
         raise self._status_error(status, headers, raw, where, target, write=write)

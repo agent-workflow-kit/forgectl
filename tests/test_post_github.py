@@ -25,7 +25,9 @@ from typing import Any
 
 import pytest
 
+from forgectl import post as post_module
 from forgectl.cli import main
+from forgectl.errors import ForgectlError
 from forgectl.humanactions import Tty
 
 from .harness import golden, schemas
@@ -351,6 +353,27 @@ def test_neutralizing_counts_toward_the_limit(rig: Rig) -> None:
     assert done.code == 2 and done.error["code"] == "body_too_large"
 
 
+def test_a_reply_that_becomes_an_inline_review_comment_may_use_the_inline_limit(
+    rig: Rig,
+) -> None:
+    answer_anchor(
+        rig, anchor_doc("PullRequestReviewThread", comments={"nodes": [{"databaseId": 555}]})
+    )
+    rig.post_ok(f"{REVIEW_COMMENTS}/555/replies", node="PRRC_new0001")
+    rig.write_body("a" * 1024 * 1024)
+    assert reply(rig, "gh:rt:PRRT_thread01").code == 0
+    rig.write_body("a" * (1024 * 1024 + 1))
+    done = reply(rig, "gh:rt:PRRT_thread01")
+    assert done.code == 2 and done.error["details"] == {"index": None, "limit": 1024 * 1024}
+
+
+def test_a_reply_that_becomes_a_general_comment_keeps_the_comment_limit(rig: Rig) -> None:
+    rig.write_body("a" * 262145)
+    done = reply(rig, "gh:ic:IC_old00001")
+    assert done.code == 2 and done.error["details"] == {"index": None, "limit": 262144}
+    assert rig.calls() == []
+
+
 def test_a_fifo_is_refused_instead_of_hanging(rig: Rig, tmp_path: Path) -> None:
     fifo = tmp_path / "fifo"
     os.mkfifo(fifo)
@@ -434,6 +457,26 @@ def test_dash_reads_the_inherited_stdin_pipe_to_eof_in_both_modes(
     else:
         (post,) = posts
         assert json.loads(post.stdin or "")["body"] == big.replace("/not", " /not")
+
+
+class NonBlockingStdin:
+    """A stdin whose read has nothing yet: ``read`` answers None, as a non-blocking pipe does."""
+
+    class buffer:  # noqa: N801 - mimics the ``.buffer`` attribute of a text stream
+        @staticmethod
+        def read(size: int) -> None:
+            return None
+
+
+@pytest.mark.parametrize("stream", [None, NonBlockingStdin()])
+def test_a_stdin_that_cannot_be_read_is_a_usage_error(
+    monkeypatch: pytest.MonkeyPatch, stream: Any
+) -> None:
+    monkeypatch.setattr(sys, "stdin", stream)
+    with pytest.raises(ForgectlError) as raised:
+        post_module.read_input("-", 100)
+    assert raised.value.code == "usage" and raised.value.exit_code == 2
+    assert "standard input cannot be read" in raised.value.message
 
 
 def test_dash_without_yes_is_confirmation_required(rig: Rig) -> None:
@@ -594,8 +637,8 @@ def test_a_redirect_whose_get_answers_a_list_with_200_is_never_posted(rig: Rig) 
     rig.forges.answer("gh", COMMENTS, method="POST", redirect=f"/repos/{REPO}/issues/7/other")
     answer_get(rig.forges, f"repos/{REPO}/issues/7/other", body=[])
     done = rig.run()
-    assert done.code == 12 and done.error["code"] in ("host_rejected", "outcome_unknown")
-    assert rig.audit()[-1]["result"] in ("failed", "outcome_unknown")
+    assert done.code == 12 and done.error["code"] == "host_rejected"
+    assert [r["result"] for r in rig.audit()] == ["attempted", "failed"]
 
 
 def test_a_201_without_an_integer_id_is_outcome_unknown(rig: Rig) -> None:

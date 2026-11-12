@@ -51,6 +51,11 @@ class Posted:
 
 
 class Poster(Protocol):
+    def prepare(self, pr: m.PR) -> None:
+        """Whatever the write needs read first (GitLab: the numeric project id and the MR's iid),
+        so a failing read is an ordinary error before anything is audited or sent."""
+        ...
+
     def find_anchor(self, pr: m.PR, to: TypedId) -> Anchor:
         """``reply --to`` looked up within ``pr``; absent or another PR's is ``not_found``."""
         ...

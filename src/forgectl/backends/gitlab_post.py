@@ -19,7 +19,7 @@ from typing import Any
 
 from .. import model as m
 from ..errors import ForgectlError
-from ..gateway import Response, Target, path_int, verify_identity
+from ..gateway import Response, Target, path_int, shown_text, verify_identity
 from ..identifiers import TypedId
 from ..reads import ReadEnv
 from .post_base import (
@@ -66,6 +66,9 @@ class GitLabPoster:
                 raise ForgectlError("upstream_error", "the merge request answer is not usable")
             self._mr[key] = (target, str(project), path_int(pr.number))
         return self._mr[key]
+
+    def prepare(self, pr: m.PR) -> None:
+        self._where(pr)
 
     def _base(self, pr: m.PR) -> tuple[Target, list[str]]:
         target, project, iid = self._where(pr)
@@ -132,7 +135,7 @@ class GitLabPoster:
     # -- the writes ----------------------------------------------------------------------------
 
     def _post(
-        self, target: Target, segments: list[str], body: str, thread: tuple[str, ...]
+        self, target: Target, segments: list[str], body: str, thread: tuple[str, ...], iid: str
     ) -> Posted:
         response: Response = self._env.gateway.api(
             target,
@@ -150,6 +153,18 @@ class GitLabPoster:
             known = positive_int(_obj(data).get("id"))
             return Posted(() if known is None else (f"gl:n:{known}",), thread, True)
         note = created_id(data, where)
+        # UNVERIFIED (#34): GitLab documents ``noteable_type`` and ``noteable_iid`` on a note; an
+        # answer that names another noteable is not the answer to this write, and absent fields
+        # are accepted.
+        kind, number = data.get("noteable_type"), data.get("noteable_iid")
+        if ("noteable_type" in data and kind != "MergeRequest") or (
+            "noteable_iid" in data and str(number) != iid
+        ):
+            raise ForgectlError(
+                "wrong_host_response",
+                f"{where}: the note answered belongs to another noteable",
+                details={"observed": shown_text(f"{kind} {number}", target.token)},
+            )
         stored = data.get("body")
         ran = bool(data.get("commands_changes")) or not (
             isinstance(stored, str) and same_text(body, stored)
@@ -158,13 +173,14 @@ class GitLabPoster:
 
     def post_comment(self, pr: m.PR, body: str) -> Posted:
         target, base = self._base(pr)
-        return self._post(target, [*base, "notes"], body, ())
+        return self._post(target, [*base, "notes"], body, (), base[-1])
 
     def post_reply(self, pr: m.PR, anchor: Anchor, body: str) -> Posted:
         assert anchor.host_id is not None
         target, base = self._base(pr)
         thread = (anchor.thread_id,) if anchor.thread_id else ()
-        return self._post(target, [*base, "discussions", anchor.host_id, "notes"], body, thread)
+        segments = [*base, "discussions", anchor.host_id, "notes"]
+        return self._post(target, segments, body, thread, base[-1])
 
 
 __all__ = ["GitLabPoster"]
