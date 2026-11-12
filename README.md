@@ -55,7 +55,7 @@ forgectl merge github.com/org/repo#42 --expected-head <sha> --expected-base main
 | `snapshots` | `snapshot` of many PRs from a few bulk GraphQL requests per host, falling back to `snapshot` per PR |
 | `poll` | the change-detection tuple of every PR of mine in a few requests, for a cheap `browse` refresh |
 | `diff`, `files` | diff (refused rather than cut off); changed paths |
-| `compare` | how two commits of a PR relate, with their diff when `to` is ahead of `from` |
+| `compare` | how two commits of a PR relate, with their diff when `to` is ahead of `from` (`--no-diff` answers with the status only) |
 | `comments`, `reviews`, `ci` | threads, reviews, checks |
 | `access`, `whoami` | write access of a user; authenticated user per host |
 | `merge` | merge, on GitHub and GitLab (on GitLab the project's merge method setting decides; `--method squash` is sent only after the checks); `--auto` arms auto-merge, for a human only, as the head allows |

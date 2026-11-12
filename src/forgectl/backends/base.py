@@ -73,8 +73,10 @@ class Backend(Protocol):
         """`diff`; a host that will not produce the whole diff is `too_large`, never partial."""
         ...
 
-    def compare(self, ref: PrRef, from_sha: str, to_sha: str) -> m.CompareResult:
-        """`compare` between two full shas."""
+    def compare(
+        self, ref: PrRef, from_sha: str, to_sha: str, *, no_diff: bool = False
+    ) -> m.CompareResult:
+        """`compare` between two full shas; ``no_diff`` reads and returns no diff text."""
         ...
 
     def files(self, ref: PrRef) -> m.FilesResult:

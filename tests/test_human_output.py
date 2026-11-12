@@ -97,6 +97,14 @@ def test_compare_without_diff_text_stays_one_line(
     assert out.splitlines()[-1] == line
 
 
+def test_compare_without_a_diff_key_prints_the_other_fields_only(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    out = printed(capsys, dict(COMPARE), "compare")
+    assert "diff" not in out
+    assert out.splitlines()[-1] == f"status: {COMPARE['status']}"
+
+
 def test_show_prints_a_multiline_body_as_a_block_and_keeps_the_title_on_one_line(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

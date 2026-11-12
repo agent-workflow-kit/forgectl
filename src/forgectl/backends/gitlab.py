@@ -1217,10 +1217,12 @@ class GitLabBackend:
 
         return gitlab_diff.diff_result(self, ref)
 
-    def compare(self, ref: PrRef, from_sha: str, to_sha: str) -> m.CompareResult:
+    def compare(
+        self, ref: PrRef, from_sha: str, to_sha: str, *, no_diff: bool = False
+    ) -> m.CompareResult:
         from . import gitlab_diff
 
-        return gitlab_diff.compare_result(self, ref, from_sha, to_sha)
+        return gitlab_diff.compare_result(self, ref, from_sha, to_sha, no_diff=no_diff)
 
     def files(self, ref: PrRef) -> m.FilesResult:
         from . import gitlab_diff
