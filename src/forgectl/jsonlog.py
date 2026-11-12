@@ -6,7 +6,8 @@ following a final symlink, and must be what they should be: a directory (or regu
 by the caller, a directory nobody else can write, a file with one link. Nothing here changes the
 mode of something that exists; creation is 0700 for the directory and 0600 for a file.
 
-There is no rotation: the interface defines none. The only size cap is per line.
+``log.jsonl`` (and only it) is rotated by size, see ``append_log``; ``audit.jsonl`` never is.
+The only other size cap is per line.
 """
 
 from __future__ import annotations
@@ -17,7 +18,9 @@ import os
 import pwd
 import re
 import stat
+import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -294,6 +297,156 @@ def log_problem(record: object) -> str | None:
     return None
 
 
+# --- rotation of log.jsonl ----------
+
+DEFAULT_MAX_BYTES = 10 * 1024 * 1024
+DEFAULT_KEEP = 3
+MIN_MAX_BYTES = 64 * 1024  # an empty file always holds one full line
+MAX_MAX_BYTES = 1024 * 1024 * 1024
+MAX_KEEP = 100
+LOCK_FILE = "log.lock"
+LOCK_WAIT_SECONDS = 1.0
+_ROTATED = re.compile(r"log\.jsonl\.([1-9][0-9]*)")
+
+
+@dataclass(frozen=True)
+class Rotation:
+    """When ``log.jsonl`` rotates (config ``log.max_bytes``) and how many rotated files stay."""
+
+    max_bytes: int = DEFAULT_MAX_BYTES
+    keep: int = DEFAULT_KEEP
+
+    def __post_init__(self) -> None:
+        for value in (self.max_bytes, self.keep):
+            if type(value) is not int:
+                raise ValueError("rotation limits are integers")
+        if not MIN_MAX_BYTES <= self.max_bytes <= MAX_MAX_BYTES:
+            raise ValueError("max_bytes out of range")
+        if not 1 <= self.keep <= MAX_KEEP:
+            raise ValueError("keep out of range")
+
+
+_rotation = Rotation()
+
+
+def set_rotation(value: Rotation) -> None:
+    """The limits this process uses for every ``log_event`` that is not given its own."""
+    global _rotation
+    _rotation = value
+
+
+def rotation() -> Rotation:
+    return _rotation
+
+
+def _needs_rotation(dfd: int, incoming: int, limits: Rotation) -> bool:
+    try:
+        info = os.stat(LOG_FILE, dir_fd=dfd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return (
+        stat.S_ISREG(info.st_mode)
+        and info.st_size > 0
+        and (info.st_size + incoming > limits.max_bytes)
+    )
+
+
+def _lock(dfd: int) -> int | None:
+    """The exclusive lock on ``log.lock``; None when another process holds it for too long."""
+    try:
+        fd = os.open(
+            LOCK_FILE,
+            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+            0o600,
+            dir_fd=dfd,
+        )
+    except OSError as err:
+        raise JsonlError(f"{LOCK_FILE}: {os.strerror(err.errno or 0)}") from None
+    try:
+        _check_file(fd)
+        deadline = time.monotonic() + LOCK_WAIT_SECONDS
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    os.close(fd)
+                    return None
+                time.sleep(0.01)
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _shift(dfd: int, keep: int) -> None:
+    """``log.jsonl.N`` becomes ``.N+1`` (the one past ``keep`` is replaced), then ``log.jsonl``
+    becomes ``.1``. A rename never follows a link, and a missing file (another process was
+    first) is skipped."""
+    for name in os.listdir(dfd):
+        found = _ROTATED.fullmatch(name)
+        if found and int(found.group(1)) > keep:
+            try:
+                os.unlink(name, dir_fd=dfd)
+            except FileNotFoundError:
+                pass
+    steps = [(f"{LOG_FILE}.{n}", f"{LOG_FILE}.{n + 1}") for n in range(keep - 1, 0, -1)]
+    for src, dst in [*steps, (LOG_FILE, f"{LOG_FILE}.1")]:
+        try:
+            os.rename(src, dst, src_dir_fd=dfd, dst_dir_fd=dfd)
+        except FileNotFoundError:
+            pass
+
+
+def rotate_log(directory: Path, incoming: int, limits: Rotation) -> None:
+    """Rotate ``log.jsonl`` when ``incoming`` more bytes would take it over the limit.
+
+    Only ever ``log.jsonl``: ``audit.jsonl`` is the audit trail and is never rotated. Processes
+    rotating at once take turns under ``flock`` on ``log.lock`` and re-check the size once they
+    hold it, so only the first rotates. A writer that already has the old file open keeps
+    appending to it (now ``log.jsonl.1``), so no line is lost; one that opens the file next
+    creates a fresh one. Raises ``JsonlError``; nothing is created when the directory is absent.
+    """
+    dfd = open_dir(directory, create=False)
+    if dfd is None:
+        return
+    try:
+        if not _needs_rotation(dfd, incoming, limits):
+            return
+        lock = _lock(dfd)
+        if lock is None:
+            return  # another process is rotating; this record goes to whichever file is current
+        try:
+            if _needs_rotation(dfd, incoming, limits):
+                _shift(dfd, limits.keep)
+        finally:
+            os.close(lock)
+    except OSError as err:
+        if isinstance(err, JsonlError):
+            raise
+        raise JsonlError(f"{LOG_FILE}: {os.strerror(err.errno or 0)}") from None
+    finally:
+        os.close(dfd)
+
+
+def append_log(
+    directory: Path, record: Mapping[str, Any], limits: Rotation | None = None
+) -> str | None:
+    """Append one ``log.jsonl`` line, rotating first when it would not fit.
+
+    A failed rotation does not stop the append; it is returned as a warning text. A failed
+    append raises ``JsonlError``.
+    """
+    data_len = len(encode_line(record))
+    note: str | None = None
+    try:
+        rotate_log(directory, data_len, limits or _rotation)
+    except JsonlError as err:
+        note = f"log not rotated: {err}"
+    append(directory, LOG_FILE, record)
+    return note
+
+
 def log_event(
     directory: Path,
     level: str,
@@ -302,8 +455,9 @@ def log_event(
     pr: str | None = None,
     host: str | None = None,
     details: Mapping[str, Any] | None = None,
+    rotation: Rotation | None = None,
 ) -> str | None:
-    """Append one log record. Returns a warning text when it could not be written, else None.
+    """Append one log record. Returns a warning text when it could not be written (or rotated).
 
     A log failure never raises: it must not change a command's result. ``pr`` and ``host`` that
     do not match the schema are recorded as null rather than as raw text.
@@ -321,12 +475,11 @@ def log_event(
         return f"log record not written: invalid {problem}"
     try:
         try:
-            append(directory, LOG_FILE, record)
+            return append_log(directory, record, rotation)
         except JsonlError as err:
             if "line cap" not in str(err):
                 raise
             record["details"] = {"truncated": True}
-            append(directory, LOG_FILE, record)
+            return append_log(directory, record, rotation)
     except JsonlError as err:
         return f"log not written: {err}"
-    return None

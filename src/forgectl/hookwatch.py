@@ -57,6 +57,18 @@ def valid_spec(spec: Any) -> bool:
     )
 
 
+def _rotation(spec: dict[str, Any]) -> jsonlog.Rotation | None:
+    """The log limits the starting run read from its config; None (the defaults) when absent or
+    not valid, since a bad value must not stop the failure from being logged."""
+    value = spec.get("log_rotation")
+    try:
+        if isinstance(value, list) and len(value) == 2:
+            return jsonlog.Rotation(max_bytes=value[0], keep=value[1])
+    except ValueError:
+        pass
+    return None
+
+
 def _own_private_dir(root: str, cwd: str) -> bool:
     """Only a directory forgectl made (``forgectl-*``, a real directory, ours) is ever removed."""
     if not os.path.isabs(root) or os.path.islink(root):
@@ -85,6 +97,7 @@ def _finish(spec: dict[str, Any], outcome: str) -> None:
                 "hook_failed",
                 pr=spec.get("pr") if isinstance(spec.get("pr"), str) else None,
                 details={"hook": spec.get("hook"), "index": spec.get("index"), "why": outcome},
+                rotation=_rotation(spec),
             )
     finally:
         signal.pthread_sigmask(signal.SIG_SETMASK, held)
