@@ -2,13 +2,25 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "forgectl/cli/snapshots.json",
   "title": "snapshots output",
-  "description": "Snapshots of many PRs from a few GraphQL requests per host. Each item is a `snapshot` output, in the order the PRs were given. A PR that has no item is in `failed`. Printed on exit 0.",
+  "description": "Snapshots of many PRs from a few GraphQL requests per host. Each item is a `snapshot` output, in the order the PRs were given. A PR that has no item is in `failed`. Printed on exit 0. Each item has the full shape: the snapshot's --no-bodies shape is not accepted here.",
   "type": "object",
   "properties": {
     "items": {
       "type": "array",
       "items": {
-        "$ref": "snapshot.json"
+        "$ref": "snapshot.json",
+        "properties": {
+          "reviews": {
+            "items": {
+              "$ref": "../defs.json#/$defs/review"
+            }
+          },
+          "threads": {
+            "items": {
+              "$ref": "../defs.json#/$defs/thread"
+            }
+          }
+        }
       }
     },
     "failed": {
