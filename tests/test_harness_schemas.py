@@ -95,6 +95,12 @@ def test_a_fragment_id_validates_against_that_definition() -> None:
         schemas.validate(5, "forgectl/defs.json#/$defs/ts")
 
 
+def test_a_repository_id_is_a_string_never_null() -> None:
+    schemas.validate("R_kgDOexample7", "forgectl/defs.json#/$defs/repository_id")
+    with pytest.raises(ValidationError):
+        schemas.validate(None, "forgectl/defs.json#/$defs/repository_id")
+
+
 def test_an_unknown_fragment_is_an_error_not_a_pass() -> None:
     with pytest.raises(schemas.UnknownSchemaError):
         schemas.validate({}, "forgectl/defs.json#/$defs/no-such-def")

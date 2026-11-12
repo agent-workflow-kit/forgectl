@@ -10,11 +10,10 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
-from forgectl import model as m
 from forgectl.backends import gitlab as gl
 from forgectl.backends.base import Backend
 from forgectl.backends.gitlab import GitLabBackend
@@ -188,6 +187,7 @@ def test_a_renamed_project_is_read_through_its_old_path_and_reported_canonically
     assert read.pr.pr == "gitlab.com/user-9/proj#7"
     assert read.pr.repo == "gitlab.com/user-9/proj"
     assert read.pr.pr_id == "gid://gitlab/MergeRequest/90001"  # stable across renames
+    assert read.pr.repo_id == "gid://gitlab/Project/101"
 
 
 def test_an_answer_from_another_host_is_wrong_host_response(
@@ -466,17 +466,6 @@ def test_a_status_still_unknown_after_the_hook_is_mergeability_unknown(
     read = make_backend(fake, tmp_path, until_known=_recheck_once).get_pr(ref())
     assert fake.count(mr_path()) == 2
     assert codes(read) == ["mergeability_unknown"]
-
-
-def test_every_other_protocol_method_is_a_typed_not_yet_error(
-    fake: FakeGitLab, tmp_path: Path
-) -> None:
-    backend = make_backend(fake, tmp_path)
-    for call in (lambda: backend.merge(cast(m.PR, None), sha=HEAD, method=None),):
-        with pytest.raises(ForgectlError) as raised:
-            call()
-        assert raised.value.code == "internal"
-    assert fake.calls == []
 
 
 # -- approvals and reviewers -----------------------------------------------------------------

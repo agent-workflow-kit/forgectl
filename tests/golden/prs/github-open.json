@@ -14,6 +14,7 @@
       "base": {
         "ref": "main"
       },
+      "created_at": "2026-09-30T08:00:00Z",
       "draft": false,
       "head": {
         "is_fork": false,
@@ -29,6 +30,7 @@
       "pr": "github.com/user-7/example-repo#31",
       "pr_id": "PR_kwDOexample31",
       "repo": "github.com/user-7/example-repo",
+      "repo_id": "R_kgDOexample7",
       "state": "open",
       "title": "Add a parser",
       "updated_at": "2026-10-02T08:30:00Z",
@@ -43,6 +45,7 @@
       "base": {
         "ref": "main"
       },
+      "created_at": "2026-09-29T08:00:00Z",
       "draft": true,
       "head": {
         "is_fork": false,
@@ -55,6 +58,7 @@
       "pr": "github.com/user-7/example-repo#29",
       "pr_id": "PR_kwDOexample29",
       "repo": "github.com/user-7/example-repo",
+      "repo_id": "R_kgDOexample7",
       "state": "open",
       "title": "Update dependencies",
       "updated_at": "2026-10-01T12:00:00Z",
@@ -69,6 +73,7 @@
       "base": {
         "ref": "develop"
       },
+      "created_at": "2026-09-30T08:00:00Z",
       "draft": false,
       "head": {
         "is_fork": null,
@@ -81,6 +86,7 @@
       "pr": "github.com/user-7/other-repo#12",
       "pr_id": "PR_kwDOexample12",
       "repo": "github.com/user-7/other-repo",
+      "repo_id": "R_kgDOexample12",
       "state": "open",
       "title": "Fix a typo",
       "updated_at": "2026-09-20T07:15:00Z",

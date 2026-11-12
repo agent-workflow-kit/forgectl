@@ -282,6 +282,15 @@ def test_golden_search_page(make: Callable[..., Harness]) -> None:
     golden.assert_golden("prs/github-open", out, schema_id="forgectl/cli/prs.json")
 
 
+def test_items_carry_the_creation_time_and_the_repository_id(make: Callable[..., Harness]) -> None:
+    first, bot, other = make(rated(recording())).prs(repo=REPO).items
+    assert (first.created_at, bot.created_at) == ("2026-09-30T08:00:00Z", "2026-09-29T08:00:00Z")
+    assert first.repo_id == bot.repo_id == "R_kgDOexample7"
+    assert other.repo_id == "R_kgDOexample12"
+    assert first.to_dict()["repo_id"] == "R_kgDOexample7"
+    assert first.to_dict()["created_at"] == "2026-09-30T08:00:00Z"
+
+
 def test_the_items_are_normalized_and_ordered(make: Callable[..., Harness]) -> None:
     page = make(rated(recording())).prs(repo=REPO)
     assert [i.pr for i in page.items] == [
@@ -562,11 +571,19 @@ def test_a_node_whose_url_names_another_project_is_wrong_host_response(
         lambda n: n.update(headRefOid="zz"),
         lambda n: n.update(headRefOid="A" * 40),
         lambda n: n.update(updatedAt="yesterday"),
+        lambda n: n.update(createdAt="yesterday"),
+        lambda n: n.update(createdAt=None),
+        lambda n: n.pop("createdAt"),
         lambda n: n.update(id="a b"),
         lambda n: n.update(id=None),
         lambda n: n.update(repository=None),
         lambda n: n.update(repository={"nameWithOwner": "a/b/c"}),
         lambda n: n.update(repository={"nameWithOwner": "a b/c"}),
+        lambda n: n["repository"].pop("id"),
+        lambda n: n["repository"].update(id=None),
+        lambda n: n["repository"].update(id=7),
+        lambda n: n["repository"].update(id="a b"),
+        lambda n: n["repository"].update(id="R" * 129),
         lambda n: n.update(url=None),
         lambda n: n.update(labels=None),
         lambda n: n.update(labels={"nodes": "x", "pageInfo": {}}),

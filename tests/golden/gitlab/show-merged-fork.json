@@ -51,6 +51,7 @@
   "pr": "gitlab.com/user-9/proj#7",
   "pr_id": "gid://gitlab/MergeRequest/90001",
   "repo": "gitlab.com/user-9/proj",
+  "repo_id": "gid://gitlab/Project/101",
   "review_decision": "approved",
   "state": "merged",
   "title": "Add the widget",

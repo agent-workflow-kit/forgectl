@@ -110,6 +110,7 @@
         "reset_at": "2026-10-02T12:00:00Z"
       },
       "repo": "github.com/user-7/example-repo",
+      "repo_id": "R_kgDOexample7",
       "review_decision": "approved",
       "review_requests": [
         {
@@ -432,6 +433,7 @@
         "reset_at": "2026-10-02T12:00:00Z"
       },
       "repo": "github.com/user-7/example-repo",
+      "repo_id": "R_kgDOexample7",
       "review_decision": "approved",
       "review_requests": [
         {

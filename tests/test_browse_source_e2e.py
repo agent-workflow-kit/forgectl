@@ -29,6 +29,7 @@ from forgectl.tui.source_live import LiveSource  # noqa: E402
 from .bulk_support import bulk_answer  # noqa: E402
 from .harness.fixtures import direct_children, forgectl_env  # noqa: E402
 from .harness.forges import FakeForges  # noqa: E402
+from .test_bulk_github import required_doc  # noqa: E402
 from .test_github_diff import PR_ENDPOINT, RECORDINGS, pull, recording  # noqa: E402
 from .test_github_lists import recording as list_recording  # noqa: E402
 from .test_lists_cli import GHE, TOKEN_A, TOKEN_B, rate  # noqa: E402
@@ -180,6 +181,10 @@ def snapshot_and_diff_fakes(forges: FakeForges) -> None:
     forges.answer(
         "gh", "graphql", method="POST", stdin_re=r"query ForgectlBulk\b", body=bulk_answer(7)
     )
+    # the detail read adds one small read of the checks' `isRequired` (#136)
+    forges.answer(
+        "gh", "graphql", method="POST", stdin_re=r"query ForgectlRequired\b", body=required_doc()
+    )
     doc = pull(changed_files=1)  # the `diff` read, as in test_diff_cli
     forges.answer("gh", PR_ENDPOINT, body=doc, times=1)
     forges.answer("gh", PR_ENDPOINT, body_text=(RECORDINGS / "pull.diff").read_text(), times=1)
@@ -205,8 +210,10 @@ def test_detail_of_one_pr_is_one_bulk_request_through_the_handlers(
     json.dumps(detail)
     asked = [c.stdin or "" for c in forged.calls("gh")]
     assert len([a for a in asked if "query ForgectlBulk" in a]) == 1  # the one bulk request
+    assert len([a for a in asked if "query ForgectlRequired" in a]) == 1  # and one for required
+    assert {c["required"] for c in detail["ci"]["checks"]} == {True, False}
     assert not [a for a in asked if "ForgectlShow" in a or "ForgectlParts" in a]  # no snapshot
-    assert len(asked) == 1  # and nothing else (no REST read)
+    assert len(asked) == 2  # and nothing else (no REST read)
 
 
 def test_a_failing_snapshot_is_a_forgectl_error_and_the_next_call_works(

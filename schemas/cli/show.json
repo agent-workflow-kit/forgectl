@@ -22,6 +22,7 @@
   "required": [
     "pr",
     "repo",
+    "repo_id",
     "pr_id",
     "number",
     "url",
