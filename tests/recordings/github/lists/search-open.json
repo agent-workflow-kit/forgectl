@@ -15,6 +15,7 @@
             "login": "user-1"
           },
           "baseRefName": "main",
+          "createdAt": "2026-09-30T08:00:00Z",
           "headRefName": "feature/parser",
           "headRefOid": "3f8a1c0d5e7b9a2c4d6e8f0a1b3c5d7e9f0a1b2c",
           "headRepository": {
@@ -39,6 +40,7 @@
           },
           "number": 31,
           "repository": {
+            "id": "R_kgDOexample7",
             "nameWithOwner": "user-7/example-repo"
           },
           "state": "OPEN",
@@ -54,6 +56,7 @@
             "login": "user-2"
           },
           "baseRefName": "main",
+          "createdAt": "2026-09-29T08:00:00Z",
           "headRefName": "bot/update-deps",
           "headRefOid": "5555555555555555555555555555555555555555",
           "headRepository": {
@@ -71,6 +74,7 @@
           },
           "number": 29,
           "repository": {
+            "id": "R_kgDOexample7",
             "nameWithOwner": "user-7/example-repo"
           },
           "state": "OPEN",
@@ -82,6 +86,7 @@
           "__typename": "PullRequest",
           "author": null,
           "baseRefName": "develop",
+          "createdAt": "2026-09-30T08:00:00Z",
           "headRefName": "patch-1",
           "headRefOid": "7777777777777777777777777777777777777777",
           "headRepository": null,
@@ -97,6 +102,7 @@
           },
           "number": 12,
           "repository": {
+            "id": "R_kgDOexample12",
             "nameWithOwner": "user-7/other-repo"
           },
           "state": "OPEN",

@@ -93,6 +93,7 @@ SHOW_QUERY = (
     """
 query ForgectlShow($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
+    id
     nameWithOwner
     defaultBranchRef { name }
     squashMergeAllowed
@@ -290,6 +291,14 @@ def _str(value: object, what: str) -> str:
     if not isinstance(value, str):
         raise Malformed(what)
     return value
+
+
+def _repo_node_id(value: object) -> str:
+    """The repository's node id (opaque, stable across renames), checked as a PR's own id is."""
+    text = _str(value, "the repository id")
+    if not _NODE_ID.fullmatch(text):
+        raise Malformed("the repository id")
+    return text
 
 
 def _opt_str(value: object) -> str | None:
@@ -744,6 +753,7 @@ class GitHubBackend:
         built = m.PR(
             pr=f"{ref.host}/{canonical}#{number}",
             repo=f"{ref.host}/{canonical}",
+            repo_id=_repo_node_id(repo.get("id")),
             pr_id=node_id,
             number=number,
             url=f"https://{ref.host}/{canonical}/pull/{number}",

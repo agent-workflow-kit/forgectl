@@ -243,6 +243,8 @@ def test_a_repo_list_is_normalized(tmp_path: Path) -> None:
     assert first.head.repo == "gitlab.com/user-9/proj" and first.head.is_fork is False
     assert first.base_ref == "main"
     assert first.updated_at == "2026-10-05T12:30:00.000Z"
+    assert first.created_at == "2026-09-01T09:00:00.000Z"
+    assert first.repo_id == "gid://gitlab/Project/101"
 
 
 def test_fork_heads_deleted_heads_and_a_null_source(tmp_path: Path) -> None:
@@ -712,6 +714,9 @@ HOSTILE_FIELDS: list[tuple[str, Any]] = [
     ("sha", None),
     ("source_branch", None),
     ("target_branch", 3),
+    ("created_at", None),
+    ("created_at", "yesterday"),
+    ("created_at", "2026-09-01T09:00:00"),
     ("updated_at", None),
     ("updated_at", "yesterday"),
     ("updated_at", "2026-10-05T12:30:00"),

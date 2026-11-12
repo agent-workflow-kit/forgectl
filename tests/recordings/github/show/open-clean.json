@@ -4,6 +4,7 @@
       "defaultBranchRef": {
         "name": "main"
       },
+      "id": "R_kgDOexample7",
       "mergeCommitAllowed": true,
       "nameWithOwner": "user-7/example-repo",
       "pullRequest": {

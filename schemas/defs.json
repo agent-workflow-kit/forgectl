@@ -9,6 +9,11 @@
       "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?$",
       "description": "Lowercase host, with an optional :port only for a non-default port."
     },
+    "repository_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9:/_=-]{1,128}$",
+      "description": "Opaque, stable across renames and moves of the repository: GitHub repository node id, GitLab project global id (gid://gitlab/Project/N). A caller that sees the same repo_id under another repo path knows the repository was renamed. This is the host's stable repository id, not the host/path form of $defs/repo_id."
+    },
     "repo_id": {
       "type": "string",
       "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+$",
@@ -972,6 +977,10 @@
         "repo": {
           "$ref": "#/$defs/repo_id"
         },
+        "repo_id": {
+          "$ref": "#/$defs/repository_id",
+          "description": "The host's stable repository id (survives renames and moves), not the host/path form of $defs/repo_id; that form is in repo."
+        },
         "pr_id": {
           "type": "string",
           "pattern": "^[A-Za-z0-9:/_=-]{1,128}$",
@@ -1449,8 +1458,15 @@
             "ref"
           ]
         },
+        "created_at": {
+          "$ref": "#/$defs/ts"
+        },
         "updated_at": {
           "$ref": "#/$defs/ts"
+        },
+        "repo_id": {
+          "$ref": "#/$defs/repository_id",
+          "description": "The host's stable repository id (survives renames and moves), not the host/path form of $defs/repo_id; that form is in repo."
         },
         "snapshot": {
           "type": [
@@ -1589,7 +1605,9 @@
         "labels",
         "head",
         "base",
-        "updated_at"
+        "created_at",
+        "updated_at",
+        "repo_id"
       ]
     },
     "host_error": {

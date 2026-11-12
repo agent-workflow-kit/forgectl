@@ -31,6 +31,7 @@ def make_item(
         "pr": f"{repo}#{number}",
         "pr_id": f"PR_{number}",
         "repo": repo,
+        "repo_id": "R_" + repo.replace("/", "_").replace(".", "_"),
         "number": number,
         "url": f"https://{repo.split('/', 1)[0]}/{repo.split('/', 1)[1]}/pull/{number}",
         "title": title,
@@ -45,6 +46,7 @@ def make_item(
             "is_fork": False,
         },
         "base": {"ref": "main"},
+        "created_at": TS,
         "updated_at": updated_at,
     }
 

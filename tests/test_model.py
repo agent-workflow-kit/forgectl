@@ -92,6 +92,7 @@ def make_pr(**over: Any) -> m.PR:
         url="https://github.com/o/r/pull/7",
         backend="github",
         title="t",
+        repo_id="R_abc",
         body=None,
         author=author(),
         state="open",
@@ -1225,7 +1226,9 @@ def test_pr_list_item_validates_and_sorts_labels() -> None:
         labels=("z", "a"),
         head=m.Head(sha=H, ref="feat", repo="github.com/o/r", is_fork=False),
         base_ref="main",
+        created_at=T0,
         updated_at=T1,
+        repo_id="R_abc",
     )
     d = item.to_dict()
     validate(d, "forgectl/defs.json#/$defs/pr_list_item")

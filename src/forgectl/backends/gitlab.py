@@ -149,6 +149,11 @@ def _int_id(value: Any, what: str) -> int:
     return value
 
 
+def _project_gid(project_id: int) -> str:
+    """The global id of a GitLab project (the form ``pr_id`` uses for a merge request)."""
+    return f"gid://gitlab/Project/{project_id}"
+
+
 def _opt_int_id(value: Any, what: str) -> int | None:
     return None if value is None else _int_id(value, what)
 
@@ -538,6 +543,7 @@ class GitLabBackend:
         pr = m.PR(
             pr=f"{host_path}#{number}",
             repo=host_path,
+            repo_id=_project_gid(project_id),
             pr_id=f"gid://gitlab/MergeRequest/{_int_id(mr.get('id'), 'id')}",
             number=number,
             url=f"https://{target.host}{target.api_prefix}/{canonical}/-/merge_requests/{number}",
