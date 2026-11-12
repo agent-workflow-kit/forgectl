@@ -427,12 +427,12 @@ def test_refresh_keys_refetch() -> None:
     assert len([c for c in source.calls if c[0] == "prs"]) == 4
 
 
-def test_there_is_no_write_action() -> None:
+def test_there_is_no_write_action_but_merge() -> None:
     source = basic_source()
     opener = FakeOpener()
 
     async def script(app: BrowseApp, pilot: Pilot[None]) -> None:
-        for key in ("m", "p", "c", "d", "x", "M"):
+        for key in ("p", "c", "d", "x", "M"):
             await pilot.press(key)
         await settle(app, pilot)
 
@@ -444,6 +444,7 @@ def test_there_is_no_write_action() -> None:
         "slash",
         "escape",
         "o",
+        "m",
         "r",
         "R",
         "s",
@@ -456,7 +457,6 @@ def test_there_is_no_write_action() -> None:
         "H",
         *"123456",  # the detail sections: view only
     }
-    assert not hasattr(app, "action_merge")
     assert opener.opened == []
     assert {c[0] for c in source.calls} <= {"prs", "snapshot", "diff"}
     assert app.result()["merged"] == []

@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import gateway as gw
-from . import hookwatch
+from . import hookwatch, jsonlog
 from .config import Config
 from .errors import HOOK_STDERR_LIMIT, ForgectlError, truncate_utf8
 from .gateway import Gateway
@@ -467,6 +467,7 @@ def _start_async(
             "index": entry.index,
             "state_dir": state_dir,
             "pr": pr,
+            "log_rotation": [jsonlog.rotation().max_bytes, jsonlog.rotation().keep],
         }
         if not hookwatch.valid_spec(spec):
             gw.remove_tree(dirs.root)

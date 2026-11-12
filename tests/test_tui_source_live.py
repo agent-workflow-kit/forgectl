@@ -166,7 +166,7 @@ def test_only_the_three_read_commands_are_ever_run() -> None:
     source.snapshot(PR1)
     source.diff(PR1)
     assert {c[0] for c in run.calls} == {"prs", "snapshot", "diff"}
-    assert not hasattr(source, "merge") and not hasattr(source, "comment")
+    assert not hasattr(source, "comment") and not hasattr(source, "review")
 
 
 def test_a_failing_row_leaves_the_others_alone() -> None:
@@ -542,3 +542,23 @@ def test_light_after_close_is_cancelled() -> None:
     source.close()
     with pytest.raises(Cancelled):
         source.light()
+
+
+def test_the_live_source_applies_the_configured_log_rotation(tmp_path: Path) -> None:
+    from forgectl import jsonlog
+
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        f"log:\n  max_bytes: {jsonlog.MIN_MAX_BYTES}\n  keep: 2\n" + CONFIG_TEXT, encoding="utf-8"
+    )
+    jsonlog.set_rotation(jsonlog.Rotation())
+    registry.load_handlers()
+    original = registry.HANDLERS["snapshot"]
+    registry.HANDLERS["snapshot"] = lambda inv: {"ok": True}
+    try:
+        run = in_process_runner(str(path), {})
+        assert run(["snapshot", PR1]) == {"ok": True}
+        assert jsonlog.rotation() == jsonlog.Rotation(max_bytes=jsonlog.MIN_MAX_BYTES, keep=2)
+    finally:
+        registry.HANDLERS["snapshot"] = original
+        jsonlog.set_rotation(jsonlog.Rotation())

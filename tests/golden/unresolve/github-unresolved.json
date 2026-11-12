@@ -1,0 +1,8 @@
+{
+  "action": "unresolve",
+  "changed": true,
+  "dry_run": false,
+  "pr": "github.com/user-7/example-repo#7",
+  "resolved": false,
+  "thread_id": "gh:rt:PRRT_thread01"
+}

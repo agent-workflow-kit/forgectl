@@ -121,7 +121,7 @@ class GitLabFile:
     deletions: int | None
 
     def raw(self) -> RawFile:
-        """The shape position validation (TODO(#25)) reads: ``patch`` is None with no usable
+        """The shape position validation (``positions.py``) reads: ``patch`` is None with no usable
         fragment (binary, cut, rename only), which that rule treats as invalid. A ``Binary files
         ... differ`` notice is no fragment: its ``patch`` is None too, even for an added or
         deleted file that ``diff`` writes whole (headers only). A type change gives two entries
@@ -635,7 +635,7 @@ def list_files(
 
 
 def read_raw_files(gl: GitLabBackend, ref: PrRef) -> tuple[MrPin, RawFiles]:
-    """The pinned MR and its files as ``RawFiles`` (for position validation, TODO(#25))."""
+    """The pinned MR and its files as ``RawFiles`` (for position validation, ``positions.py``)."""
     target = gl._hosts.target(ref.host)
     mr, listing = _stable(gl, target, ref, lambda pin: list_files(gl, target, ref, pin))
     return mr, listing.raw()

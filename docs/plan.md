@@ -37,7 +37,8 @@ Status: planned, 2026-11-03. Implements [interface.md](interface.md) (normative)
 | `reads.py` | 1 | `prs`, `show`, `snapshot`, `diff`, `compare`, `files`, `comments`, `reviews`, `ci`, `access`, `whoami`, retries |
 | `hooks.py` | 3 | hook processes, payloads, outcomes, decision ids, the async watchdog |
 | `merge.py` | 3 | Merge order, method resolution, verification |
-| `post.py` | 4 | Post order, position validation, dedupe, draft handling, read-back, state steps |
+| `positions.py` | 4 | Position validation, `line_code` and position building |
+| `post.py` | 4 | Post order, dedupe, draft handling, read-back, state steps |
 | `tui/` | 6 | `browse`; only `tui.run` and the Textual widgets need the extra, the query engine modules import without it |
 
 ## Stage 0: Foundations
@@ -104,9 +105,9 @@ Status: planned, 2026-11-03. Implements [interface.md](interface.md) (normative)
 
 **Goal**: `browse` as specified: a read-only dashboard of your PRs with activity, filters and refresh, and then the `m` merge as a follow-up.
 
-**Issues**: #56 (`head.pushed_at`, `pushed_at_source`; depends on #10), #57 (`activity` block; depends on #56, #12, #16), #38 (read-only `browse`: list, detail pane, `o`, `/`, result file; no dependencies), #58 (list columns, sorting, filters; depends on #38, #57), #59 (manual and automatic refresh; depends on #58), #60 (`m` merge, the follow-up; depends on #38, #23). Related: #35 (self-managed GitLab verification, stage 5) must be done before GitLab rows can be treated as verified in #58 and #59, and #42 (ETag pass-through) lowers the cost of #59's polls.
+**Issues**: #56 (`head.pushed_at`, `pushed_at_source`; depends on #10), #57 (`activity` block; depends on #56, #12, #16), #38 (read-only `browse`: list, detail pane, `o`, `/`, result file; no dependencies), #58 (list columns, sorting, filters; depends on #38, #57), #59 (manual and automatic refresh; depends on #58), #60 (`m` merge, the follow-up; depends on #38 and the merge command, and passes no `--auto`). Related: #35 (self-managed GitLab verification, stage 5) must be done before GitLab rows can be treated as verified in #58 and #59, and #42 (ETag pass-through) lowers the cost of #59's polls.
 
-**Order**: #56 and #38 start first (independent). #57 follows #56, then #58 follows #38 and #57, then #59 follows #58. #60 follows #38 and #23 (`merge --auto`) and does not block the read-only dashboard.
+**Order**: #56 and #38 start first (independent). #57 follows #56, then #58 follows #38 and #57, then #59 follows #58. #60 follows #38 and the merge command and does not use `merge --auto` (D-20, D-54), so it does not wait for #23, and it does not block the read-only dashboard.
 
 **Success Criteria**: `snapshot` reports `head.pushed_at` with its source and the `activity` block on both hosts, with `activity.ignore_authors` honored; the list shows the columns, sorting and filters of [TUI](interface.md#tui), loads progressively with bounded concurrency and survives a failed snapshot; `r` and `R` refresh, the automatic refresh follows `browse.refresh_interval` and `--interval`, spends no more than changed or pending PRs plus a periodic full pass, and backs off near the rate limit; `o`, `--focus` and `--result-file` work; forge text renders with markup disabled; without the extra it exits 2 with the install command. The follow-up adds `m`, with the merge dialog, the same guards as `merge` and `merged` in the result file.
 
