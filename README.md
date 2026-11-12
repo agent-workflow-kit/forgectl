@@ -51,7 +51,7 @@ forgectl merge github.com/org/repo#42 --expected-head <sha> --expected-base main
 | Command | Purpose |
 |---|---|
 | `prs` | list PRs |
-| `show`, `snapshot` | PR facts; facts plus requests, reviews, threads and CI (`snapshot --no-bodies` leaves the free text out) |
+| `show`, `snapshot` | PR facts; facts plus requests, reviews, threads and CI (`snapshot --no-bodies` leaves the review and comment bodies out) |
 | `snapshots` | `snapshot` of many PRs from a few bulk GraphQL requests per host, falling back to `snapshot` per PR |
 | `poll` | the change-detection tuple of every PR of mine in a few requests, for a cheap `browse` refresh |
 | `diff`, `files` | diff (refused rather than cut off); changed paths |

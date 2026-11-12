@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "forgectl/cli/snapshot.json",
   "title": "snapshot output",
-  "description": "The PR object plus the parts below. Lists have a fixed order, so two snapshots compare directly, excluding fetched_at and rate_limit. With --no-bodies the body of the PR, of each review and of each comment is absent (never empty or null): all three are present or all three absent.",
+  "description": "The PR object plus the parts below. Lists have a fixed order, so two snapshots compare directly, excluding fetched_at and rate_limit. With --no-bodies the body of each review and of each comment is absent (never empty or null) while the body of the PR stays: every review and comment carries a body, or none does (empty lists fit either). The snapshots output accepts only the full shape.",
   "type": "object",
   "allOf": [
     {
@@ -82,39 +82,36 @@
       }
     },
     {
-      "if": {
-        "required": [
-          "body"
-        ]
-      },
-      "then": {
-        "properties": {
-          "reviews": {
-            "items": {
-              "$ref": "../defs.json#/$defs/review"
+      "anyOf": [
+        {
+          "properties": {
+            "reviews": {
+              "items": {
+                "$ref": "../defs.json#/$defs/review"
+              }
+            },
+            "threads": {
+              "items": {
+                "$ref": "../defs.json#/$defs/thread"
+              }
             }
-          },
-          "threads": {
-            "items": {
-              "$ref": "../defs.json#/$defs/thread"
+          }
+        },
+        {
+          "properties": {
+            "reviews": {
+              "items": {
+                "$ref": "#/$defs/review_no_body"
+              }
+            },
+            "threads": {
+              "items": {
+                "$ref": "#/$defs/thread_no_body"
+              }
             }
           }
         }
-      },
-      "else": {
-        "properties": {
-          "reviews": {
-            "items": {
-              "$ref": "#/$defs/review_no_body"
-            }
-          },
-          "threads": {
-            "items": {
-              "$ref": "#/$defs/thread_no_body"
-            }
-          }
-        }
-      }
+      ]
     }
   ],
   "unevaluatedProperties": false,
@@ -208,6 +205,7 @@
     "url",
     "backend",
     "title",
+    "body",
     "author",
     "state",
     "draft",

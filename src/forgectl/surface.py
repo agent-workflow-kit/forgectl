@@ -416,7 +416,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-bodies",
         dest="no_bodies",
         action=_OnceFlag,
-        help="leave out the body of the PR, its reviews and its comments",
+        help="leave out the bodies of the reviews and the comments",
     )
 
     p = add("snapshots", "snapshots of many PRs from a few bulk requests")

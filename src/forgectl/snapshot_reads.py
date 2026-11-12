@@ -19,11 +19,12 @@ def _bound(inv: registry.Invocation) -> PrRef:
 
 
 def drop_bodies(snap: dict[str, Any]) -> dict[str, Any]:
-    """``snapshot --no-bodies`` (#141): the snapshot without the free text of the PR, its reviews
-    and its comments. The ``body`` keys are absent, not empty: an empty body is a real answer.
-    Only those three places are touched, so ids, authors, states, shas, ``ci``, ``activity`` and
-    ``incomplete`` are what the full snapshot has. The input is not changed."""
-    out = {k: v for k, v in snap.items() if k != "body"}
+    """``snapshot --no-bodies`` (#141): the snapshot without the free text of its reviews and its
+    comments. The PR's own ``body`` stays. The review and comment ``body`` keys are absent, not
+    empty: an empty body is a real answer. Only those two places are touched, so ids, authors,
+    states, shas, ``ci``, ``activity`` and ``incomplete`` are what the full snapshot has. The
+    input is not changed."""
+    out = dict(snap)
     out["reviews"] = [{k: v for k, v in r.items() if k != "body"} for r in snap["reviews"]]
     out["threads"] = [
         {
