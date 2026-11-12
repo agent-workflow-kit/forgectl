@@ -256,6 +256,32 @@ def test_a_numbered_directory_does_not_stop_logging(state: Path) -> None:
     assert lines_of(state / LOG)[-1]["event"] == "x"
 
 
+def test_a_stuck_entry_past_keep_does_not_stop_rotation(state: Path) -> None:
+    state.mkdir(parents=True, mode=0o700)
+    (state / "log.jsonl.5").mkdir()  # past keep=3: the cleanup cannot unlink it
+    (state / "log.jsonl.1").write_bytes(b'{"old":1}\n')
+    fill(state, LOG, jsonlog.MIN_MAX_BYTES)
+    before = (state / LOG).read_bytes()
+    jsonlog.set_rotation(small(3))
+    warning = jsonlog.log_event(state, "info", "x")
+    assert warning is not None and "not rotated" in warning
+    assert (state / "log.jsonl.1").read_bytes() == before
+    assert (state / "log.jsonl.2").read_bytes() == b'{"old":1}\n'
+    assert lines_of(state / LOG)[-1]["event"] == "x"
+
+
+def test_a_truncated_record_still_reports_a_failed_rotation(state: Path) -> None:
+    state.mkdir(parents=True, mode=0o700)
+    (state / "log.jsonl.2").write_bytes(b'{"old":2}\n')
+    (state / "log.jsonl.3").mkdir()  # .2 cannot become .3: rotation fails
+    fill(state, LOG, jsonlog.MIN_MAX_BYTES)
+    jsonlog.set_rotation(small(3))
+    big = {f"k{n}": "y" * 2000 for n in range(64)}  # scrubbed, still over the line cap
+    warning = jsonlog.log_event(state, "info", "x", details=big)
+    assert warning is not None and "not rotated" in warning
+    assert lines_of(state / LOG)[-1]["details"] == {"truncated": True}
+
+
 def test_a_symlinked_log_is_not_rotated_and_still_refused(state: Path, tmp_path: Path) -> None:
     state.mkdir(parents=True, mode=0o700)
     target = tmp_path / "elsewhere"
@@ -492,6 +518,8 @@ def test_concurrent_writers_with_a_small_keep_stay_bounded_and_whole(
         for raw in path.read_bytes().split(b"\n"):
             if raw:
                 assert json.loads(raw)["pad"]  # every line parses whole
+    # the bounded log keeps the newest records: the writer that finished last has its last one
+    assert any(r["i"] == 299 for r in all_records(state))
 
 
 def test_concurrent_log_events_in_one_process_family_never_crash(
@@ -539,5 +567,25 @@ def test_a_run_with_a_bad_config_logs_with_the_defaults(
     code = main(["--config", str(config), "export"], tty=Tty(stdin=False, stderr=False))
     capsys.readouterr()
     assert code == 2
+    assert "log.jsonl.1" not in names(live)
+    assert lines_of(live / LOG)[-1]["event"] == "config_invalid"
+
+
+def test_a_later_run_with_a_bad_config_does_not_reuse_the_earlier_limits(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from forgectl.cli import main
+    from forgectl.humanactions import Tty
+
+    live = Path(os.environ["XDG_STATE_HOME"]) / "forgectl"
+    good = tmp_path / "good.yaml"
+    good.write_text(f"log:\n  max_bytes: {jsonlog.MIN_MAX_BYTES}\n  keep: 1\n", encoding="utf-8")
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("log:\n  keep: 0\n", encoding="utf-8")
+    tty = Tty(stdin=False, stderr=False)
+    assert main(["--config", str(good), "export"], tty=tty) == 0
+    fill(live, LOG, jsonlog.MIN_MAX_BYTES)  # at the earlier run's limit, far under the default
+    assert main(["--config", str(bad), "export"], tty=tty) == 2
+    capsys.readouterr()
     assert "log.jsonl.1" not in names(live)
     assert lines_of(live / LOG)[-1]["event"] == "config_invalid"

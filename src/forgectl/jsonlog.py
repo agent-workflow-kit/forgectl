@@ -382,7 +382,9 @@ def _lock(dfd: int) -> int | None:
 def _shift(dfd: int, keep: int) -> None:
     """``log.jsonl.N`` becomes ``.N+1`` (the one past ``keep`` is replaced), then ``log.jsonl``
     becomes ``.1``. A rename never follows a link, and a missing file (another process was
-    first) is skipped."""
+    first) is skipped. An entry past ``keep`` that cannot be removed does not stop the shift:
+    the first such failure is raised once the rename chain has run."""
+    stuck: OSError | None = None
     for name in os.listdir(dfd):
         found = _ROTATED.fullmatch(name)
         if found and int(found.group(1)) > keep:
@@ -390,12 +392,16 @@ def _shift(dfd: int, keep: int) -> None:
                 os.unlink(name, dir_fd=dfd)
             except FileNotFoundError:
                 pass
+            except OSError as err:
+                stuck = stuck or err
     steps = [(f"{LOG_FILE}.{n}", f"{LOG_FILE}.{n + 1}") for n in range(keep - 1, 0, -1)]
     for src, dst in [*steps, (LOG_FILE, f"{LOG_FILE}.1")]:
         try:
             os.rename(src, dst, src_dir_fd=dfd, dst_dir_fd=dfd)
         except FileNotFoundError:
             pass
+    if stuck is not None:
+        raise stuck
 
 
 def rotate_log(directory: Path, incoming: int, limits: Rotation) -> None:
@@ -435,7 +441,8 @@ def append_log(
     """Append one ``log.jsonl`` line, rotating first when it would not fit.
 
     A failed rotation does not stop the append; it is returned as a warning text. A failed
-    append raises ``JsonlError``.
+    append raises ``JsonlError`` instead, and that error wins over the rotation warning (the
+    warning is dropped).
     """
     data_len = len(encode_line(record))
     note: str | None = None
