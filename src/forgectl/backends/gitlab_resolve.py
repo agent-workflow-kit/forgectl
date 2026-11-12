@@ -2,7 +2,9 @@
 
 - The lookup is ``GET /projects/{id}/merge_requests/{iid}/discussions/{id}``: another MR's
   discussion answers 404 (``not_found``). A discussion is resolvable when it is not an individual
-  note and any of its notes is, and resolved when every resolvable note is.
+  note and any of its notes is, and resolved when every resolvable note is. A half-resolved
+  discussion is neither resolved (for ``resolve``) nor unresolved (for ``unresolve``): both write
+  it, and an answer leaving a mix is ``outcome_unknown``.
 - The write is ``PUT .../discussions/{id}`` with ``{"resolved": <bool>}``, status 200. Its proof is
   the answered discussion: this id, in the requested state. A redirected write answers a GET's
   list or a discussion in the old state, so it fails that proof and is ``outcome_unknown``.
@@ -39,7 +41,9 @@ def thread_state(data: Any, account_id: str) -> ThreadState:
     resolvable = not individual and bool(resolvable_notes)
     resolved = resolvable and all(n.get("resolved") is True for n in resolvable_notes)
     author = _obj(notes[0].get("author")).get("id")
-    return ThreadState(resolvable, resolved, None if author is None else str(author) == account_id)
+    any_resolved = resolvable and any(n.get("resolved") is True for n in resolvable_notes)
+    mine = None if author is None else str(author) == account_id
+    return ThreadState(resolvable, resolved, mine, any_resolved)
 
 
 class GitLabThreads(GitLabPoster):
@@ -75,7 +79,7 @@ class GitLabThreads(GitLabPoster):
                 state = thread_state(data, "")
             except ForgectlError:  # not a discussion: the write may still have landed
                 state = None
-        if state is None or not state.resolvable or state.resolved is not resolved:
+        if state is None or not state.resolvable or not state.settled(resolved):
             raise ForgectlError(
                 "outcome_unknown",
                 "the answer does not show the discussion in the requested state; "

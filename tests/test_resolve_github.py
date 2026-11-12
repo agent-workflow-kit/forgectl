@@ -16,8 +16,10 @@ from typing import Any
 
 import pytest
 
+from forgectl import resolve as resolve_module
 from forgectl.cli import main
 from forgectl.humanactions import Tty
+from forgectl.reads import make_env
 
 from .harness import golden, schemas
 from .harness.safety import assert_call_safe
@@ -56,6 +58,10 @@ def thread_doc(
         "comments": {"nodes": [{"author": None if author is None else {"login": author}}]},
     }
     return {"data": {"node": node}}
+
+
+def no_sleep(inv: Any, **kw: Any) -> Any:
+    return make_env(inv, sleep=lambda _seconds: None, **kw)
 
 
 def answer_read(rig: Rig, doc: dict[str, Any], **kw: Any) -> None:
@@ -511,3 +517,20 @@ def test_a_failed_audit_file_stops_before_any_call(
     done = run(rig)
     assert done.code == 12 and done.error["code"] == "audit_unavailable"
     assert writes(rig) == []
+
+
+def test_a_persistent_503_on_the_thread_read_makes_retries_plus_one_requests(rig: Rig) -> None:
+    rig.monkeypatch.setattr(resolve_module, "make_env", no_sleep)
+    answer_read(rig, {}, status=503, times=None)
+    done = run(rig, extra_config="retries: 1\n")
+    assert done.code == 12, done.err
+    assert len([c for c in rig.calls() if c.stdin and "node(id" in c.stdin]) == 2
+
+
+def test_a_persistent_503_on_the_reread_makes_retries_plus_one_requests(rig: Rig) -> None:
+    rig.monkeypatch.setattr(resolve_module, "make_env", no_sleep)
+    answer_read(rig, thread_doc(), times=1)
+    answer_read(rig, {}, status=503, times=None)
+    done = run(rig, extra_config="retries: 1\n" + hook_config("pre-post", "exit 0"))
+    assert done.code == 12, done.err
+    assert len([c for c in rig.calls() if c.stdin and "node(id" in c.stdin]) == 1 + 2

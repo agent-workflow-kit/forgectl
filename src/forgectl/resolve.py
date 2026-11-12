@@ -107,9 +107,8 @@ class ResolveRun:
         self.pr_id = f"{pr.repo}#{pr.number}"
         self.head_sha = pr.head.sha
         self.poster.prepare(pr)  # nothing the write needs is read inside the audited window
-        state = self.env.call(
-            lambda: self.poster.read_thread(pr, self.thread, self._login, self._account)
-        )
+        # the backend retries its own read: wrapping it again would retry four times over
+        state = self.poster.read_thread(pr, self.thread, self._login, self._account)
         if not state.resolvable:
             raise refused(
                 "not_resolvable",
@@ -128,7 +127,7 @@ class ResolveRun:
         user = self.env.call(lambda: self.env.hosts.authenticated_user(target))
         self._login, self._account = user.login, str(user.id)
         pr, state = self._read()
-        if state.resolved is self.want:  # already there: no confirmation, hooks or audit
+        if state.settled(self.want):  # already there: no confirmation, hooks or audit
             return self._out(changed=False)
         dialog = require_confirmation(self.human)
         if self.human.dry_run:
@@ -146,7 +145,7 @@ class ResolveRun:
         # step 8: a slow gate may have outlasted what it saw
         if dialog or hooks.entries(self.inv.config.config, "pre-post"):
             pr, state = self._read()
-            if state.resolved is self.want:  # someone else got there first: nothing to write
+            if state.settled(self.want):  # someone else got there first: nothing to write
                 return self._out(changed=False)
         return self._write(pr, state)
 

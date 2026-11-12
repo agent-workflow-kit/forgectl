@@ -15,7 +15,9 @@ from typing import Any
 
 import pytest
 
+from forgectl import resolve as resolve_module
 from forgectl.cli import main
+from forgectl.reads import make_env
 
 from .gitlab_support import TOKEN
 from .harness import golden, schemas
@@ -52,6 +54,10 @@ def disc(
         note(6, "b", 77, resolvable=resolvable, resolved=resolved and resolvable),
     ]
     return {"id": ident, "individual_note": individual, "notes": items}
+
+
+def no_sleep(inv: Any, **kw: Any) -> Any:
+    return make_env(inv, sleep=lambda _seconds: None, **kw)
 
 
 def put(rig: Rig, body: Any, status: int = 200, **kw: Any) -> None:
@@ -309,3 +315,50 @@ def test_the_token_is_never_in_the_output(rig: Rig) -> None:
     done = run(rig)
     assert TOKEN not in done.out + done.err
     assert Path(rig.tmp).exists()
+
+
+def half(*, first: bool) -> dict[str, Any]:
+    """A discussion whose two resolvable notes differ: one resolved, one open."""
+    return disc(notes=[note(5, "a", resolvable=True, resolved=first),
+                       note(6, "b", resolvable=True, resolved=not first)])  # fmt: skip
+
+
+def test_unresolve_of_a_half_resolved_thread_writes(rig: Rig) -> None:
+    get(rig.forges, URL, half(first=True), times=None)
+    put(rig, disc(False))
+    done = run(rig, "unresolve")
+    assert done.code == 0, done.err
+    assert done.json["changed"] is True and len(puts(rig)) == 1
+
+
+def test_resolve_of_a_half_resolved_thread_writes(rig: Rig) -> None:
+    get(rig.forges, URL, half(first=False), times=None)
+    put(rig, disc(True))
+    done = run(rig)
+    assert done.code == 0, done.err
+    assert done.json["changed"] is True and len(puts(rig)) == 1
+
+
+@pytest.mark.parametrize("command", ["resolve", "unresolve"])
+def test_a_put_answer_leaving_a_mix_is_outcome_unknown(rig: Rig, command: str) -> None:
+    get(rig.forges, URL, disc(command == "unresolve"), times=None)
+    put(rig, half(first=True))
+    done = run(rig, command)
+    assert done.code == 12 and done.error["code"] == "outcome_unknown"
+
+
+def test_a_persistent_503_on_the_thread_read_makes_retries_plus_one_requests(rig: Rig) -> None:
+    rig.monkeypatch.setattr(resolve_module, "make_env", no_sleep)
+    get(rig.forges, URL, {}, status=503, times=None)
+    done = run(rig, extra_config="retries: 1\n")
+    assert done.code == 12, done.err
+    assert len([c for c in rig.calls() if c.argv[-1] == URL]) == 2
+
+
+def test_a_persistent_503_on_the_reread_makes_retries_plus_one_requests(rig: Rig) -> None:
+    rig.monkeypatch.setattr(resolve_module, "make_env", no_sleep)
+    get(rig.forges, URL, disc(False), times=1)
+    get(rig.forges, URL, {}, status=503, times=None)
+    done = run(rig, extra_config="retries: 1\n" + hook("pre-post", "exit 0"))
+    assert done.code == 12, done.err
+    assert len([c for c in rig.calls() if c.argv[-1] == URL]) == 1 + 2

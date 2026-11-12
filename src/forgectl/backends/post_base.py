@@ -84,6 +84,16 @@ class ThreadState:
     resolvable: bool
     resolved: bool  # never true for a thread that is not resolvable
     author_is_self: bool | None  # the thread's first comment is the account's; None: not known
+    # whether any resolvable part is resolved; None: the same as ``resolved`` (GitHub). GitLab's
+    # half-resolved discussion is resolved=False and any_resolved=True.
+    any_resolved: bool | None = None
+
+    def settled(self, want: bool) -> bool:
+        """Already in the requested state: ``resolve`` needs every part resolved, ``unresolve``
+        needs none."""
+        if want:
+            return self.resolved
+        return not (self.resolved if self.any_resolved is None else self.any_resolved)
 
 
 class ThreadPoster(Protocol):
