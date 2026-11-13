@@ -9,6 +9,7 @@ against ``safety.reference_env`` alone.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import select
@@ -2586,3 +2587,278 @@ def test_spawn_detached_kills_the_group_before_closing_the_ack_pipe(
     (proc,) = [p for p in gw._DETACHED if p.pid == started[0]] or [None]
     assert proc is None or (proc.stdout is not None and proc.stdout.closed)
     assert gw.detached_children() == []
+
+
+# -- Private directory cleanup without O_PATH (#172, the macOS path) ------------------------------
+
+
+@pytest.fixture
+def no_o_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the code path macOS takes: no ``O_PATH`` handle, so an unreadable directory cannot be
+    opened and has to be fixed through its parent. Only the control flow runs here. Linux cannot
+    exercise the real macOS calls: ``chmod(follow_symlinks=False)`` (``fchmodat`` with
+    ``AT_SYMLINK_NOFOLLOW``) on a symlink, and ``open(O_RDONLY | O_DIRECTORY)`` of a directory
+    made 0700 through its parent. Those are covered only by step 6.10 of docs/macos-checklist.md."""
+    monkeypatch.setattr(gw, "_O_PATH", 0)
+
+
+def _modes(path: Path) -> int:
+    return path.lstat().st_mode & 0o777
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+@pytest.mark.parametrize("mode", [0o000, 0o100, 0o200, 0o300, 0o500])
+def test_remove_tree_without_o_path_removes_an_unreadable_top(
+    tmp_path: Path, no_o_path: None, mode: int
+) -> None:
+    top = tmp_path / "forgectl-top"
+    (top / "cwd" / "deep").mkdir(parents=True)
+    (top / "cwd" / "deep" / "f").write_text("x")
+    top.chmod(mode)
+    gw.remove_tree(str(top))
+    assert not top.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+def test_remove_tree_without_o_path_removes_nested_unreadable_directories(
+    tmp_path: Path, no_o_path: None
+) -> None:
+    top = tmp_path / "forgectl-top"
+    x = top / "cwd" / "x"
+    (x / "y" / "z").mkdir(parents=True)
+    (x / "y" / "z" / "f").write_text("x")
+    (x / "y" / "z").chmod(0o000)
+    (x / "y").chmod(0o000)
+    x.chmod(0o500)
+    (top / "cwd").chmod(0o000)
+    top.chmod(0o000)
+    gw.remove_tree(str(top))
+    assert not top.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+def test_chmod_dir_without_o_path_fixes_a_mode_000_directory(
+    tmp_path: Path, no_o_path: None
+) -> None:
+    top = tmp_path / "forgectl-top"
+    (top / "d").mkdir(parents=True)
+    (top / "d").chmod(0o000)
+    gw._chmod_dir(str(top), str(top / "d"))
+    assert _modes(top / "d") == 0o700
+    gw.remove_tree(str(top))
+    assert not top.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+def test_chmod_dir_without_o_path_never_follows_a_symlink_or_changes_a_file(
+    tmp_path: Path, no_o_path: None
+) -> None:
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    victim.chmod(0o000)  # a symlink to it must not get it fixed
+    top = tmp_path / "forgectl-top"
+    top.mkdir()
+    (top / "link").symlink_to(victim)
+    (top / "f").write_text("x")
+    (top / "f").chmod(0o000)
+    for target in (top / "link", top / "link" / "sub", top / "f"):
+        gw._chmod_dir(str(top), str(target))
+    assert _modes(victim) == 0o000
+    assert _modes(top / "f") == 0o000
+    victim.chmod(0o700)
+    (top / "f").chmod(0o600)
+    gw.remove_tree(str(top))
+    assert not top.exists() and victim.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+def test_fallback_refuses_a_file_or_symlink_without_changing_it(
+    tmp_path: Path, no_o_path: None
+) -> None:
+    """Calls the fallback itself (the O_NOFOLLOW open in ``_open_dir`` refuses these first, so
+    only a direct call reaches it): a plain file and a symlink to a mode 000 directory are refused
+    as not-a-directory by the lstat check, before any chmod, so file, link target and mode of the
+    victim stay as they were."""
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    victim.chmod(0o000)
+    top = tmp_path / "forgectl-top"
+    top.mkdir()
+    (top / "link").symlink_to(victim)
+    (top / "f").write_text("x")
+    (top / "f").chmod(0o000)
+    top_fd = os.open(top, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for name in ("f", "link"):
+            with pytest.raises(NotADirectoryError):
+                gw._open_after_fixing_mode(name, top_fd)
+    finally:
+        os.close(top_fd)
+    assert _modes(top / "f") == 0o000  # a file is not made 0700
+    assert _modes(victim) == 0o000  # the link's target is not followed
+    assert (top / "link").is_symlink()
+    victim.chmod(0o700)
+    (top / "f").chmod(0o600)
+    assert (top / "f").read_text() == "x"
+    gw.remove_tree(str(top))
+    assert not top.exists() and victim.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+def test_fallback_maps_a_symlink_swapped_in_after_the_check_to_eloop(
+    tmp_path: Path, no_o_path: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A symlink takes the directory's name after the lstat check: the chmod must not follow it
+    (the victim keeps its mode) and the refusal is ELOOP, which ``_chmod_dir`` skips. On Linux
+    the no-follow chmod of a symlink raises, which is the branch checked here; on macOS it
+    changes the link itself and the O_NOFOLLOW open refuses it (checklist step 6.10)."""
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    victim.chmod(0o000)
+    top = tmp_path / "forgectl-top"
+    (top / "d").mkdir(parents=True)
+    (top / "d").chmod(0o000)
+    real_chmod = os.chmod
+
+    swapped: list[bool] = []
+
+    def swapping_chmod(path: Any, mode: int, **kwargs: Any) -> None:
+        if path == "d" and not swapped:
+            swapped.append(True)
+            (top / "d").chmod(0o700)
+            (top / "d").rmdir()
+            (top / "d").symlink_to(victim)
+        real_chmod(path, mode, **kwargs)
+
+    top_fd = os.open(top, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        monkeypatch.setattr(gw.os, "chmod", swapping_chmod)
+        with pytest.raises(OSError) as raised:
+            gw._open_after_fixing_mode("d", top_fd)
+        monkeypatch.undo()
+    finally:
+        os.close(top_fd)
+    assert swapped and raised.value.errno == errno.ELOOP
+    assert _modes(victim) == 0o000
+    victim.chmod(0o700)
+    gw.remove_tree(str(top))
+    assert not top.exists() and victim.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+def test_fallback_under_an_unsearchable_parent_raises_permission_error_and_changes_nothing(
+    tmp_path: Path, no_o_path: None
+) -> None:
+    """Below a mode 000 parent the entry cannot even be looked at: the error is the parent's
+    PermissionError (``_chmod_dir`` ends there, ``remove_tree`` fixes the parent first) and a
+    symlink or file inside keeps its mode."""
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    victim.chmod(0o000)
+    top = tmp_path / "forgectl-top"
+    (top / "p").mkdir(parents=True)
+    (top / "p" / "link").symlink_to(victim)
+    (top / "p" / "f").write_text("x")
+    (top / "p" / "f").chmod(0o000)
+    top_fd = os.open(top, os.O_RDONLY | os.O_DIRECTORY)
+    parent_fd = os.open(top / "p", os.O_RDONLY | os.O_DIRECTORY)
+    (top / "p").chmod(0o000)
+    try:
+        for name in ("link", "f"):
+            with pytest.raises(PermissionError):
+                gw._open_after_fixing_mode(name, parent_fd)
+        with pytest.raises(PermissionError):
+            gw._open_after_fixing_mode("p/link", top_fd)
+    finally:
+        os.close(parent_fd)
+        os.close(top_fd)
+    (top / "p").chmod(0o700)
+    assert _modes(victim) == 0o000
+    assert _modes(top / "p" / "f") == 0o000
+    victim.chmod(0o700)
+    gw.remove_tree(str(top))
+    assert not top.exists() and victim.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+def test_remove_tree_without_o_path_never_chmods_outside_the_top(
+    tmp_path: Path, no_o_path: None
+) -> None:
+    """A mode 000 sibling of the top, and a mode 000 directory behind a symlink inside it, keep
+    their modes; the parent of the top is never changed."""
+    base = tmp_path / "base"
+    base.mkdir()
+    base.chmod(0o755)
+    sibling = base / "sibling"
+    sibling.mkdir()
+    sibling.chmod(0o000)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside.chmod(0o000)
+    top = base / "forgectl-top"
+    (top / "d").mkdir(parents=True)
+    (top / "d" / "link").symlink_to(outside)
+    (top / "d").chmod(0o000)
+    gw.remove_tree(str(top))
+    assert not top.exists()
+    assert _modes(sibling) == 0o000 and _modes(outside) == 0o000 and _modes(base) == 0o755
+    sibling.chmod(0o700)
+    outside.chmod(0o700)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+def test_chmod_dir_without_o_path_skips_a_directory_swapped_for_a_symlink(
+    tmp_path: Path, no_o_path: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The directory is replaced by a symlink to a mode 000 victim after the type check and
+    before the chmod: the victim is not followed and keeps its mode."""
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    victim.chmod(0o000)
+    top = tmp_path / "forgectl-top"
+    (top / "d").mkdir(parents=True)
+    (top / "d").chmod(0o000)
+    real_chmod = os.chmod
+    swapped: list[bool] = []
+
+    def swapping_chmod(path: Any, mode: int, **kwargs: Any) -> None:
+        if path == "d" and not swapped:
+            swapped.append(True)
+            (top / "d").chmod(0o700)
+            (top / "d").rmdir()
+            (top / "d").symlink_to(victim)
+        real_chmod(path, mode, **kwargs)
+
+    monkeypatch.setattr(gw.os, "chmod", swapping_chmod)
+    gw._chmod_dir(str(top), str(top / "d"))
+    monkeypatch.undo()
+    assert swapped and _modes(victim) == 0o000
+    victim.chmod(0o700)
+    gw.remove_tree(str(top))
+    assert not top.exists() and victim.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+def test_chmod_dir_without_o_path_skips_a_directory_replaced_by_another_directory(
+    tmp_path: Path, no_o_path: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A different directory takes the name between the check and the reopen: the identity check
+    refuses it, so nothing is changed through the reopened handle and nothing is raised."""
+    top = tmp_path / "forgectl-top"
+    (top / "d").mkdir(parents=True)
+    (top / "d").chmod(0o000)
+    real_chmod = os.chmod
+
+    def swapping_chmod(path: Any, mode: int, **kwargs: Any) -> None:
+        real_chmod(path, mode, **kwargs)
+        if path == "d":
+            (top / "d").rename(top / "d-old")  # kept, so the new directory gets a new inode
+            (top / "d").mkdir()
+            (top / "d").chmod(0o750)
+
+    monkeypatch.setattr(gw.os, "chmod", swapping_chmod)
+    gw._chmod_dir(str(top), str(top / "d"))
+    monkeypatch.undo()
+    assert _modes(top / "d") == 0o750
+    gw.remove_tree(str(top))
+    assert not top.exists()
