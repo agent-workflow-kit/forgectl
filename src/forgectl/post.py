@@ -18,7 +18,8 @@ Position validation (step 3) for ``review`` comments is ``positions.py``. ``revi
 ``review.py`` (#26), and on GitLab ``review.py`` with ``backends/gitlab_review.py`` (#27); both
 share the limits and the marker of this module.
 ``approve`` (#28) is ``review.py``'s run with the action ``approve``.
-``resolve`` and ``unresolve`` (``resolve.py``) reuse its audit, hook and signal helpers.
+``resolve`` and ``unresolve`` (``resolve.py``) and ``review``/``approve`` (``review.py``) reuse its
+audit, hook and signal helpers.
 """
 
 from __future__ import annotations
@@ -188,47 +189,67 @@ def _poster(backend: str, env: ReadEnv) -> Poster:
 
 
 def attempt_write(
-    write: Callable[[], Outcome], log: Callable[[str, str, dict[str, Any]], None]
-) -> Outcome:
+    write: Callable[[], Any],
+    log: Callable[[str, str, dict[str, Any]], None],
+    *,
+    make: Callable[[str, ForgectlError], Any] = lambda result, error: Outcome(result, error=error),
+    what: str = "post",
+) -> Any:
     """Run the one host write. A bug here (any non-forgectl exception) is an unknown outcome: the
     write may have landed, so the audit result and the post- hooks still follow. A signal is not
-    caught."""
+    caught.
+
+    ``make`` builds the outcome of a failure from its result and error (``review`` has its own
+    outcome type) and ``what`` names the write in the internal-error message."""
     try:
         return write()
     except ForgectlError as err:
         unknown = err.code in ("outcome_unknown", "wrong_host_response")
-        return Outcome("outcome_unknown" if unknown else "failed", error=err)
+        return make("outcome_unknown" if unknown else "failed", err)
     except Exception as exc:
         try:
             log("error", "internal", {"exception": type(exc).__name__})
         except Exception:  # a failing log must not skip the record and the hooks
             pass
-        return Outcome(
+        return make(
             "outcome_unknown",
-            error=ForgectlError(
+            ForgectlError(
                 "outcome_unknown",
-                f"internal error after the post was sent ({type(exc).__name__}); "
+                f"internal error after the {what} was sent ({type(exc).__name__}); "
                 "it may have landed",
             ),
         )
 
 
+def _posted_ids(outcome: Outcome) -> list[str]:
+    return list(outcome.posted.ids) if outcome.posted else []
+
+
 def audited_write(
     directory: Path,
     context: audit.AuditContext,
-    write: Callable[[], Outcome],
-    post_hooks: Callable[[Outcome], None],
-) -> Outcome:
+    write: Callable[[], Any],
+    post_hooks: Callable[[Any], None],
+    *,
+    ids: Callable[[Any], list[str]] = _posted_ids,
+    on_attempt: Callable[[audit.Attempt], None] | None = None,
+) -> Any:
     """Steps 9 and 12 for every post command: audit ``attempted``, the one write, the audit
-    result, then the ``post-post`` hooks. The caller raises ``outcome.error`` afterwards."""
+    result, then the ``post-post`` hooks. The caller raises ``outcome.error`` afterwards.
+
+    The outcome is anything with ``result`` and ``error``. ``ids`` gives the ids the audit record
+    carries (default: those of ``outcome.posted``) and ``on_attempt`` receives the open
+    ``audit.Attempt`` once ``attempted`` is recorded, so a write that learns an id mid-way can set
+    ``unknown_ids`` for a signal."""
     audit_error: ForgectlError | None = None
     signalled = False
     with audit.Attempt(directory, context) as attempt:
         attempt.begin()  # a failure here is audit_unavailable and nothing has been sent
+        if on_attempt is not None:
+            on_attempt(attempt)
         outcome = write()
-        ids = list(outcome.posted.ids) if outcome.posted else []
         try:
-            attempt.finish(outcome.result, ids=ids)
+            attempt.finish(outcome.result, ids=ids(outcome))
         except ForgectlError as err:  # audit_failed: the post- hooks still run
             audit_error = err
         except SignalExit:

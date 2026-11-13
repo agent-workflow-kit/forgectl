@@ -46,7 +46,7 @@ from .backends.github_post import GitHubPoster
 from .backends.github_review import GitHubReviewer, Submitted
 from .backends.gitlab_post import GitLabPoster
 from .backends.gitlab_review import Found, GitLabReviewer, host_rejected, matches_sent
-from .errors import ForgectlError, SignalExit, refused, usage
+from .errors import ForgectlError, refused, usage
 from .humanactions import HumanContext, require_confirmation
 from .identifiers import PrRef
 from .merge import base_matches
@@ -56,6 +56,10 @@ from .post import (
     GITHUB_COMMENT_LIMIT,
     GITLAB_LIMIT,
     INLINE_COMMENT_LIMIT,
+    attempt_write,
+    audited_write,
+    fire_post_hooks,
+    fire_pre_hooks,
     marker_line,
     prepare_body,
     read_input,
@@ -662,15 +666,12 @@ class ReviewRun:
         if dialog and not self._dialog(pr):
             raise ForgectlError("confirmation_required", "declined")
         # step 7: pre-post hooks (a veto or escalation raises)
-        pre = hooks.run_pre_hooks(
-            self.env.gateway,
-            "pre-post",
+        pre = fire_pre_hooks(
+            self.env,
             self._hook_fields(pr),
-            decision_ids=self.decision_ids,
-            override_escalation=bool(args.override_escalation),
+            self.decision_ids,
+            bool(args.override_escalation),
         )
-        for text in pre.warnings:
-            output.warn(text)
         self.decision_ids = list(pre.decision_ids)
         self.escalated = bool(pre.escalated)
         # step 8: a slow gate may have outlasted what it saw
@@ -729,28 +730,9 @@ class ReviewRun:
         del fields["override_escalation"], fields["allow_self"]
         fields["result"] = outcome.result
         fields["ids"] = self._audit_ids(outcome)
-        result = hooks.run_post_hooks(
-            self.env.gateway,
-            "post-post",
-            fields,
-            decision_ids=self.decision_ids,
-            state_dir=str(self.directory),
-            pr=self.pr_id,
-        )
-        for text in result.warnings:
-            output.warn(text)
-        for report in result.reports:
-            if report.outcome == "failed":
-                self._log(
-                    "warn",
-                    "hook_failed",
-                    {"hook": report.hook, "index": report.index, "why": report.detail},
-                )
+        fire_post_hooks(self.env, fields, self.decision_ids, self.directory, self.pr_id, self._log)
 
     # -- steps 9 to 12 -------------------------------------------------------------------------
-
-    # TODO(#29): switch to the shared post.py write helpers once the #29 refactor lands
-    # (_post_hooks, _write and _attempt repeat post.py's audit window, hooks and signal handling)
 
     @staticmethod
     def _audit_ids(outcome: Outcome) -> list[str]:
@@ -785,56 +767,31 @@ class ReviewRun:
         )
         if self.env.gateway.budget.remaining() <= 0:  # nothing was sent: no `attempted` record
             raise ForgectlError("network_error", "the time budget ran out before the review")
-        audit_error: ForgectlError | None = None
-        signalled = False
-        with audit.Attempt(self.directory, context) as attempt:
-            self._attempt_record = attempt
-            attempt.begin()  # a failure here is audit_unavailable and nothing has been sent
-            outcome = self._attempt(pr)
-            try:
-                attempt.finish(outcome.result, ids=self._audit_ids(outcome))
-            except ForgectlError as err:  # audit_failed: the post- hooks still run
-                audit_error = err
-            except SignalExit:
-                if not attempt.finished:
-                    raise  # the outcome is not on record: Attempt records outcome_unknown
-                signalled = True
-                audit_error = attempt.finish_error
-        if not signalled:
-            try:
-                self._post_hooks(pr, outcome)
-            except SignalExit:
-                pass  # the running hook's group was ended; the remaining hooks do not run
-        if audit_error is not None:
-            raise audit_error
+        outcome = audited_write(
+            self.directory,
+            context,
+            lambda: self._attempt(pr),
+            lambda done: self._post_hooks(pr, done),
+            ids=self._audit_ids,
+            on_attempt=self._remember_attempt,
+        )
         if outcome.error is not None:
             raise outcome.error
         assert outcome.landed
         return self._out(outcome=outcome, already=bool(self.hits), hits=self.hits)
 
+    def _remember_attempt(self, attempt: audit.Attempt) -> None:
+        self._attempt_record = attempt
+
     def _attempt(self, pr: PR) -> Outcome:
-        """The write and its read-back. A bug here (any non-forgectl exception) is an unknown
-        outcome: the write may have landed, so the audit result and the post- hooks still follow.
-        A signal is not caught."""
+        """The write and its read-back; ``attempt_write`` turns any failure into an outcome."""
         assert self.prep is not None
-        try:
-            return self._send_gitlab(pr) if self.gitlab else self._send(pr)
-        except ForgectlError as err:
-            unknown = err.code in ("outcome_unknown", "wrong_host_response")
-            return Outcome("outcome_unknown" if unknown else "failed", error=err)
-        except Exception as exc:
-            try:
-                self._log("error", "internal", {"exception": type(exc).__name__})
-            except Exception:  # a failing log must not skip the record and the hooks
-                pass
-            return Outcome(
-                "outcome_unknown",
-                error=ForgectlError(
-                    "outcome_unknown",
-                    f"internal error after the review was sent ({type(exc).__name__}); "
-                    "it may have landed",
-                ),
-            )
+        return attempt_write(
+            lambda: self._send_gitlab(pr) if self.gitlab else self._send(pr),
+            self._log,
+            make=lambda result, error: Outcome(result, error=error),
+            what="review",
+        )
 
     def _send(self, pr: PR) -> Outcome:
         prep = self.prep
