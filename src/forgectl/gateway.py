@@ -383,9 +383,32 @@ def _open_dir(name: str, dir_fd: int | None) -> tuple[int, bool]:
         return os.open(name, _DIR_FLAGS, dir_fd=dir_fd), False
     except PermissionError:
         if not _O_PATH:
-            raise
+            return _open_after_fixing_mode(name, dir_fd), False
     flags = _O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     return os.open(name, flags, dir_fd=dir_fd), True
+
+
+def _open_after_fixing_mode(name: str, dir_fd: int | None) -> int:
+    """The fallback of ``_open_dir`` without ``O_PATH`` (macOS): make the unreadable directory
+    ``name`` 0700 through its parent, then open it. The entry is checked as a directory without
+    following a symlink and changed with ``chmod(follow_symlinks=False)``, so a symlink that takes
+    its place is never followed; the reopened fd must be the same directory (device and inode) or
+    it is refused as ``ELOOP``, so a swap for another directory is skipped like a symlink. Only an
+    entry inside the private directory can be reached, and a file or symlink swapped in during the
+    check is at worst changed itself, never its target."""
+    before = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(before.st_mode):
+        raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), name)
+    try:
+        os.chmod(name, 0o700, dir_fd=dir_fd, follow_symlinks=False)
+    except (NotImplementedError, ValueError):  # a symlink took its place; Linux cannot chmod one
+        raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), name) from None
+    fd = os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
+    after = os.fstat(fd)
+    if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+        os.close(fd)
+        raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), name)
+    return fd
 
 
 def _chmod_dir(top: str, path: str) -> None:

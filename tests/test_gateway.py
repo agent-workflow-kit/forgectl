@@ -2586,3 +2586,166 @@ def test_spawn_detached_kills_the_group_before_closing_the_ack_pipe(
     (proc,) = [p for p in gw._DETACHED if p.pid == started[0]] or [None]
     assert proc is None or (proc.stdout is not None and proc.stdout.closed)
     assert gw.detached_children() == []
+
+
+# -- Private directory cleanup without O_PATH (#172, the macOS path) ------------------------------
+
+
+@pytest.fixture
+def no_o_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the code path macOS takes: no ``O_PATH`` handle, so an unreadable directory cannot be
+    opened and has to be fixed through its parent."""
+    monkeypatch.setattr(gw, "_O_PATH", 0)
+
+
+def _modes(path: Path) -> int:
+    return path.lstat().st_mode & 0o777
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+@pytest.mark.parametrize("mode", [0o000, 0o100, 0o200, 0o300, 0o500])
+def test_remove_tree_without_o_path_removes_an_unreadable_top(
+    tmp_path: Path, no_o_path: None, mode: int
+) -> None:
+    top = tmp_path / "forgectl-top"
+    (top / "cwd" / "deep").mkdir(parents=True)
+    (top / "cwd" / "deep" / "f").write_text("x")
+    top.chmod(mode)
+    gw.remove_tree(str(top))
+    assert not top.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+def test_remove_tree_without_o_path_removes_nested_unreadable_directories(
+    tmp_path: Path, no_o_path: None
+) -> None:
+    top = tmp_path / "forgectl-top"
+    x = top / "cwd" / "x"
+    (x / "y" / "z").mkdir(parents=True)
+    (x / "y" / "z" / "f").write_text("x")
+    (x / "y" / "z").chmod(0o000)
+    (x / "y").chmod(0o000)
+    x.chmod(0o500)
+    (top / "cwd").chmod(0o000)
+    top.chmod(0o000)
+    gw.remove_tree(str(top))
+    assert not top.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+def test_chmod_dir_without_o_path_fixes_a_mode_000_directory(
+    tmp_path: Path, no_o_path: None
+) -> None:
+    top = tmp_path / "forgectl-top"
+    (top / "d").mkdir(parents=True)
+    (top / "d").chmod(0o000)
+    gw._chmod_dir(str(top), str(top / "d"))
+    assert _modes(top / "d") == 0o700
+    gw.remove_tree(str(top))
+    assert not top.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+def test_chmod_dir_without_o_path_never_follows_a_symlink_or_changes_a_file(
+    tmp_path: Path, no_o_path: None
+) -> None:
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    victim.chmod(0o000)  # a symlink to it must not get it fixed
+    top = tmp_path / "forgectl-top"
+    top.mkdir()
+    (top / "link").symlink_to(victim)
+    (top / "f").write_text("x")
+    (top / "f").chmod(0o000)
+    for target in (top / "link", top / "link" / "sub", top / "f"):
+        gw._chmod_dir(str(top), str(target))
+    assert _modes(victim) == 0o000
+    assert _modes(top / "f") == 0o000
+    victim.chmod(0o700)
+    (top / "f").chmod(0o600)
+    gw.remove_tree(str(top))
+    assert not top.exists() and victim.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+def test_remove_tree_without_o_path_never_chmods_outside_the_top(
+    tmp_path: Path, no_o_path: None
+) -> None:
+    """A mode 000 sibling of the top, and a mode 000 directory behind a symlink inside it, keep
+    their modes; the parent of the top is never changed."""
+    base = tmp_path / "base"
+    base.mkdir()
+    base.chmod(0o755)
+    sibling = base / "sibling"
+    sibling.mkdir()
+    sibling.chmod(0o000)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside.chmod(0o000)
+    top = base / "forgectl-top"
+    (top / "d").mkdir(parents=True)
+    (top / "d" / "link").symlink_to(outside)
+    (top / "d").chmod(0o000)
+    gw.remove_tree(str(top))
+    assert not top.exists()
+    assert _modes(sibling) == 0o000 and _modes(outside) == 0o000 and _modes(base) == 0o755
+    sibling.chmod(0o700)
+    outside.chmod(0o700)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+def test_chmod_dir_without_o_path_skips_a_directory_swapped_for_a_symlink(
+    tmp_path: Path, no_o_path: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The directory is replaced by a symlink to a mode 000 victim after the type check and
+    before the chmod: the victim is not followed and keeps its mode."""
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    victim.chmod(0o000)
+    top = tmp_path / "forgectl-top"
+    (top / "d").mkdir(parents=True)
+    (top / "d").chmod(0o000)
+    real_chmod = os.chmod
+    swapped: list[bool] = []
+
+    def swapping_chmod(path: Any, mode: int, **kwargs: Any) -> None:
+        if path == "d" and not swapped:
+            swapped.append(True)
+            (top / "d").chmod(0o700)
+            (top / "d").rmdir()
+            (top / "d").symlink_to(victim)
+        real_chmod(path, mode, **kwargs)
+
+    monkeypatch.setattr(gw.os, "chmod", swapping_chmod)
+    gw._chmod_dir(str(top), str(top / "d"))
+    monkeypatch.undo()
+    assert swapped and _modes(victim) == 0o000
+    victim.chmod(0o700)
+    gw.remove_tree(str(top))
+    assert not top.exists() and victim.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+def test_chmod_dir_without_o_path_skips_a_directory_replaced_by_another_directory(
+    tmp_path: Path, no_o_path: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A different directory takes the name between the check and the reopen: the identity check
+    refuses it, so nothing is changed through the reopened handle and nothing is raised."""
+    top = tmp_path / "forgectl-top"
+    (top / "d").mkdir(parents=True)
+    (top / "d").chmod(0o000)
+    real_chmod = os.chmod
+
+    def swapping_chmod(path: Any, mode: int, **kwargs: Any) -> None:
+        real_chmod(path, mode, **kwargs)
+        if path == "d":
+            (top / "d").rename(top / "d-old")  # kept, so the new directory gets a new inode
+            (top / "d").mkdir()
+            (top / "d").chmod(0o750)
+
+    monkeypatch.setattr(gw.os, "chmod", swapping_chmod)
+    gw._chmod_dir(str(top), str(top / "d"))
+    monkeypatch.undo()
+    assert _modes(top / "d") == 0o750
+    gw.remove_tree(str(top))
+    assert not top.exists()
