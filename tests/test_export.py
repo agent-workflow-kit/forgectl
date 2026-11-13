@@ -440,18 +440,29 @@ def test_the_hand_patterns_match_the_schema_files() -> None:
 PR = "github.com/o/r#7"
 
 
-def test_an_internal_failure_is_logged_at_error_level(
-    state: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    code, _, _ = run(
-        capsys,
+def _broken_approve(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every command is implemented, so a handler bug stands in for an internal failure."""
+    from forgectl import registry
+
+    def boom(_inv: object) -> None:
+        raise RuntimeError("a bug")
+
+    registry.load_handlers()
+    monkeypatch.setitem(registry.HANDLERS, "approve", boom)
+    return [
         "approve",
         PR,
         "--expected-head",
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "--expected-base",
         "main",
-    )  # no handler yet: exit 1
+    ]
+
+
+def test_an_internal_failure_is_logged_at_error_level(
+    state: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, _, _ = run(capsys, *_broken_approve(monkeypatch))  # a handler bug: exit 1
     assert code == 1
     [item] = logged(state)
     validate(item, "forgectl/log.json")
@@ -495,19 +506,14 @@ def test_failure_levels_follow_the_interface(code: str, reason: str | None, leve
 
 
 def test_an_unwritable_log_warns_and_keeps_the_result_code(
-    state: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    state: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state.mkdir(parents=True, mode=0o700)
     (state / "log.jsonl").symlink_to(tmp_path / "x")
-    code, _, err = run(
-        capsys,
-        "approve",
-        PR,
-        "--expected-head",
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "--expected-base",
-        "main",
-    )
+    code, _, err = run(capsys, *_broken_approve(monkeypatch))
     assert code == 1
     assert "warning: log not written" in err
     assert not (tmp_path / "x").exists()
