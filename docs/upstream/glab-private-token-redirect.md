@@ -8,7 +8,7 @@ Status: DRAFT, UNFILED. forgectl's maintainer files this on the `glab` project (
 
 ## Summary
 
-When the host `glab` is configured for answers a request with a 302 whose `Location` points at another origin (a different host or port), `glab` follows the redirect and sends the same `Private-Token` header to that origin. Go's standard client drops `Authorization` on a cross-origin redirect, but a custom header such as `Private-Token` is kept. A server (or a misconfigured proxy, or a host that was renamed to someone else's address) that can issue a redirect can therefore collect the token.
+When the host `glab` is configured for answers a request with a 302 whose `Location` points at another origin, `glab` follows the redirect and sends the same `Private-Token` header to that origin. The reproduction below changes only the port in one run and only the hostname (`localhost` instead of `127.0.0.1`, the same listener) in another, and the token is sent in both. Go's standard client drops `Authorization` when a redirect goes to a different hostname, but a custom header such as `Private-Token` is kept. A server (or a misconfigured proxy, or a host that was renamed to someone else's address) that can issue a redirect can therefore collect the token.
 
 ## Environment
 
@@ -18,11 +18,11 @@ When the host `glab` is configured for answers a request with a 302 whose `Locat
 
 ## Expected
 
-The token header is sent only to the origin the user configured. On a redirect to another origin (scheme, host or port differs) `glab` drops `Private-Token` and `Job-Token` and similar credential headers, or stops and reports the redirect, as `gh` does for its credential.
+The token header is sent only to the origin the user configured. On a redirect to another origin (scheme, hostname or port differs) `glab` drops `Private-Token` and `Job-Token` and similar credential headers, or stops and reports the redirect.
 
 ## Observed
 
-Origin B receives `Private-Token: <the token>` for a GET and for a POST that the 302 turned into a GET. For comparison, `gh` 2.87.3 drops `Authorization` when redirected to another host, a subdomain or an explicit `:443`.
+Origin B receives `Private-Token: <the token>` for a GET and for a POST that the 302 turned into a GET. For comparison, an earlier local check (recorded in forgectl issue #37, with no script here and not re-tested for this report) found that `gh` 2.87.3 drops `Authorization` when redirected to another host, a subdomain or an explicit `:443`.
 
 ## Reproduction
 
@@ -61,31 +61,40 @@ def server(name, redirect_to=None):
 
 
 b = server("B")
-a = server("A", f"http://127.0.0.1:{b.server_address[1]}")
-for s in (a, b):
-    threading.Thread(target=s.serve_forever, daemon=True).start()
+threading.Thread(target=b.serve_forever, daemon=True).start()
 
-home = tempfile.mkdtemp()
-host = f"127.0.0.1:{a.server_address[1]}"
-cfg = os.path.join(home, "config.yml")
-with open(cfg, "w") as f:
-    f.write(f'hosts:\n  "{host}":\n    api_protocol: http\n    api_host: {host}\n')
-os.chmod(cfg, 0o600)
-env = {
-    "PATH": os.environ["PATH"],
-    "HOME": home,
-    "GLAB_CONFIG_DIR": home,
-    "GITLAB_HOST": host,
-    "GITLAB_TOKEN": FAKE,
-    "GLAB_NO_PROMPT": "1",
-    "NO_PROXY": "127.0.0.1",
-}
-for args in (["projects/1"], ["-X", "POST", "projects/1"]):
-    subprocess.run(["glab", "api", *args], env=env, cwd=home, capture_output=True, timeout=30)
-print(seen)
+# Run 1 changes only the port in the redirect; run 2 also changes the hostname (the listener
+# is the same 127.0.0.1 one, "localhost" just names it differently).
+for label, redirect_host in (("other port", "127.0.0.1"), ("other hostname", "localhost")):
+    seen["A"].clear()
+    seen["B"].clear()
+    a = server("A", f"http://{redirect_host}:{b.server_address[1]}")
+    threading.Thread(target=a.serve_forever, daemon=True).start()
+    home = tempfile.mkdtemp()
+    host = f"127.0.0.1:{a.server_address[1]}"
+    cfg = os.path.join(home, "config.yml")
+    with open(cfg, "w") as f:
+        f.write(f'hosts:\n  "{host}":\n    api_protocol: http\n    api_host: {host}\n')
+    os.chmod(cfg, 0o600)
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": home,
+        "GLAB_CONFIG_DIR": home,
+        "GITLAB_HOST": host,
+        "GITLAB_TOKEN": FAKE,
+        "GLAB_NO_PROMPT": "1",
+        "GLAB_SEND_TELEMETRY": "false",
+        "GLAB_CHECK_UPDATE": "false",
+        "GLAB_SHOW_WHATS_NEW": "false",
+        "NO_PROXY": "127.0.0.1,localhost",
+    }
+    for args in (["projects/1"], ["-X", "POST", "projects/1"]):
+        subprocess.run(["glab", "api", *args], env=env, cwd=home, capture_output=True, timeout=30)
+    print(label, "B:", seen["B"])
+    a.shutdown()
 ```
 
-Output with glab 1.89.0: origin B received two GET requests, each with `Private-Token: FAKE-loopback-token-not-real`.
+Output with glab 1.89.0: it prints one line per run, `other port B: [...]` and `other hostname B: [...]`. In each, origin B received exactly two GET requests (`/api/v4/projects/1`), one for the GET and one for the POST that the 302 turned into a GET, both with `Private-Token: FAKE-loopback-token-not-real`.
 
 ## Suggested fix
 

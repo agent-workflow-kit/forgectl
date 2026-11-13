@@ -8,14 +8,16 @@ different origin): server A answers with a redirect to server B.
 The test records what the installed ``glab`` does and never fails because of it. When the
 behavior differs from the one written in ``docs/interface.md`` (Residual risks), the test skips
 with a reason that names the documents to update, so a fix upstream shows up in ``-rs`` output.
-What forgectl itself guarantees is asserted unconditionally: the invariants that hold for any
-``glab`` version and the gateway's answer to a redirect.
+The invariants that hold for any ``glab`` version are asserted unconditionally. The gateway's
+answer to a redirect it was shown (3xx is ``host_rejected``, a wrong host in the answer is
+``wrong_host_response``) is covered in ``tests/test_gateway.py``.
 """
 
 from __future__ import annotations
 
 import http.server
 import shutil
+import socket
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -24,11 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from forgectl import gateway as gw
-
-from .harness.forges import FakeForges
 from .harness.procs import ProcessRegistry
-from .test_gateway import GL_SELF, make_gateway, only_call
 
 FAKE_TOKEN = "FAKE-loopback-token-not-real"  # obviously fake; never a real credential
 LOOPBACK = "127.0.0.1"
@@ -84,11 +82,11 @@ class Origins:
 
 
 @contextmanager
-def two_origins() -> Iterator[Origins]:
+def two_origins(redirect_host: str = LOOPBACK) -> Iterator[Origins]:
     a, b = Seen(), Seen()
     server_b = _server(b, None)
     port_b = server_b.server_address[1]
-    server_a = _server(a, f"http://{LOOPBACK}:{port_b}")
+    server_a = _server(a, f"http://{redirect_host}:{port_b}")
     port_a = server_a.server_address[1]
     threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in (server_a, server_b)]
     for thread in threads:
@@ -124,8 +122,8 @@ def run_glab(procs: ProcessRegistry, root: Path, port: int, args: list[str]) -> 
         "GLAB_CONFIG_DIR": str(config),
         "GITLAB_HOST": host,
         "GITLAB_TOKEN": FAKE_TOKEN,
-        "NO_PROXY": LOOPBACK,
-        "no_proxy": LOOPBACK,
+        "NO_PROXY": f"{LOOPBACK},localhost",
+        "no_proxy": f"{LOOPBACK},localhost",
         "GLAB_NO_PROMPT": "1",
         "GLAB_SEND_TELEMETRY": "false",
         "GLAB_CHECK_UPDATE": "false",
@@ -140,55 +138,63 @@ CASES = {
     "get": ["projects/1"],
     "post_turned_into_get": ["-X", "POST", "projects/1"],
 }
+# The redirect target names the same host (only the port differs) or a different hostname that
+# still resolves to the loopback listener. Go's client treats only the second as another host.
+REDIRECT_HOSTS = {"other_port": LOOPBACK, "other_hostname": "localhost"}
+
+
+def fixed_upstream(b_requests: list[tuple[str, str, str | None]]) -> bool:
+    """True when glab no longer sends its token to origin B: B got nothing, or no token header."""
+    return not b_requests or b_requests[0][2] is None
+
+
+def localhost_is_loopback() -> bool:
+    try:
+        infos = socket.getaddrinfo("localhost", None, socket.AF_INET)
+    except OSError:
+        return False
+    return any(info[4][0] == LOOPBACK for info in infos)
+
+
+FIXED_MESSAGE = (
+    "glab no longer repeats Private-Token across origins: update docs/interface.md "
+    "(Residual risks), design.md D-2 and D-5, the upstream draft and this test"
+)
+
+
+def test_no_requests_at_b_counts_as_fixed_upstream() -> None:
+    assert fixed_upstream([])
+
+
+def test_a_request_at_b_without_the_token_counts_as_fixed_upstream() -> None:
+    assert fixed_upstream([("GET", "/api/v4/projects/1", None)])
+
+
+def test_a_request_at_b_with_the_token_is_the_known_behavior() -> None:
+    assert not fixed_upstream([("GET", "/api/v4/projects/1", FAKE_TOKEN)])
 
 
 @needs_glab
+@pytest.mark.parametrize("redirect", sorted(REDIRECT_HOSTS))
 @pytest.mark.parametrize("case", sorted(CASES))
 def test_glab_cross_origin_redirect_behavior_is_recorded(
-    procs: ProcessRegistry, tmp_path: Path, case: str
+    procs: ProcessRegistry, tmp_path: Path, case: str, redirect: str
 ) -> None:
-    with two_origins() as origins:
+    if redirect == "other_hostname" and not localhost_is_loopback():
+        pytest.skip("localhost does not resolve to 127.0.0.1 here")
+    with two_origins(REDIRECT_HOSTS[redirect]) as origins:
         code, stdout = run_glab(procs, tmp_path, origins.port_a, CASES[case])
         a, b = list(origins.a.requests), list(origins.b.requests)
     # Invariants for any glab version: it sent its token to the origin it was configured for,
     # and the fake token never showed up anywhere but in the Private-Token header.
     assert [token for _, _, token in a] == [FAKE_TOKEN]
     assert a[0][1] == "/api/v4/projects/1"
+    # The one thing that varies by version: what origin B was sent. Decide "fixed" first, so a
+    # glab that stops at the redirect (non-zero exit, B empty) skips instead of failing.
+    if fixed_upstream(b):
+        pytest.skip(FIXED_MESSAGE)
     assert code == 0, "glab followed the redirect and printed the final answer"
     assert stdout.strip() == '{"id": 1}'
-    # The one thing that varies by version: what origin B was sent.
     assert len(b) == 1, "glab did not reach the redirect target exactly once"
     assert b[0][0] == "GET", "a followed 302 becomes a body-less GET"
-    if b[0][2] is None:
-        pytest.skip(
-            "glab no longer repeats Private-Token across origins: update docs/interface.md "
-            "(Residual risks), design.md D-2 and D-5, the upstream draft and this test"
-        )
     assert b[0][2] == FAKE_TOKEN, KNOWN_BEHAVIOR  # a different value would be a new finding
-
-
-# -- What forgectl guarantees whatever glab does -----------------------------------------------
-
-
-def test_gateway_never_follows_a_redirect_itself_and_a_shown_3xx_is_host_rejected(
-    fake_forges: FakeForges,
-) -> None:
-    # A redirect glab did not follow (307 or 308) reaches the gateway as a 3xx.
-    fake_forges.answer("glab", endpoint_re="^projects", status=307, body={})
-    gateway = make_gateway(fake_forges)
-    with pytest.raises(gw.ForgectlError) as raised:
-        gateway.api(GL_SELF, "GET", ["projects", "7"])
-    assert raised.value.code == "host_rejected"
-    assert raised.value.details == {"status": 307}
-    assert len(only_call(fake_forges).requests) == 1  # no second request by forgectl
-
-
-def test_an_answer_that_came_through_a_cross_origin_redirect_is_refused_with_a_rotation_hint() -> (
-    None
-):
-    # The only guard on a redirected read: the answer names another host.
-    observed = "http://other.example.test/g/p/-/merge_requests/1"
-    with pytest.raises(gw.ForgectlError) as raised:
-        gw.verify_identity(observed, host=GL_SELF.host, project="g/p")
-    assert raised.value.code == "wrong_host_response"
-    assert "rotated" in raised.value.message
