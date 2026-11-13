@@ -80,11 +80,13 @@ class _Base:
         else:
             t.status = "deleted"  # the host refused or never created it: nothing to clean up
 
-    def _creating(self, t: Throwaway, error: Exception) -> None:
-        """Called when the creation request failed after it may have reached the host."""
-        t.unconfirmed = isinstance(error, subprocess.SubprocessError | OSError) or (
-            isinstance(error, LiveApiError) and error.status == 0
-        )
+    def _creating(self, t: Throwaway, error: BaseException) -> None:
+        """Called when the creation request failed after it may have reached the host. Only a
+        definite client refusal (a 4xx other than 429) means it was never created; a lost answer,
+        a 5xx, a 429 or an interrupt leaves the outcome open."""
+        t.unconfirmed = not (
+            isinstance(error, LiveApiError) and 400 <= error.status < 500 and error.status != 429
+        ) and not isinstance(error, KeyError | TypeError | ValueError)
         with contextlib.suppress(*CALL_ERRORS):
             self._resolve(t)
             if t.status == "live":
@@ -117,7 +119,7 @@ class GitHubLive(_Base):
             throwaway.default_branch = str(data.get("default_branch", "main"))
             throwaway.web_url = str(data.get("html_url", ""))
             self.api.scope.allow(f"repos/{throwaway.ident}")
-        except Exception as error:
+        except BaseException as error:
             throwaway.ident = ""
             self._creating(throwaway, error)
             raise
@@ -252,7 +254,7 @@ class GitLabLive(_Base):
             throwaway.owner = str(data["namespace"]["full_path"])
             throwaway.default_branch = str(data.get("default_branch", "main"))
             throwaway.web_url = str(data.get("web_url", ""))
-        except Exception as error:
+        except BaseException as error:
             self._creating(throwaway, error)
             raise
         require_owned_by(throwaway.owner, self.cfg.login)
