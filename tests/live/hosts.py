@@ -37,6 +37,8 @@ class Throwaway:
     default_branch: str
     web_url: str
     status: str = "live"  # live, deleted, scheduled, archived, left
+    unconfirmed: bool = False  # the creation's answer was lost: the host may still finish it
+    note: str = ""
 
 
 # What a failed or timed-out call can raise; a timeout must still reach the archive fallback.
@@ -69,11 +71,20 @@ class _Base:
         """A creation whose answer was lost: find the resource by name, or note it never existed."""
         if t.ident:
             return
-        if not self._lookup(t):
-            t.status = "deleted"  # the host never created it: nothing to clean up
+        if self._lookup(t):
+            return
+        if t.unconfirmed:
+            # A timeout or an answer without a status: the host may still finish the creation.
+            t.status = "left"
+            t.note = "the creation may still complete: verify by name, then delete it by hand"
+        else:
+            t.status = "deleted"  # the host refused or never created it: nothing to clean up
 
-    def _creating(self, t: Throwaway) -> None:
+    def _creating(self, t: Throwaway, error: Exception) -> None:
         """Called when the creation request failed after it may have reached the host."""
+        t.unconfirmed = isinstance(error, subprocess.SubprocessError | OSError) or (
+            isinstance(error, LiveApiError) and error.status == 0
+        )
         with contextlib.suppress(*CALL_ERRORS):
             self._resolve(t)
             if t.status == "live":
@@ -106,9 +117,9 @@ class GitHubLive(_Base):
             throwaway.default_branch = str(data.get("default_branch", "main"))
             throwaway.web_url = str(data.get("html_url", ""))
             self.api.scope.allow(f"repos/{throwaway.ident}")
-        except Exception:
+        except Exception as error:
             throwaway.ident = ""
-            self._creating(throwaway)
+            self._creating(throwaway, error)
             raise
         require_owned_by(throwaway.owner, self.cfg.login)
         return throwaway
@@ -241,8 +252,8 @@ class GitLabLive(_Base):
             throwaway.owner = str(data["namespace"]["full_path"])
             throwaway.default_branch = str(data.get("default_branch", "main"))
             throwaway.web_url = str(data.get("web_url", ""))
-        except Exception:
-            self._creating(throwaway)
+        except Exception as error:
+            self._creating(throwaway, error)
             raise
         require_owned_by(throwaway.owner, self.cfg.login)
         return throwaway
@@ -392,7 +403,8 @@ class Ledger:
         lines = []
         for _, t in self.entries:
             if t.status in ("archived", "scheduled", "left"):
-                lines.append(f"{t.status}: {t.name} on {t.host} (delete it by hand)")
+                note = f"; {t.note}" if t.note else ""
+                lines.append(f"{t.status}: {t.name} on {t.host} (delete it by hand{note})")
             elif t.status == "live":
                 lines.append(f"left: {t.name} on {t.host} (cleanup did not run)")
         return lines

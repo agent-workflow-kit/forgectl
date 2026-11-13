@@ -53,7 +53,7 @@ Nothing, or a declared leftover:
 
 - The throwaway is registered before any other step, so even a failed create check reaches the cleanup.
 - Cleanup runs in a `finally` of the session fixture, also when a step after the creation raised, and before the private directories are removed. It runs again in the session finalizer (also after an interrupted run), which tries once more any throwaway an earlier pass left. One resource after another, whatever one of them raised.
-- A creation that succeeds on the host but fails here (a timeout, an unreadable answer) is registered before the request, then found by name and deleted, or declared.
+- A creation that succeeds on the host but fails here (a timeout, an unreadable answer) is registered before the request, then found by name and deleted, or declared. When the answer was lost (a timeout, no HTTP status) and the lookup finds nothing, the host may still finish the creation: the entry is declared "left" with a verify-by-name note instead of "deleted".
 - Delete is verified by reading the repository back. If the delete is refused, times out or the host still shows the repository, the harness archives it and reads that back too. A GitLab project that the host only schedules for deletion counts as handled and is declared.
 - At the end of the run the terminal summary names, on the line `live harness: left for manual deletion`, every archived, scheduled or left throwaway by its name and host. Delete those by hand.
 - A run killed with SIGKILL cannot clean up. Its throwaway is found by the prefix: search your own repositories (or projects) for `forgectl-live-` and delete what is older than a day.
@@ -77,7 +77,7 @@ Both hosts rate-limit by account. A live run makes tens of requests per test, pl
 
 ## A second account
 
-Tests of `approve` and of a non-writer's rights need a second, unrelated personal account on the same host. Create it the same way (it needs no access to the throwaway, which is public) and set the `..._SECOND_TOKEN` and `..._SECOND_USER` settings of that host. A test that needs it asks the `second_account` fixture, which skips when the settings are absent. A second token without a second user, or the reverse, is half a second account: the fixture skips with a reason that says it is half-configured and names both settings. so the row stays open until someone with a second account runs it. A paid tier is likewise optional input: a test that needs a merge queue, a merge train or an organization skips with its reason.
+Tests of `approve` and of a non-writer's rights need a second, unrelated personal account on the same host. Create it the same way (it needs no access to the throwaway, which is public) and set the `..._SECOND_TOKEN` and `..._SECOND_USER` settings of that host. A test that needs it asks the `second_account` fixture, which skips when the settings are absent. A second token without a second user, or the reverse, is half a second account: the fixture skips with a reason that says it is half-configured and names both settings, so the row stays open until someone with a second account runs it. A paid tier is likewise optional input: a test that needs a merge queue, a merge train or an organization skips with its reason.
 
 ## Recordings
 

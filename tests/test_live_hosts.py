@@ -461,12 +461,32 @@ def test_a_creation_that_never_reached_the_host_leaves_nothing_to_clean(
 ) -> None:
     script = Script()
     host, ledger = make_flaky(backend, tmp_path, script)
+    script.on("POST", "user/repos", 422, {"message": "refused"})
+    script.on("POST", "projects", 400, {"message": "refused"})
     script.on("GET", f"repos/me-login/{NAME}", 404)
     script.on("GET", GITLAB_LOOKUP, 200, [])
     with pytest.raises(LiveApiError):
         host.create_throwaway(NAME)
     assert script.endpoints("DELETE") == []
     assert [t.status for _, t in ledger.entries] == ["deleted"]
+
+
+@pytest.mark.parametrize("backend", ["github", "gitlab"])
+@pytest.mark.parametrize("kind", ["timeout", "nostatus"])
+def test_a_lost_creation_the_lookup_cannot_find_stays_declared_left(
+    tmp_path: Path, backend: str, kind: str
+) -> None:
+    creation = ("POST", "user/repos" if backend == "github" else "projects")
+    script = Flaky(creation) if kind == "timeout" else Script()
+    host, ledger = make_flaky(backend, tmp_path, script)
+    script.on("GET", f"repos/me-login/{NAME}", 404)
+    script.on("GET", GITLAB_LOOKUP, 200, [])
+    with pytest.raises(Exception):  # noqa: B017 - the kind of error differs per case
+        host.create_throwaway(NAME)
+    assert script.endpoints("DELETE") == []
+    assert [t.status for _, t in ledger.entries] == ["left"]
+    (line,) = ledger.declarations()
+    assert line.startswith(f"left: {NAME} on ") and "verify by name" in line
 
 
 def test_a_lookup_that_itself_fails_leaves_the_entry_for_the_finalizer(tmp_path: Path) -> None:
@@ -529,6 +549,23 @@ def test_the_finalizer_retries_a_left_resource_once_and_the_fixture_pass_does_no
     assert throwaway.status == "deleted" and host.calls == 2
     ledger.cleanup_all(retry_left=True)
     assert host.calls == 2
+
+
+def test_the_session_finish_hook_retries_what_an_earlier_pass_left(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from .live import conftest
+    from .live.hosts import Throwaway
+
+    ledger = Ledger()
+    host = FlakyHost()
+    throwaway = Throwaway("github", "github.com", NAME, "me-login", "me-login/x", "main", "")
+    ledger.register(host, throwaway)  # type: ignore[arg-type]
+    ledger.cleanup_all()
+    assert throwaway.status == "left" and host.calls == 1
+    monkeypatch.setattr(conftest, "LEDGER", ledger)
+    conftest.pytest_sessionfinish(None, 0)  # type: ignore[arg-type]
+    assert throwaway.status == "deleted" and host.calls == 2
 
 
 # Endpoint and scope hardening -------------------------------------------------------------------
