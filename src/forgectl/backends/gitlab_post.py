@@ -74,6 +74,14 @@ class GitLabPoster:
         target, project, iid = self._where(pr)
         return target, ["projects", project, "merge_requests", iid]
 
+    def base(self, pr: m.PR) -> tuple[Target, list[str]]:
+        """The target and the MR's REST path (numeric project id), for ``gitlab_review``."""
+        return self._base(pr)
+
+    def pages(self, target: Target, segments: list[str]) -> list[dict[str, Any]]:
+        """Every item of a paginated GET list (see ``_pages``)."""
+        return self._pages(target, segments)
+
     # -- lookups -------------------------------------------------------------------------------
 
     def _pages(self, target: Target, segments: list[str]) -> list[dict[str, Any]]:

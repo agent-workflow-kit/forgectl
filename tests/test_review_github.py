@@ -1139,21 +1139,3 @@ def test_a_pre_post_escalation_is_exit_13_and_an_override_is_audited(rv: ReviewR
                   extra_config=hook_config("pre-post", "exit 13"))  # fmt: skip
     assert done.code == 0, done.err
     assert rv.audit()[0]["override"] == ["override_escalation"]
-
-
-# -- GitLab ---------------------------------------------------------------------------------------
-
-
-def test_review_on_gitlab_fails_as_not_implemented_until_27(rv: ReviewRig) -> None:
-    rv.input({"event": "comment", "body": "words"})
-    config = rv.base.config("  gitlab.com:\n    token_env: POST_TOKEN\n")
-    argv = ["review", "gitlab.com/user-9/proj#7", "--json", "--config", str(config)]
-    argv += ["--file", str(rv.file)]
-    argv += ["--expected-head", HEAD, "--expected-base", "main", "--actor", "auto:bot", "--yes"]
-    rv.monkeypatch.setattr(sys, "stdin", io.StringIO(""))
-    code = main(argv, tty=NO_TTY)
-    captured = rv.capsys.readouterr()
-    assert code == 1
-    error = json.loads(captured.out)["error"]
-    assert error["code"] == "internal" and "#27" in error["message"]
-    assert rv.calls() == []

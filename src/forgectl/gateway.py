@@ -1486,7 +1486,8 @@ class Gateway:
         # 201 and an integer id (backends/post_base.py ``created_id``), merge by step 9's re-read.
         # ``resolve`` and ``unresolve`` check their PUT and mutation answers for the requested state
         # (backends/gitlab_resolve.py, backends/github_resolve.py).
-        # TODO(#27): DELETE draft notes and bulk_publish by read-back.
+        # A draft note DELETE and ``bulk_publish`` (204, no body) are written by
+        # ``backends/gitlab_review.py``: their proof is the status and the re-list or read-back.
         with private_dirs(self.environ, config=target.token is not None) as dirs:
             env = build_environment(self.environ, dirs=dirs, backend=target.backend, target=target)
             try:
