@@ -4,7 +4,7 @@ Normalized access to pull/merge requests across GitHub and GitLab: read them, po
 
 ## Status
 
-Implemented and released (see [CHANGELOG.md](CHANGELOG.md) for the version). Available now: the reads (`prs`, `show`, `snapshot`, `snapshots`, `poll`, `diff`, `files`, `compare`, `comments`, `reviews`, `ci`, `access`, `whoami`), `browse`, `export` and `merge` (with `--auto`), `comment`, `reply`, `resolve` and `unresolve` on GitHub and GitLab, `review` and `approve` on GitHub and GitLab. Every command of the contract is implemented. The contract is [docs/interface.md](docs/interface.md). Rationale and live-verification results are in [docs/design.md](docs/design.md), and how to run the live suite in [docs/live-tests.md](docs/live-tests.md); the staged plan is in [docs/plan.md](docs/plan.md).
+Implemented and released (see [CHANGELOG.md](CHANGELOG.md) for the version). Available now: the reads (`prs`, `show`, `snapshot`, `snapshots`, `poll`, `diff`, `files`, `compare`, `comments`, `reviews`, `ci`, `access`, `whoami`), `browse`, `export` and `merge` (with `--auto`), `comment`, `reply`, `resolve` and `unresolve` on GitHub and GitLab, `review` and `approve` on GitHub and GitLab. Every command of the contract is implemented. The contract is [docs/interface.md](docs/interface.md). Rationale and live-verification results are in [docs/design.md](docs/design.md), and how to run the live suite in [docs/live-tests.md](docs/live-tests.md); the staged plan is in [docs/plan.md](docs/plan.md). The human-run macOS check is [docs/macos-checklist.md](docs/macos-checklist.md).
 
 ## Layer
 
