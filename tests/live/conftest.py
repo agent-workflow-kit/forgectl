@@ -27,6 +27,8 @@ LEDGER = Ledger()  # one per process: the finalizer cleans whatever a fixture mi
 # every FORGECTL_* variable (and the CI markers) before each test, so the live settings are read
 # from this copy, which ``pytest_configure`` takes before any test runs. Nothing else uses it.
 ENV: dict[str, str] = {}
+# Private directories whose session still has a "left" throwaway: kept until the finalizer's retry.
+KEPT_DIRS: list[tempfile.TemporaryDirectory[str]] = []
 
 
 @dataclass
@@ -87,20 +89,28 @@ def _session(
     ledger: Ledger | None = None,
 ) -> Generator[LiveSession]:
     """The private directories live for the whole session and are removed only after the cleanup,
-    which runs even when a step after the creation raises (the cleanup needs the directories)."""
+    which runs even when a step after the creation raises (the cleanup needs the directories).
+    When a throwaway is still "left" the removal waits for ``pytest_sessionfinish``, whose retry
+    needs the directories too."""
     ledger = LEDGER if ledger is None else ledger
-    with tempfile.TemporaryDirectory(prefix="forgectl-live-") as raw:
+    root = tempfile.TemporaryDirectory(prefix="forgectl-live-")
+    try:
         try:
             yield _start(
                 backend,
                 request,
-                Path(raw),
+                Path(root.name),
                 env=ENV if env is None else env,
                 runner=runner,
                 ledger=ledger,
             )
         finally:
             ledger.cleanup_all()
+    finally:
+        if any(t.status == "left" for _, t in ledger.entries):
+            KEPT_DIRS.append(root)
+        else:
+            root.cleanup()
 
 
 @pytest.fixture(scope="session")
@@ -138,7 +148,11 @@ def pytest_configure(config: pytest.Config) -> None:
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """The finalizer behind the fixtures: also runs after an interrupted session, and tries once
     more what an earlier pass left."""
-    LEDGER.cleanup_all(retry_left=True)
+    try:
+        LEDGER.cleanup_all(retry_left=True)
+    finally:
+        while KEPT_DIRS:
+            KEPT_DIRS.pop().cleanup()
 
 
 def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:

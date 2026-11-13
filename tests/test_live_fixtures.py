@@ -36,6 +36,7 @@ class Fake:
         self.calls: list[tuple[str, str]] = []
         self.cwd_missing = False
         self.deleted = False
+        self.fail_deletes = 0  # the first N deletes answer 502
 
     def __call__(
         self, argv: Sequence[str], env: Mapping[str, str], stdin: str | None, cwd: Path
@@ -47,6 +48,9 @@ class Fake:
             return self.answer(200, {"login": "me-login"})
         if (method, endpoint) == ("POST", "user/repos"):
             return self.answer(201, {"owner": {"login": self.owner}, "default_branch": "main"})
+        if method == "DELETE" and self.fail_deletes:
+            self.fail_deletes -= 1
+            return self.answer(502, {"message": "bad gateway"})
         if method == "DELETE":
             self.deleted = True
             return self.answer(204, None)
@@ -82,6 +86,26 @@ def test_cleanup_runs_with_its_directories_when_the_test_body_raises() -> None:
     with pytest.raises(RuntimeError):
         session.throw(RuntimeError("test failed"))
     assert fake.deleted and not fake.cwd_missing
+
+
+def test_the_finalizer_retry_runs_with_its_directories_and_removes_them_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake, ledger = Fake(), Ledger()
+    fake.fail_deletes = 1
+    monkeypatch.setattr(live_conftest, "LEDGER", ledger)
+    monkeypatch.setattr(live_conftest, "KEPT_DIRS", [])
+    session = live_conftest._session("github", request(), env=ENV, runner=fake, ledger=ledger)
+    live = next(session)
+    root = live.dirs.root
+    with pytest.raises(StopIteration):
+        next(session)
+    assert [t.status for _, t in ledger.entries] == ["left"]
+    assert root.is_dir()  # kept for the finalizer's retry
+    live_conftest.pytest_sessionfinish(None, 0)  # type: ignore[arg-type]
+    assert [t.status for _, t in ledger.entries] == ["deleted"]
+    assert fake.deleted and not fake.cwd_missing
+    assert not root.exists() and live_conftest.KEPT_DIRS == []
 
 
 def test_a_session_repr_never_shows_the_token() -> None:
