@@ -16,11 +16,19 @@ GitHub posts text and state together, so the state step is not a second write: a
 state step still needed is ``outcome_partial`` with no write (a dismissed approval, or a reused
 key), and a new key posts both.
 
-TODO(#27): ``review`` on GitLab (drafts, ``bulk_publish``, the read-back by discussions, GraphQL
-``mergeRequestRequestChanges``); a GitLab pull request fails as not implemented until then.
-TODO(#28): the self-approval check, the already-approved rule with its retarget walk, and an exact
-``head_verified``; here an approval at this head counts as already approved and ``head_verified`` is
-false when one exists, because forgectl cannot tell it counts for the base.
+GitLab (#27) has no atomic review: the text is draft notes, published together by one
+``bulk_publish`` and read back through the MR's discussions, then the state step runs (GraphQL
+``mergeRequestRequestChanges`` or ``POST /approve`` with ``sha``). That path is ``_send_gitlab``;
+the host calls are in ``backends/gitlab_review.py``. A dedupe hit leaves no text to post but the
+state step still runs when needed (``follow_up_done``).
+
+``approve`` (#28) is this same run with ``action == "approve"``: the event is always ``approve``,
+the text is the ``--body-file`` body alone (GitHub: the review's body; GitLab: a note posted by
+``POST /notes``, then ``POST /approve``). The state step shared with ``review``'s ``approve`` event
+is decided in ``_approval_state``: the ``self_approval`` check (``_check_self``), whether this
+account's approval already counts for this head and base (GitHub: the latest approval at the head
+and not older than the latest retarget; GitLab: ``user_has_approved``) and an exact
+``head_verified``.
 """
 
 from __future__ import annotations
@@ -36,13 +44,22 @@ from typing import Any
 from . import audit, hooks, jsonlog, output, positions, registry
 from .backends.github_post import GitHubPoster
 from .backends.github_review import GitHubReviewer, Submitted
+from .backends.gitlab_post import GitLabPoster
+from .backends.gitlab_review import Found, GitLabReviewer, host_rejected, matches_sent
 from .errors import ForgectlError, SignalExit, refused, usage
 from .humanactions import HumanContext, require_confirmation
 from .identifiers import PrRef
 from .merge import base_matches
-from .model import PR, LatestByReviewer
+from .model import PR, LatestByReviewer, PrRead, ascii_lower, not_before, same_account
 from .neutralize import neutralize
-from .post import GITHUB_COMMENT_LIMIT, INLINE_COMMENT_LIMIT, marker_line, read_input
+from .post import (
+    GITHUB_COMMENT_LIMIT,
+    GITLAB_LIMIT,
+    INLINE_COMMENT_LIMIT,
+    marker_line,
+    prepare_body,
+    read_input,
+)
 from .reads import NO_READINESS, ReadEnv, backend_for, make_env
 from .sanitize import sanitize_line
 
@@ -223,9 +240,17 @@ def canonical(body: str | None, comments: tuple[Comment, ...]) -> bytes:
     )
 
 
-def prepare(raw: RawReview, key: str | None) -> Prepared:
+def _with_marker(text: str, marker: str) -> str:
+    return text + ("" if text.endswith("\n") else "\n") + marker
+
+
+def prepare(raw: RawReview, key: str | None, backend: str = "github") -> Prepared:
     """Neutralize each body on its own, add the marker, and check each size (index null for the
-    review body)."""
+    review body). The marker is the review body's last line; with no body it is a body holding only
+    the marker on GitHub and the last inline comment's last line on GitLab (Dedupe key, Where)."""
+    gitlab = backend == "gitlab"
+    body_limit = GITLAB_LIMIT if gitlab else GITHUB_COMMENT_LIMIT
+    inline_limit = GITLAB_LIMIT if gitlab else INLINE_COMMENT_LIMIT
     if key is not None and raw.body is None and not raw.comments:
         raise usage("--dedupe-key needs a review body or inline comments to carry the marker")
     neutralized = markers = 0
@@ -235,19 +260,22 @@ def prepare(raw: RawReview, key: str | None) -> Prepared:
         neutralized += done.neutralized_lines
         markers += done.markers_removed
         body = done.text
-    if key is not None:  # the marker is the review body's last line, and alone with no body
-        marker = marker_line(key)
-        body = marker if body is None else body + ("" if body.endswith("\n") else "\n") + marker
-    if body is not None and len(body.encode("utf-8")) > GITHUB_COMMENT_LIMIT:
-        raise _too_large(GITHUB_COMMENT_LIMIT, None)
+    marker = None if key is None else marker_line(key)
+    if marker is not None and not (gitlab and body is None):
+        body = marker if body is None else _with_marker(body, marker)
+    if body is not None and len(body.encode("utf-8")) > body_limit:
+        raise _too_large(body_limit, None)
     comments: list[Comment] = []
-    for item in raw.comments:
+    for n, item in enumerate(raw.comments):
         done = neutralize(item.body)
         neutralized += done.neutralized_lines
         markers += done.markers_removed
-        if len(done.text.encode("utf-8")) > INLINE_COMMENT_LIMIT:
-            raise _too_large(INLINE_COMMENT_LIMIT, item.index)
-        comments.append(Comment(item, done.text))
+        text = done.text
+        if marker is not None and gitlab and body is None and n == len(raw.comments) - 1:
+            text = _with_marker(text, marker)
+        if len(text.encode("utf-8")) > inline_limit:
+            raise _too_large(inline_limit, item.index)
+        comments.append(Comment(item, text))
     parts = tuple(comments)
     if body is None and not parts:
         return Prepared(raw.event, None, parts, None, 0, neutralized, markers)
@@ -268,13 +296,18 @@ class State:
 
     needed: bool = False
     approved_at_head: bool = False
+    #: ``head_verified`` of an approval that already existed: null when none did
+    verified: bool | None = None
 
 
 @dataclass
 class Outcome:
     result: str  # an audit result: posted, approved, failed, outcome_unknown
     review: Submitted | None = None
+    landed: bool = False  # the text or the state is on the host (GitLab has no review object)
+    follow_up_done: bool = False
     ids: list[str] = field(default_factory=list)
+    thread_ids: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     error: ForgectlError | None = None
 
@@ -291,8 +324,28 @@ def _mine(
     return None
 
 
+#: The host answers a failed draft creation or publish keeps as they are: the Reliability table's
+#: rows for 401, 403 (not a rate limit), 404 and 429 (or a rate-limit 403).
+_HOST_ANSWERS = frozenset({"auth_required", "permission_denied", "not_found", "rate_limited"})
+
+
+def _leftover_text(left: list[int], unknown: bool) -> str:
+    """What a failed post leaves on the merge request, for the end of an error message."""
+    out = ""
+    if left:
+        ids = ", ".join(str(i) for i in sorted(left))
+        out += f" (drafts left on the merge request: {ids})"
+    if unknown:
+        out += (
+            " (drafts of unknown ids may remain on the merge request: the re-list failed; "
+            "the next run exits 20 drafts_present until they are gone)"
+        )
+    return out
+
+
 class ReviewRun:
-    def __init__(self, inv: registry.Invocation) -> None:
+    def __init__(self, inv: registry.Invocation, action: str = "review") -> None:
+        self.action = action
         if inv.human is None:  # cli gates every write command and passes its context
             raise ForgectlError("internal", f"{inv.command}: no human-action context")
         self.inv = inv
@@ -305,8 +358,17 @@ class ReviewRun:
         self.pr_id: str = str(ref)
         self.env: ReadEnv = make_env(inv)
         self.backend = backend_for(ref, self.env)
-        self.poster = GitHubPoster(self.env)
+        self.gitlab = ref.backend == "gitlab"
+        self.poster: GitHubPoster | GitLabPoster
+        if self.gitlab:
+            self.poster = GitLabPoster(self.env)
+            self.drafts = GitLabReviewer(self.env, self.poster)
+        else:
+            self.poster = GitHubPoster(self.env)
         self.reviewer = GitHubReviewer(self.env)
+        self.hits: list[str] = []
+        self._gl_positions: dict[int, dict[str, Any]] = {}
+        self._first_drafts: list[int] = []
         try:
             self.directory: Path = jsonlog.state_dir(os.environ)
         except jsonlog.JsonlError as err:
@@ -315,6 +377,7 @@ class ReviewRun:
             ) from None
         self.decision_ids: list[str] = list(self.human.decision_ids)
         self.escalated = False
+        self.self_allowed = False  # --allow-self skipped a self_approval that would have fired
         self.prep: Prepared | None = None
         self.head_sha: str | None = None
         self.expected_head: str | None = self.args.expected_head
@@ -338,24 +401,28 @@ class ReviewRun:
     def _plan_dict(self) -> dict[str, Any]:
         prep = self.prep
         return {
-            "event": None if prep is None else prep.event,
+            "event": self._event(),
             "body_sha256": None if prep is None else prep.sha256,
             "body_bytes": 0 if prep is None else prep.nbytes,
             "inline_comments": 0 if prep is None else len(prep.comments),
         }
 
+    def _event(self) -> str | None:
+        """The ``event`` of the plan, the hooks and the audit record: null for ``approve``."""
+        if self.prep is None or self.action == "approve":
+            return None
+        return self.prep.event
+
     def _verified(self) -> bool | None:
-        # TODO(#28): an exact answer needs the latest retarget; an approval at this head is
-        # reported as one forgectl cannot tell counts for the base
-        if self.prep is not None and self.prep.event == "approve" and self.state.approved_at_head:
-            return False
+        if self.prep is not None and self.prep.event == "approve":
+            return self.state.verified
         return None
 
     def _fields(self, **extra: Any) -> dict[str, Any]:
         prep = self.prep
         out: dict[str, Any] = {
             "pr": self.pr_id,
-            "action": "review",
+            "action": self.action,
             "ids": [],
             "thread_ids": [],
             "review_id": None,
@@ -391,10 +458,24 @@ class ReviewRun:
     # -- steps 1 to 4 --------------------------------------------------------------------------
 
     def _prepare(self) -> Prepared:
+        if self.action == "approve":  # the body is plain text, posted like a comment's
+            if self.args.body_file is None:
+                return Prepared("approve", None, (), None, 0, 0, 0)
+            limit = GITLAB_LIMIT if self.gitlab else GITHUB_COMMENT_LIMIT
+            body = prepare_body(self.args.body_file, limit=limit, key=self.args.dedupe_key)
+            return Prepared(
+                "approve",
+                body.text,
+                (),
+                body.sha256,
+                body.nbytes,
+                body.neutralized_lines,
+                body.markers_removed,
+            )
         raw = read_input(self.args.file, FILE_LIMIT + 1)
         if len(raw) > FILE_LIMIT:
             raise _too_large(FILE_LIMIT, None, "the review file")
-        return prepare(parse_input(raw), self.args.dedupe_key)
+        return prepare(parse_input(raw), self.args.dedupe_key, self.ref.backend)
 
     def _read(self) -> PR:
         """Step 2: the PR, then ``not_open``, ``stale_head`` and ``stale_base`` in that order,
@@ -409,7 +490,9 @@ class ReviewRun:
         if self.expected_base is None and self.human.interactive:
             self.expected_base = pr.base.ref
         if self.expected_head is None or self.expected_base is None:
-            raise usage("review needs --expected-head and --expected-base unless interactive")
+            raise usage(
+                f"{self.action} needs --expected-head and --expected-base unless interactive"
+            )
         if pr.state != "open":
             raise refused("not_open", "the pull request is not open", details={"state": pr.state})
         if pr.head.sha != self.expected_head:
@@ -422,16 +505,92 @@ class ReviewRun:
                 "the base is not the expected base",
                 details={"base_ref": pr.base.ref},
             )
-        # TODO(#28): self_approval for an approving event
-        mine = _mine(read.latest_by_reviewer, self._account, self._login)
+        if self.gitlab and self.prep.event == "request_changes":
+            version = self.backend.host_version(self.ref.host)  # type: ignore[attr-defined]
+            if version is None or version < (17, 2):
+                raise ForgectlError(
+                    "unsupported_host_version",
+                    "request_changes needs GitLab 17.2 or newer "
+                    "(mergeRequestRequestChanges); the version is older or unreadable",
+                )
         event = self.prep.event
-        approved = mine is not None and mine.state == "approved" and mine.commit_sha == pr.head.sha
-        self.state = State(
-            needed=(event == "approve" and not approved)
-            or (event == "request_changes" and (mine is None or mine.state != "changes_requested")),
-            approved_at_head=approved,
-        )
+        if event == "approve":
+            self._check_self(pr)
+        mine = _mine(read.latest_by_reviewer, self._account, self._login)
+        if event == "approve":
+            self.state = self._approval_state(read, mine)
+        else:
+            self.state = State(
+                needed=event == "request_changes"
+                and (mine is None or mine.state != "changes_requested")
+            )
         return pr
+
+    def _check_self(self, pr: PR) -> None:
+        """``self_approval`` (Post order step 2): the author is the authenticated account, or the
+        configured ``me``. ``--allow-self`` (human only) skips it, and the audit records it as an
+        override only when the check would have refused; GitHub still refuses."""
+        author = pr.author
+        basis: str | None = None
+        if same_account(self._login, self._account, author):
+            basis = "authenticated"
+        else:
+            me = self.env.hosts.me(self.ref.host)
+            if (
+                me is not None
+                and author.login is not None
+                and ascii_lower(me) == ascii_lower(author.login)
+            ):
+                basis = "configured_me"
+        if basis is None:
+            return
+        if self.args.allow_self:
+            self.self_allowed = True
+            return
+        raise refused(
+            "self_approval",
+            "the pull request's author is the account that would approve it",
+            details={"basis": basis},
+        )
+
+    def _approval_state(self, read: PrRead, mine: LatestByReviewer | None) -> State:
+        """Whether this account's approval already counts, and ``head_verified`` for it.
+
+        GitHub: the latest review by this account is an approval at the head, not older than the
+        latest retarget (an unknown retarget counts nothing). It is then verified. An approval at
+        another head, or older than a retarget, is none: the approval is sent again, null.
+        GitLab: ``user_has_approved`` decides, retarget or not (there is no re-approval path);
+        it is verified only when ``reset_approvals_on_push`` is true and the retarget walk found
+        none newer than the approval."""
+        pr = read.pr
+        if not self.gitlab:
+            counts = (
+                read.retarget_known
+                and mine is not None
+                and mine.state == "approved"
+                and mine.commit_sha == pr.head.sha
+                and (read.retarget_at is None or not_before(mine.at, read.retarget_at))
+            )
+            return State(
+                needed=not counts, approved_at_head=counts, verified=True if counts else None
+            )
+        self.poster.prepare(pr)  # the MR's ids are read here, not inside the audited window
+        has = self.env.call(lambda: self.drafts.user_has_approved(pr))
+        if not has:
+            return State(needed=True)
+        return State(
+            needed=False, approved_at_head=True, verified=self._gitlab_verified(read, mine)
+        )
+
+    @staticmethod
+    def _gitlab_verified(read: PrRead, mine: LatestByReviewer | None) -> bool:
+        """True only when this account's own approval was seen and nothing newer than it
+        retargeted the MR, with ``reset_approvals_on_push`` on and the walk completed."""
+        if read.reset_on_push is not True or not read.retarget_known:
+            return False
+        if mine is None or mine.state != "approved":
+            return False
+        return read.retarget_at is None or not_before(mine.at, read.retarget_at)
 
     def _positions(self, pr: PR) -> None:
         """Step 3: every inline comment is on a line of the diff, as read at this head."""
@@ -444,7 +603,10 @@ class ReviewRun:
             )
             for c in self.prep.comments
         ]
-        checked = positions.check_github(self.env, self.ref, asked)
+        if self.gitlab:
+            checked = positions.check_gitlab(self.backend, self.ref, asked)  # type: ignore[arg-type]
+        else:
+            checked = positions.check_github(self.env, self.ref, asked)
         if checked.head_sha != pr.head.sha:
             raise refused(
                 "stale_head",
@@ -453,6 +615,11 @@ class ReviewRun:
             )
         self._checked_head = checked.head_sha
         self._placements = checked.placements
+        if self.gitlab:  # a missing start sha is upstream_error here, before anything is audited
+            assert checked.pin is not None
+            self._gl_positions = {
+                p.index: p.gitlab_position(checked.pin) for p in checked.placements
+            }
 
     def _run(self) -> dict[str, Any]:
         args = self.args
@@ -468,7 +635,17 @@ class ReviewRun:
         if args.dedupe_key is not None:
             marker = marker_line(args.dedupe_key)
             hits = self.env.call(lambda: self.poster.find_marker(pr, user.id, marker))
-        if hits and self.state.needed:
+        self.hits = hits
+        if self.gitlab and self.action == "review" and prep.has_text and not hits:  # step 5
+            self._first_drafts = [d.id for d in self.env.call(lambda: self.drafts.list_drafts(pr))]
+            if self._first_drafts:
+                raise refused(
+                    "drafts_present",
+                    f"this account has {len(self._first_drafts)} draft note(s) on the merge "
+                    "request: finish or delete the pending review in the web UI first",
+                    details={"count": len(self._first_drafts)},
+                )
+        if hits and self.state.needed and not self.gitlab:
             raise ForgectlError(
                 "outcome_partial",
                 f"the review's text is already posted but the {prep.event} state is not in "
@@ -476,7 +653,7 @@ class ReviewRun:
                 "nothing was sent",
                 details={"landed": {"ids": hits, "thread_ids": []}, "failed": prep.event},
             )
-        if hits or (not prep.has_text and not self.state.needed):
+        if (hits and not self.state.needed) or (not prep.has_text and not self.state.needed):
             return self._out(already=True, hits=hits)
         # step 6: confirmation. A dry run stops here; any other run without one is exit 13.
         dialog = require_confirmation(self.human)
@@ -505,8 +682,8 @@ class ReviewRun:
                     "the head moved after the positions were checked",
                     details={"head_sha": pr.head.sha},
                 )
-            if not prep.has_text and not self.state.needed:
-                return self._out(already=True, hits=[])
+            if not (prep.has_text and not self.hits) and not self.state.needed:
+                return self._out(already=True, hits=self.hits)
         return self._write(pr)
 
     # -- confirmation and hooks ----------------------------------------------------------------
@@ -514,11 +691,12 @@ class ReviewRun:
     def _dialog(self, pr: PR) -> bool:
         assert self.prep is not None
         lines = [
-            f"review on {self.pr_id}",
+            f"{self.action} on {self.pr_id}",
             f"  head:    {pr.head.sha}",
-            f"  event:   {self.prep.event}",
-            f"  inline:  {len(self.prep.comments)} comment(s)",
         ]
+        if self.action == "review":
+            lines.append(f"  event:   {self.prep.event}")
+            lines.append(f"  inline:  {len(self.prep.comments)} comment(s)")
         if self.prep.sha256 is not None:
             lines.append(f"  text:    {self.prep.nbytes} bytes, sha256 {self.prep.sha256}")
         if self.prep.neutralized_lines:
@@ -535,8 +713,8 @@ class ReviewRun:
             "repo": pr.repo,
             "head_sha": pr.head.sha,
             "actor": self.human.actor,
-            "action": "review",
-            "event": self.prep.event,
+            "action": self.action,
+            "event": self._event(),
             "body_sha256": self.prep.sha256,
             "body_bytes": self.prep.nbytes,
             "thread_id": None,
@@ -583,6 +761,8 @@ class ReviewRun:
         assert self.prep is not None
         prep = self.prep
         overrides = ["override_escalation"] if self.escalated else []
+        if self.self_allowed:
+            overrides.append("allow_self")
         inputs = audit.AuditInputs(
             config_hash=self.inv.config.config_hash,
             config_path=self.inv.config.config_path,
@@ -591,7 +771,7 @@ class ReviewRun:
             actor_source=self.human.actor_source,
             head_sha=pr.head.sha,
             base_ref=pr.base.ref,
-            event=prep.event,
+            event=self._event(),
             body_sha256=prep.sha256,
             host_login=self._login,
         )
@@ -599,7 +779,7 @@ class ReviewRun:
             actor=self.human.actor,
             decision_ids=self.decision_ids,
             target=self.pr_id,
-            action="review",
+            action=self.action,
             inputs=inputs,
             override=overrides,
         )
@@ -629,8 +809,8 @@ class ReviewRun:
             raise audit_error
         if outcome.error is not None:
             raise outcome.error
-        assert outcome.review is not None
-        return self._out(outcome=outcome)
+        assert outcome.landed
+        return self._out(outcome=outcome, already=bool(self.hits), hits=self.hits)
 
     def _attempt(self, pr: PR) -> Outcome:
         """The write and its read-back. A bug here (any non-forgectl exception) is an unknown
@@ -638,7 +818,7 @@ class ReviewRun:
         A signal is not caught."""
         assert self.prep is not None
         try:
-            return self._send(pr)
+            return self._send_gitlab(pr) if self.gitlab else self._send(pr)
         except ForgectlError as err:
             unknown = err.code in ("outcome_unknown", "wrong_host_response")
             return Outcome("outcome_unknown" if unknown else "failed", error=err)
@@ -671,7 +851,7 @@ class ReviewRun:
             comments=comments,
             account_id=self._account,
         )
-        done = Outcome("approved" if prep.event == "approve" else "posted", review)
+        done = Outcome("approved" if prep.event == "approve" else "posted", review, landed=True)
         if self._attempt_record is not None:  # a signal from here on still records the proven id
             self._attempt_record.unknown_ids = [review.review_id]
         # step 11: the read-back; a read that fails is a warning, the review has landed
@@ -682,21 +862,302 @@ class ReviewRun:
             done.ids = ids
         except ForgectlError:
             done.warnings.append("read_back_failed")
-        if prep.event == "approve":  # after an approval this run sent: is it still this head?
-            try:
-                after = self.backend.get_pr(self.ref, NO_READINESS).pr
-            except ForgectlError:
-                if "read_back_failed" not in done.warnings:
-                    done.warnings.append("read_back_failed")
-            else:
-                assert self.expected_base is not None
-                if after.head.sha != pr.head.sha or not base_matches(after, self.expected_base):
-                    done.error = ForgectlError(
-                        "approved_stale_head",
-                        "the approval was sent but the head or base is no longer the expected one",
-                        details={"ids": self._audit_ids(done)},
-                    )
+        if prep.event == "approve":
+            self._after_approval(pr, done)
         return done
+
+    def _after_approval(self, pr: PR, done: Outcome) -> None:
+        """After an approval this run sent: is it still this head? A failed read is a warning."""
+        try:
+            after = self.backend.get_pr(self.ref, NO_READINESS).pr
+        except ForgectlError:
+            if "read_back_failed" not in done.warnings:
+                done.warnings.append("read_back_failed")
+        else:
+            assert self.expected_base is not None
+            if after.head.sha != pr.head.sha or not base_matches(after, self.expected_base):
+                done.error = ForgectlError(
+                    "approved_stale_head",
+                    "the approval was sent but the head or base is no longer the expected one",
+                    details={"ids": self._audit_ids(done)},
+                )
+
+    # -- GitLab: drafts, one publish, the read-back, the state step ------------------------------
+
+    def _sent(self) -> list[tuple[str, dict[str, Any] | None]]:
+        """What the drafts are, in the order they are created: each inline comment with its
+        position, then the review body."""
+        assert self.prep is not None
+        sent: list[tuple[str, dict[str, Any] | None]] = [
+            (c.body, self._gl_positions[c.raw.index]) for c in self.prep.comments
+        ]
+        if self.prep.body is not None:
+            sent.append((self.prep.body, None))
+        return sent
+
+    def _abandon(
+        self,
+        pr: PR,
+        own: list[int],
+        why: ForgectlError | None,
+        sent: list[Any],
+        *,
+        report_strangers: bool = True,
+        unproven: bool = False,
+    ) -> ForgectlError:
+        """Nothing was published: delete forgectl's own drafts (the ones whose creation was proven
+        and any listed one with exactly the text and position sent that was not there before) and
+        return the error to raise. ``unproven`` says a creation may have landed unseen (a timeout, a
+        5xx or an answer with no usable id: ``outcome_unknown``), so a failed re-list leaves drafts
+        of unknown ids behind; a definitive 4xx or a wrong answer is not unproven.
+
+        The host's own answer for a 401, 403, 404 or 429 is kept (its code, details and
+        ``retry_after``); any other failure is ``host_rejected``. Either way the message names the
+        drafts left behind."""
+        candidates = set(own)
+        strangers: list[int] = []
+        relisted = True
+        try:
+            current = self.drafts.list_drafts(pr)
+        except ForgectlError:
+            current = []
+            relisted = False
+        for draft in current:
+            if draft.id in self._first_drafts or draft.id in candidates:
+                continue
+            if any(matches_sent(draft, self._account, n, p) for n, p in sent):
+                candidates.add(draft.id)
+            else:
+                strangers.append(draft.id)
+        left = sorted(strangers) if report_strangers else []
+        for ident in sorted(candidates):
+            try:
+                self.drafts.delete_draft(pr, ident)
+            except ForgectlError:
+                left.append(ident)
+        unknown = unproven and not relisted
+        kept = why is not None and why.code in _HOST_ANSWERS
+        if kept:
+            assert why is not None
+            text = f"{why.message} (the review's draft notes were not published)"
+            leftover = _leftover_text(left, unknown)
+            return ForgectlError(
+                why.code,
+                text + leftover,
+                details=why.details,
+                retry_after=why.retry_after,
+            )
+        status: int | None = None
+        if why is not None and isinstance(why.details, dict):
+            raw = why.details.get("status")
+            status = raw if isinstance(raw, int) and not isinstance(raw, bool) else None
+        text = f": {why.message}" if why is not None else ""
+        error = host_rejected(
+            f"the review's draft notes were not published{text}",
+            status=status,
+            leftover=left,
+        )
+        if unknown:
+            error = ForgectlError(
+                error.code,
+                error.message + _leftover_text([], True),
+                details=error.details,
+            )
+        return error
+
+    def _post_drafts(self, pr: PR) -> tuple[list[Found | None], list[Found], list[str], bool]:
+        """Steps 9 and 11 for the text: create the drafts, re-list, publish, read back. Returns
+        the notes found per sent body, the found ones, the warnings, and whether the read-back was
+        a must (the publish was not answered)."""
+        sent = self._sent()
+        own: list[int] = []
+        try:
+            for note, position in sent:
+                own.append(self.drafts.create_draft(pr, note, position))
+        except ForgectlError as err:
+            raise self._abandon(
+                pr, own, err, sent, unproven=err.code == "outcome_unknown"
+            ) from None
+        if len(set(own)) != len(own):
+            twice = ForgectlError(
+                "wrong_host_response",
+                "draft_notes: two creations answered with the same id",
+                details={"observed": "a repeated draft id"},
+            )
+            raise self._abandon(pr, sorted(set(own)), twice, sent)
+        try:
+            listed = {d.id for d in self.drafts.list_drafts(pr)}
+            above = self.drafts.highest_note_id(pr)
+        except ForgectlError as err:
+            raise self._abandon(pr, own, err, sent) from None
+        strangers = sorted(listed - set(own))
+        if strangers or not set(own) <= listed:
+            gone = self._abandon(pr, own, None, sent, report_strangers=not strangers)
+            if strangers and not (gone.details or {}).get("leftover_drafts"):
+                raise refused(
+                    "drafts_present",
+                    f"{len(strangers)} draft note(s) of this account appeared during the review; "
+                    "forgectl's own were deleted and nothing was published",
+                    details={"count": len(strangers)},
+                )
+            raise gone
+        strict = False
+        try:
+            self.drafts.bulk_publish(pr)
+        except ForgectlError as err:  # timeout, 5xx or a 4xx: the re-list tells which
+            try:
+                remaining = {d.id for d in self.drafts.list_drafts(pr)}
+            except ForgectlError:
+                raise ForgectlError(
+                    "outcome_unknown",
+                    "the publish was not answered and the drafts could not be listed; "
+                    "the review may have landed",
+                ) from None
+            still = set(own) & remaining
+            if still == set(own):
+                raise self._abandon(pr, sorted(still), err, sent) from None
+            # some or all of own are gone: the review landed at least in part. Delete what is
+            # left of it, then the read-back decides.
+            stuck = []
+            for ident in sorted(still):
+                try:
+                    self.drafts.delete_draft(pr, ident)
+                except ForgectlError:
+                    stuck.append(ident)
+            if stuck:
+                ids = ", ".join(str(i) for i in stuck)
+                raise ForgectlError(
+                    "outcome_unknown",
+                    "the publish was not answered and only part of the review's drafts are gone; "
+                    f"drafts left on the merge request that could not be deleted: {ids}; "
+                    "part of the review may have landed",
+                ) from None
+            strict = True
+        bodies = [n for n, _ in sent]
+        try:
+            per_body, found = self.drafts.read_back(
+                pr, above=above, account_id=self._account, bodies=bodies
+            )
+        except ForgectlError:
+            if strict:
+                raise ForgectlError(
+                    "outcome_unknown",
+                    "the publish was not answered and the read-back failed; "
+                    "the review may have landed",
+                ) from None
+            return [], [], ["read_back_failed"], False
+        return per_body, found, [], strict
+
+    def _send_gitlab(self, pr: PR) -> Outcome:
+        prep = self.prep
+        assert prep is not None
+        done = Outcome("approved" if prep.event == "approve" else "posted")
+        if self.action == "approve" and prep.has_text and not self.hits:
+            noted = self._post_note(pr, done)
+            if noted is not None:
+                return noted
+        elif prep.has_text and not self.hits:
+            per_body, found, warnings, after_publish_error = self._post_drafts(pr)
+            done.landed = True
+            done.warnings.extend(warnings)
+            if not warnings:
+                done.ids = [f"gl:n:{f.note_id}" for f in found]
+                threads: list[str] = []
+                for f in found:
+                    if f"gl:d:{f.discussion}" not in threads:
+                        threads.append(f"gl:d:{f.discussion}")
+                done.thread_ids = threads
+                if self._attempt_record is not None:  # a signal from here on keeps the ids
+                    self._attempt_record.unknown_ids = list(done.ids)
+                if any(f is None for f in per_body):  # a sent body that did not come back intact
+                    done.result = "quick_action_ran"
+                    if after_publish_error:
+                        message = (
+                            "the publish was not answered; "
+                            f"notes {', '.join(done.ids)} landed and a sent body did not come "
+                            "back intact (the host may have run a quick action from it, or "
+                            "forgectl deleted drafts that were not published); "
+                            "the state step was not run"
+                        )
+                    else:
+                        message = (
+                            "a published body does not match the one sent: the host may have "
+                            "run a quick action from it; the state step was not run"
+                        )
+                    done.error = ForgectlError(
+                        "quick_action_ran", message, details={"ids": list(done.ids)}
+                    )
+                    return done
+        if not self.state.needed:
+            return done
+        try:
+            if prep.event == "approve":
+                self.drafts.approve(pr, pr.head.sha)
+            else:
+                self.drafts.request_changes(pr)
+        except ForgectlError as err:
+            # a 401 with the approval in place: it is there, whoever put it (Post order step 10)
+            seen = (
+                prep.event == "approve" and err.code == "auth_required" and self._approved_now(pr)
+            )
+            if not seen:
+                if err.reason == "stale_head" and not done.landed:
+                    raise self._stale_head(err) from None
+                if done.landed:  # text landed: any failure of the state step is a partial outcome
+                    done.result = "outcome_partial"
+                    done.error = ForgectlError(
+                        "outcome_partial",
+                        f"the review's text landed but the {prep.event} step failed: {err.message}",
+                        details={
+                            "landed": {"ids": list(done.ids), "thread_ids": list(done.thread_ids)},
+                            "failed": prep.event,
+                        },
+                    )
+                    return done
+                raise
+        done.landed = True
+        done.follow_up_done = bool(self.hits)
+        if prep.event == "approve":
+            self._after_approval(pr, done)
+        return done
+
+    def _stale_head(self, err: ForgectlError) -> ForgectlError:
+        """A 409 on ``POST /approve``: ``details.head_sha`` from one read, left out if it fails."""
+        try:
+            head = self.backend.get_pr(self.ref, NO_READINESS).pr.head.sha
+        except ForgectlError:
+            return err
+        return refused("stale_head", err.message, details={"head_sha": head})
+
+    def _approved_now(self, pr: PR) -> bool:
+        """The re-read after a 401 on ``POST /approve``: ``user_has_approved``. A failed read is
+        no."""
+        try:
+            return self.drafts.user_has_approved(pr)
+        except ForgectlError:
+            return False
+
+    def _post_note(self, pr: PR, done: Outcome) -> Outcome | None:
+        """``approve --body-file`` on GitLab: the note, through ``POST /notes`` with the backstop of
+        ``comment``. Returns the outcome to stop with when the backstop tripped (the state step does
+        not run), else None."""
+        assert self.prep is not None and self.prep.body is not None
+        posted = self.poster.post_comment(pr, self.prep.body)
+        done.landed = True
+        done.ids = list(posted.ids)
+        done.thread_ids = list(posted.thread_ids)
+        if self._attempt_record is not None:  # a signal from here on keeps the ids
+            self._attempt_record.unknown_ids = list(done.ids)
+        if posted.quick_action:
+            done.result = "quick_action_ran"
+            done.error = ForgectlError(
+                "quick_action_ran",
+                "the host may have run a quick action from the note's text; the approval was "
+                "not sent",
+                details={"ids": list(done.ids)},
+            )
+            return done
+        return None
 
     # -- output --------------------------------------------------------------------------------
 
@@ -708,10 +1169,12 @@ class ReviewRun:
         hits: list[str] | None = None,
     ) -> dict[str, Any]:
         extra: dict[str, Any] = {}
-        if outcome is not None and outcome.review is not None:
-            extra["review_id"] = outcome.review.review_id
+        if outcome is not None and outcome.landed:
+            extra["review_id"] = None if outcome.review is None else outcome.review.review_id
             extra["ids"] = list(outcome.ids)
+            extra["thread_ids"] = list(outcome.thread_ids)
             extra["warnings"] = list(outcome.warnings)
+            extra["follow_up_done"] = outcome.follow_up_done
         if hits:
             extra["ids"] = list(hits)
             extra["review_id"] = next((h for h in hits if h.startswith("gh:r:")), None)
@@ -725,7 +1188,9 @@ class ReviewRun:
 
 @registry.register("review")
 def review(inv: registry.Invocation) -> dict[str, Any]:
-    ref = inv.args.pr
-    if isinstance(ref, PrRef) and ref.backend != "github":
-        raise ForgectlError("internal", "review on GitLab: not implemented yet (#27)")
     return ReviewRun(inv).run()
+
+
+@registry.register("approve")
+def approve(inv: registry.Invocation) -> dict[str, Any]:
+    return ReviewRun(inv, "approve").run()

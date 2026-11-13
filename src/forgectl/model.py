@@ -145,6 +145,9 @@ def _same_account(login: str | None, id_: str | None, author: Author) -> bool:
     return ascii_lower(login) == ascii_lower(author.login)
 
 
+same_account = _same_account  # for callers outside this module
+
+
 def _as_author(entry: LatestByReviewer) -> Author:
     return Author(login=entry.login, id=entry.id, is_bot=None)
 
@@ -431,7 +434,7 @@ def count_approvals(entries: Iterable[LatestByReviewer], author: Author) -> int:
     )
 
 
-def _not_before(at: str | None, floor: str) -> bool:
+def not_before(at: str | None, floor: str) -> bool:
     """Whether ``at`` is at or after ``floor``; any missing, naive or unparsable time is no."""
     if not isinstance(at, str) or not isinstance(floor, str):
         return False
@@ -479,7 +482,7 @@ def count_approvals_at_head(
             continue
         if backend != "gitlab" and e.commit_sha != head_sha:
             continue
-        if retarget_at is not None and not _not_before(e.at, retarget_at):
+        if retarget_at is not None and not not_before(e.at, retarget_at):
             continue
         counted.append(e)
     return len(counted)
@@ -1280,6 +1283,12 @@ class PrRead:
     pr: PR
     ci: CI
     latest_by_reviewer: tuple[LatestByReviewer, ...]
+    # What ``approve`` needs to tell whether an approval counts for this head and base: the newest
+    # retarget's time (null for none, or when unknown), whether the lookup worked, and GitLab's
+    # ``reset_approvals_on_push`` (null when unread; GitHub does not use it).
+    retarget_at: str | None = None
+    retarget_known: bool = True
+    reset_on_push: bool | None = None
 
 
 # --- merge -------------------------------------------------------------------------------------

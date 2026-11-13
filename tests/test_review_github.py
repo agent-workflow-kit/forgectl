@@ -465,7 +465,7 @@ def test_an_approve_with_text_posts_it_even_when_an_approval_exists(rv: ReviewRi
     done = rv.run()
     assert done.code == 0, done.err
     assert rv.sent()[0]["body"] == "still good"
-    assert done.json["head_verified"] is False  # exists, and forgectl cannot tell it counts
+    assert done.json["head_verified"] is True  # the retarget walk (#28) says it counts
 
 
 def test_a_bodyless_approve_over_an_existing_approval_sends_nothing(rv: ReviewRig) -> None:
@@ -473,7 +473,7 @@ def test_a_bodyless_approve_over_an_existing_approval_sends_nothing(rv: ReviewRi
     rv.input({"event": "approve"})
     done = rv.run()
     assert done.code == 0, done.err
-    assert done.json["already_posted"] is True and done.json["head_verified"] is False
+    assert done.json["already_posted"] is True and done.json["head_verified"] is True
     assert rv.posts() == [] and rv.audit() == []
     schemas.validate_cli_output("review", done.json)
 
@@ -820,7 +820,7 @@ def test_a_hit_with_the_approval_in_effect_is_exit_0(rv: ReviewRig) -> None:
     rv.input({"event": "approve", "body": "words"})
     done = rv.run("--dedupe-key", "key-1")
     assert done.code == 0, done.err
-    assert done.json["already_posted"] is True and done.json["head_verified"] is False
+    assert done.json["already_posted"] is True and done.json["head_verified"] is True
     assert rv.posts() == []
 
 
@@ -1139,21 +1139,3 @@ def test_a_pre_post_escalation_is_exit_13_and_an_override_is_audited(rv: ReviewR
                   extra_config=hook_config("pre-post", "exit 13"))  # fmt: skip
     assert done.code == 0, done.err
     assert rv.audit()[0]["override"] == ["override_escalation"]
-
-
-# -- GitLab ---------------------------------------------------------------------------------------
-
-
-def test_review_on_gitlab_fails_as_not_implemented_until_27(rv: ReviewRig) -> None:
-    rv.input({"event": "comment", "body": "words"})
-    config = rv.base.config("  gitlab.com:\n    token_env: POST_TOKEN\n")
-    argv = ["review", "gitlab.com/user-9/proj#7", "--json", "--config", str(config)]
-    argv += ["--file", str(rv.file)]
-    argv += ["--expected-head", HEAD, "--expected-base", "main", "--actor", "auto:bot", "--yes"]
-    rv.monkeypatch.setattr(sys, "stdin", io.StringIO(""))
-    code = main(argv, tty=NO_TTY)
-    captured = rv.capsys.readouterr()
-    assert code == 1
-    error = json.loads(captured.out)["error"]
-    assert error["code"] == "internal" and "#27" in error["message"]
-    assert rv.calls() == []
