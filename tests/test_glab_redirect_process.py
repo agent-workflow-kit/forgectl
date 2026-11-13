@@ -5,10 +5,12 @@ This is the loopback reproduction behind the upstream report drafted in
 token is a made-up string. Two loopback servers play two origins (a different port is a
 different origin): server A answers with a redirect to server B.
 
-The test records what the installed ``glab`` does and never fails because of it. When the
-behavior differs from the one written in ``docs/interface.md`` (Residual risks), the test skips
-with a reason that names the documents to update, so a fix upstream shows up in ``-rs`` output.
-The invariants that hold for any ``glab`` version are asserted unconditionally. The gateway's
+The test records what the installed ``glab`` does. When the behavior differs from the one written
+in ``docs/interface.md`` (Residual risks), because ``glab`` drops the token or stops at the
+redirect, the test skips with a reason that names the documents to update, so a fix upstream
+shows up in ``-rs`` output. Other deviations fail: a nonzero exit, or anything other than exactly
+one body-less GET at origin B. The invariants that hold for any ``glab`` version are asserted
+unconditionally. The gateway's
 answer to a redirect it was shown (3xx is ``host_rejected``, a wrong host in the answer is
 ``wrong_host_response``) is covered in ``tests/test_gateway.py``.
 """
