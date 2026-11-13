@@ -98,9 +98,9 @@ Path and filesystem hazards for the reads: macOS's default filesystem is case-in
 
 | # | Check | Expected | Result |
 |---|---|---|---|
-| 2.9 | `echo "$TMPDIR"; ls -ld "$(dirname "$TMPDIR")"; fgctl --json show "$GH_PR" > /dev/null; echo $?; ls -d "$TMPDIR"/forgectl-* 2>/dev/null` | exit 0 with `TMPDIR` as macOS set it, and the private per-run directories are gone after the command: the last `ls` prints nothing | |
+| 2.9 | `echo "$TMPDIR"; ls -ld "$(dirname "$TMPDIR")"; fgctl --json show "$GH_PR" > /dev/null; echo $?; find "$TMPDIR" -maxdepth 1 -name 'forgectl-*'` | exit 0 with `TMPDIR` as macOS set it, and the private per-run directories are gone after the command: the last `ls` prints nothing | |
 | 2.10 | `fgctl --json show "$(echo "$GH_PR" \| tr '[:lower:]' '[:upper:]')"` | the same PR, or a clean exit 2 or 10 naming the reference; never a crash or a traceback | |
-| 2.11 | `env TMPDIR=/nonexistent forgectl --config "$CFG" --json show "$GH_PR" > /dev/null; echo $?; ls -d /tmp/forgectl-* 2>/dev/null` | record observed: forgectl falls back to `/tmp` when `TMPDIR` is unusable, so expect exit 0, a private directory made under `/tmp` while it runs, and none left (the `ls` prints nothing); never a traceback | |
+| 2.11 | `env TMPDIR=/nonexistent forgectl --config "$CFG" --json show "$GH_PR" > /dev/null; echo $?; find /tmp -maxdepth 1 -name 'forgectl-*'` | record observed: forgectl falls back to `/tmp` when `TMPDIR` is unusable, so expect exit 0, a private directory made under `/tmp` while it runs, and none left (the `ls` prints nothing); never a traceback | |
 | 2.12 | `mkdir "$CHK/real" && ln -sfn "$CHK/real" "$CHK/link"; env TMPDIR="$CHK/link" forgectl --config "$CFG" --json show "$GH_PR" > /dev/null; echo $?; ls -A "$CHK/real"` | exit 0; a symlinked `TMPDIR` works and no directory is left in `$CHK/real` (the `ls` prints nothing) | |
 
 ## 3. Credentials and the Keychain
@@ -159,7 +159,7 @@ printf 'trap "" TERM\nsleep 312\n' > "$CHK/ignterm.sh"
 printf 'trap "" TERM\nsleep 314 >/dev/null 2>&1 </dev/null &\n' > "$CHK/bg.sh"
 ```
 
-Leftover check, used by most steps: `ps -axo pid,pgid,command | grep '[s]leep 31[1-5]'` must print nothing, and `ls -d "$TMPDIR"/forgectl-* 2>/dev/null` must print nothing. If either prints something, follow the PID rule in the Rules.
+Leftover check, used by most steps: `ps -axo pid,pgid,command | grep '[s]leep 31[1-5]'` must print nothing, and `find "$TMPDIR" -maxdepth 1 -name 'forgectl-*'` must print nothing. If either prints something, follow the PID rule in the Rules.
 
 | # | Hook and command | Expected | Result |
 |---|---|---|---|
@@ -172,7 +172,7 @@ Leftover check, used by most steps: `ps -axo pid,pgid,command | grep '[s]leep 31
 | 6.7 | `sethook pre-post 30 "sh $CHK/bg.sh; exit 0"; postcheck` | the kqueue case that has no held pipe: the leader exits 0 and a TERM-ignoring grandchild stays behind without holding stdout or stderr. Expect exit 0, comment posted, and the grandchild gone within a few seconds (the group is killed after a normal exit); record observed. 8.2 confirms this path | |
 | 6.8 | `sethook post-post 3 'cat > /dev/null; sleep 315' async; postcheck` (the PR is real; use it twice at most) | forgectl returns at once with exit 0; within about 5 s the watchdog kills the hook (the leftover check prints nothing) | |
 | 6.9 | the hook of 6.8 again, then `ps -axo pid,pgid,sess,command \| grep '[h]ookwatch'` right after the command returns, and again after 6 s | one watchdog while the hook runs (its command line holds `hookwatch`), none afterwards | |
-| 6.10 | A hook that makes its working directory unreadable. Warning: this may leave a directory under `TMPDIR` that you must remove by hand. `cd "$CHK"; sethook pre-post 30 'chmod 000 .; exit 0'; postcheck; ls -d "$TMPDIR"/forgectl-* 2>/dev/null` | record observed. The code has no path for this without `O_PATH` (Linux only): it reopens the directory with a plain `open`, which fails on a directory with mode 000, so a leftover private directory under `TMPDIR` is the predicted outcome on macOS and is a finding to file. If one is left, clean up that directory only: `chmod 700 <that dir> && rmdir <that dir>` | |
+| 6.10 | A hook that makes its working directory unreadable. Warning: this may leave a directory under `TMPDIR` that you must remove by hand. `cd "$CHK"; sethook pre-post 30 'chmod 000 .; exit 0'; postcheck; find "$TMPDIR" -maxdepth 1 -name 'forgectl-*'` | record observed. The code has no path for this without `O_PATH` (Linux only): it reopens the directory with a plain `open`, which fails on a directory with mode 000, so a leftover private directory under `TMPDIR` is the predicted outcome on macOS and is a finding to file. If one is left, clean up that directory only: `chmod 700 <that dir> && rmdir <that dir>` | |
 
 Remove the hook file before the signal steps: `rm -f "$CHK/config.d/10-hook.yaml"`.
 
@@ -184,7 +184,7 @@ forgectl --config "$CFG" --json snapshot "$GH_PR" > "$CHK/out.json" 2> "$CHK/err
 PID=$!
 sleep 1; kill -"$SIG" "$PID"; wait "$PID"; echo "exit $?"
 ps -axo pid,command | grep -E '[g]h api|[g]lab api'
-ls -d "$TMPDIR"/forgectl-* 2>/dev/null
+find "$TMPDIR" -maxdepth 1 -name 'forgectl-*'
 ```
 
 If it prints `exit 0` the call finished before the signal: use `snapshots "$GH_PR" "$GL_PR"` or a shorter `sleep 0.3` and repeat. A `gh api` line that started before this step is not yours to touch.
@@ -237,11 +237,11 @@ Optional, for the maintainer's machine, after the above. From a clone of the rep
 
 ```sh
 cd "$HOME"
-ls -d "$TMPDIR"/forgectl-* 2>/dev/null      # nothing; remove a leftover from 6.10 as described there
+find "$TMPDIR" -maxdepth 1 -name 'forgectl-*'      # nothing; remove a leftover from 6.10 as described there
 case "$CHK" in */macchk.*) [ -d "$CHK/state" ] && rm -rf "$CHK" ;; *) echo "unexpected CHK: $CHK" ;; esac
 ```
 
-Delete all four throwaway repositories' PRs and MRs and the repositories themselves, and revoke any token you made only for this run.
+Delete the four throwaway PRs and MRs and the two repositories, and revoke any token you made only for this run.
 
 ## Result table
 
