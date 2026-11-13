@@ -395,13 +395,25 @@ def _open_after_fixing_mode(name: str, dir_fd: int | None) -> int:
     its place is never followed; the reopened fd must be the same directory (device and inode) or
     it is refused as ``ELOOP``, so a swap for another directory is skipped like a symlink. Only an
     entry inside the private directory can be reached, and a file or symlink swapped in during the
-    check is at worst changed itself, never its target."""
+    check is at worst changed itself, never its target.
+
+    Untested on Linux: the real macOS ``chmod(follow_symlinks=False)`` (``fchmodat`` with
+    ``AT_SYMLINK_NOFOLLOW``) and ``open(O_RDONLY | O_DIRECTORY)`` of the fixed directory; they are
+    covered only by step 6.10 of docs/macos-checklist.md. On Linux a symlink swapped in after the
+    check is covered through the ``ValueError``/``NotImplementedError`` branch; on macOS the link's
+    own mode is changed and the ``O_NOFOLLOW`` open then refuses it with ``ELOOP``.
+
+    Residual race, which cannot be closed (a mode 000 directory cannot be opened without
+    ``O_PATH``, and ``fchmod`` needs the fd): between the check and the chmod a process of the same
+    uid inside the private directory can make a plain file, or a hardlink even to a file outside,
+    take the name and get mode 0700. The same uid can chmod its own files anyway. The identity
+    check refuses a swapped-in directory only after the mode change."""
     before = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
     if not stat.S_ISDIR(before.st_mode):
         raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), name)
     try:
         os.chmod(name, 0o700, dir_fd=dir_fd, follow_symlinks=False)
-    except (NotImplementedError, ValueError):  # a symlink took its place; Linux cannot chmod one
+    except (NotImplementedError, ValueError):  # a symlink took its place (Linux cannot chmod one)
         raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), name) from None
     fd = os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
     after = os.fstat(fd)
