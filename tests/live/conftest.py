@@ -8,6 +8,7 @@ pytest.mark.live`` (``test_live_gate.py`` checks it).
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
@@ -94,6 +95,7 @@ def _session(
     needs the directories too."""
     ledger = LEDGER if ledger is None else ledger
     root = tempfile.TemporaryDirectory(prefix="forgectl-live-")
+    first = len(ledger.entries)  # this fixture's entries start here; other sessions' are not ours
     try:
         try:
             yield _start(
@@ -107,7 +109,8 @@ def _session(
         finally:
             ledger.cleanup_all()
     finally:
-        if any(t.status == "left" for _, t in ledger.entries):
+        # "live" survives only when the cleanup itself was interrupted before it settled the entry.
+        if any(t.status in ("live", "left") for _, t in ledger.entries[first:]):
             KEPT_DIRS.append(root)
         else:
             root.cleanup()
@@ -152,7 +155,9 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         LEDGER.cleanup_all(retry_left=True)
     finally:
         while KEPT_DIRS:
-            KEPT_DIRS.pop().cleanup()
+            kept = KEPT_DIRS.pop()
+            with contextlib.suppress(OSError):  # one stuck directory must not strand the rest
+                kept.cleanup()
 
 
 def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:

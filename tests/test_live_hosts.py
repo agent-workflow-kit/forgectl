@@ -522,6 +522,106 @@ def test_an_interrupt_during_the_creation_is_unconfirmed_and_declared(
     assert ledger.declarations()
 
 
+def creation_of(backend: str) -> tuple[str, str]:
+    return ("POST", "user/repos" if backend == "github" else "projects")
+
+
+@pytest.mark.parametrize("backend", ["github", "gitlab"])
+@pytest.mark.parametrize("status", [400, 422])
+def test_only_a_clean_client_refusal_means_never_created(
+    tmp_path: Path, backend: str, status: int
+) -> None:
+    script = Script()
+    host, ledger = make_flaky(backend, tmp_path, script)
+    script.on(*creation_of(backend), status, {"message": "refused"})
+    script.on("GET", f"repos/me-login/{NAME}", 404)
+    script.on("GET", GITLAB_LOOKUP, 200, [])
+    with pytest.raises(LiveApiError):
+        host.create_throwaway(NAME)
+    assert [t.status for _, t in ledger.entries] == ["deleted"]
+    assert ledger.declarations() == []
+
+
+@pytest.mark.parametrize("backend", ["github", "gitlab"])
+def test_an_unexpected_success_status_is_unconfirmed_and_declared(
+    tmp_path: Path, backend: str
+) -> None:
+    script = Script()
+    host, ledger = make_flaky(backend, tmp_path, script)
+    script.on(*creation_of(backend), 200, {"message": "odd"})
+    script.on("GET", f"repos/me-login/{NAME}", 404)
+    script.on("GET", GITLAB_LOOKUP, 200, [])
+    with pytest.raises(LiveApiError):
+        host.create_throwaway(NAME)
+    assert [t.status for _, t in ledger.entries] == ["left"]
+    assert ledger.declarations()
+
+
+@pytest.mark.parametrize("backend", ["github", "gitlab"])
+@pytest.mark.parametrize("body", [{"unexpected": True}, [], None], ids=["object", "list", "empty"])
+def test_a_201_with_an_unreadable_body_the_lookup_cannot_find_is_declared_left(
+    tmp_path: Path, backend: str, body: Any
+) -> None:
+    script = Script()
+    host, ledger = make_flaky(backend, tmp_path, script)
+    script.on(*creation_of(backend), 201, body)
+    script.on("GET", f"repos/me-login/{NAME}", 404)
+    script.on("GET", GITLAB_LOOKUP, 200, [])
+    with pytest.raises((KeyError, TypeError)):
+        host.create_throwaway(NAME)
+    assert [t.status for _, t in ledger.entries] == ["left"]
+    (line,) = ledger.declarations()
+    assert "verify by name" in line
+
+
+@pytest.mark.parametrize("backend", ["github", "gitlab"])
+def test_an_undecodable_answer_the_lookup_cannot_find_is_declared_left(
+    tmp_path: Path, backend: str
+) -> None:
+    error = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+    script = Flaky(creation_of(backend), error=error)
+    host, ledger = make_flaky(backend, tmp_path, script)
+    script.on("GET", f"repos/me-login/{NAME}", 404)
+    script.on("GET", GITLAB_LOOKUP, 200, [])
+    with pytest.raises(UnicodeDecodeError):
+        host.create_throwaway(NAME)
+    assert [t.status for _, t in ledger.entries] == ["left"]
+    assert ledger.declarations()
+
+
+@pytest.mark.parametrize("backend", ["github", "gitlab"])
+def test_a_refusal_raised_before_any_request_means_never_created(
+    tmp_path: Path, backend: str
+) -> None:
+    script = Flaky(creation_of(backend), error=LiveRefused("refused before launch"))
+    host, ledger = make_flaky(backend, tmp_path, script)
+    script.on("GET", f"repos/me-login/{NAME}", 404)
+    script.on("GET", GITLAB_LOOKUP, 200, [])
+    with pytest.raises(LiveRefused):
+        host.create_throwaway(NAME)
+    assert [t.status for _, t in ledger.entries] == ["deleted"]
+    assert ledger.declarations() == []
+
+
+@pytest.mark.parametrize("backend", ["github", "gitlab"])
+def test_a_second_interrupt_during_the_lookup_leaves_the_entry_live_for_the_finalizer(
+    tmp_path: Path, backend: str
+) -> None:
+    script = Flaky(creation_of(backend), error=KeyboardInterrupt())
+    host, ledger = make_flaky(backend, tmp_path, script)
+    lookup = ("GET", f"repos/me-login/{NAME}" if backend == "github" else GITLAB_LOOKUP)
+    script.raises.add(lookup)
+    with pytest.raises(KeyboardInterrupt):
+        host.create_throwaway(NAME)
+    assert [t.status for _, t in ledger.entries] == ["live"]
+    assert ledger.declarations()  # a live entry is declared if nothing else runs
+    script.raises.clear()
+    script.on("GET", f"repos/me-login/{NAME}", 404)
+    script.on("GET", GITLAB_LOOKUP, 200, [])
+    ledger.cleanup_all()
+    assert [t.status for _, t in ledger.entries] == ["left"]  # still unconfirmed, still declared
+
+
 def test_a_lookup_that_itself_fails_leaves_the_entry_for_the_finalizer(tmp_path: Path) -> None:
     script = Script()
     host, ledger = make_flaky("github", tmp_path, script)
@@ -599,6 +699,42 @@ def test_the_session_finish_hook_retries_what_an_earlier_pass_left(
     monkeypatch.setattr(conftest, "LEDGER", ledger)
     conftest.pytest_sessionfinish(None, 0)  # type: ignore[arg-type]
     assert throwaway.status == "deleted" and host.calls == 2
+
+
+def test_an_interrupted_cleanup_restores_left_and_reraises() -> None:
+    from .live.hosts import Throwaway
+
+    class Interrupted:
+        def delete_or_archive(self, t: Any) -> str:
+            raise KeyboardInterrupt
+
+    ledger = Ledger()
+    throwaway = Throwaway("github", "github.com", NAME, "me-login", "me-login/x", "main", "")
+    ledger.register(Interrupted(), throwaway)  # type: ignore[arg-type]
+    with pytest.raises(KeyboardInterrupt):
+        ledger.cleanup_all()
+    assert throwaway.status == "left"
+
+
+def test_the_session_finish_hook_removes_every_kept_directory_even_when_one_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from .live import conftest
+
+    class Dir:
+        def __init__(self, fail: bool) -> None:
+            self.fail, self.cleaned = fail, False
+
+        def cleanup(self) -> None:
+            self.cleaned = True
+            if self.fail:
+                raise OSError("busy")
+
+    dirs = [Dir(False), Dir(True), Dir(False)]
+    monkeypatch.setattr(conftest, "LEDGER", Ledger())
+    monkeypatch.setattr(conftest, "KEPT_DIRS", list(dirs))
+    conftest.pytest_sessionfinish(None, 0)  # type: ignore[arg-type]
+    assert all(d.cleaned for d in dirs) and conftest.KEPT_DIRS == []
 
 
 # Endpoint and scope hardening -------------------------------------------------------------------
