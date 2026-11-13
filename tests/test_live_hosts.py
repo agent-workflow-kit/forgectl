@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -378,3 +379,236 @@ def test_gitlab_archives_when_delete_is_refused(tmp_path: Path) -> None:
     ledger.cleanup_all()
     assert t.status == "archived"
     assert ledger.declarations() == [f"archived: {NAME} on gitlab.com (delete it by hand)"]
+
+
+# Round 1 review fixes ----------------------------------------------------------------------
+
+
+class Flaky(Script):
+    """A script whose chosen calls raise instead of answering (a timeout, a broken pipe)."""
+
+    def __init__(self, *raises: tuple[str, str], error: Exception | None = None) -> None:
+        super().__init__()
+        self.raises = set(raises)
+        self.error = error or subprocess.TimeoutExpired("gh", 120)
+
+    def __call__(
+        self, argv: Sequence[str], env: Mapping[str, str], stdin: str | None, cwd: Path
+    ) -> RunResult:
+        if (argv[argv.index("-X") + 1], argv[-1]) in self.raises:
+            self.calls.append((list(argv), dict(env), stdin))
+            raise self.error
+        return super().__call__(argv, env, stdin, cwd)
+
+
+def make_flaky(backend: str, tmp_path: Path, script: Script) -> tuple[Any, Ledger]:
+    cfg = guards.LiveConfig(backend, guards.BACKEND_HOSTS[backend], TOKEN, "me-login")
+    dirs = guards.make_private_dirs(tmp_path / "live")
+    creation = GitHubLive.creation if backend == "github" else GitLabLive.creation
+    api = LiveApi(cfg, dirs, WriteScope(creation), source_env=SOURCE, runner=script)
+    ledger = Ledger()
+    return (GitHubLive if backend == "github" else GitLabLive)(api, cfg, ledger), ledger
+
+
+GITLAB_LOOKUP = f"projects?owned=true&simple=true&search={NAME}"
+
+
+def script_lost_github(script: Script, kind: str) -> None:
+    if kind == "keyerror":
+        script.on("POST", "user/repos", 201, {"unexpected": True})
+    script.on("GET", f"repos/me-login/{NAME}", 200, {}, 404, None)
+    script.on("DELETE", f"repos/me-login/{NAME}", 204)
+
+
+@pytest.mark.parametrize("kind", ["keyerror", "timeout", "nostatus"])
+def test_github_creation_lost_on_the_client_side_is_found_by_name_and_deleted(
+    tmp_path: Path, kind: str
+) -> None:
+    script = Flaky(("POST", "user/repos")) if kind == "timeout" else Script()
+    host, ledger = make_flaky("github", tmp_path, script)
+    script_lost_github(script, kind)  # "nostatus": nothing scripted for the POST
+    expected: type[Exception] = {
+        "keyerror": KeyError,
+        "timeout": subprocess.TimeoutExpired,
+        "nostatus": LiveApiError,
+    }[kind]
+    with pytest.raises(expected):
+        host.create_throwaway(NAME)
+    assert f"repos/me-login/{NAME}" in script.endpoints("DELETE")
+    assert [t.status for _, t in ledger.entries] == ["deleted"]
+
+
+@pytest.mark.parametrize("kind", ["keyerror", "timeout", "nostatus"])
+def test_gitlab_creation_lost_on_the_client_side_is_found_by_name_and_deleted(
+    tmp_path: Path, kind: str
+) -> None:
+    script = Flaky(("POST", "projects")) if kind == "timeout" else Script()
+    host, ledger = make_flaky("gitlab", tmp_path, script)
+    if kind == "keyerror":
+        script.on("POST", "projects", 201, {"unexpected": True})
+    script.on("GET", GITLAB_LOOKUP, 200, [{"id": 77, "path": NAME}])
+    script.on("DELETE", "projects/77", 202)
+    script.on("GET", "projects/77", 404)
+    with pytest.raises(Exception):  # noqa: B017 - the kind of error differs per case
+        host.create_throwaway(NAME)
+    assert "projects/77" in script.endpoints("DELETE")
+    assert [t.status for _, t in ledger.entries] == ["deleted"]
+
+
+@pytest.mark.parametrize("backend", ["github", "gitlab"])
+def test_a_creation_that_never_reached_the_host_leaves_nothing_to_clean(
+    tmp_path: Path, backend: str
+) -> None:
+    script = Script()
+    host, ledger = make_flaky(backend, tmp_path, script)
+    script.on("GET", f"repos/me-login/{NAME}", 404)
+    script.on("GET", GITLAB_LOOKUP, 200, [])
+    with pytest.raises(LiveApiError):
+        host.create_throwaway(NAME)
+    assert script.endpoints("DELETE") == []
+    assert [t.status for _, t in ledger.entries] == ["deleted"]
+
+
+def test_a_lookup_that_itself_fails_leaves_the_entry_for_the_finalizer(tmp_path: Path) -> None:
+    script = Script()
+    host, ledger = make_flaky("github", tmp_path, script)
+    with pytest.raises(LiveApiError):
+        host.create_throwaway(NAME)  # nothing scripted: the POST and the lookup both fail
+    assert [t.status for _, t in ledger.entries] == ["live"]
+    script.on("GET", f"repos/me-login/{NAME}", 200, {}, 404, None)
+    script.on("DELETE", f"repos/me-login/{NAME}", 204)
+    ledger.cleanup_all()
+    assert [t.status for _, t in ledger.entries] == ["deleted"]
+
+
+def test_github_delete_that_times_out_still_tries_the_archive(tmp_path: Path) -> None:
+    script = Flaky(("DELETE", f"repos/me-login/{NAME}"))
+    host, ledger = make_flaky("github", tmp_path, script)
+    script.on("POST", "user/repos", 201, github_repo())
+    throwaway = host.create_throwaway(NAME)
+    script.on("PATCH", f"repos/me-login/{NAME}", 200, {})
+    script.on("GET", f"repos/me-login/{NAME}", 200, {"archived": True})
+    assert host.delete_or_archive(throwaway) == "archived"
+    assert ledger.declarations()
+
+
+def test_gitlab_delete_that_times_out_still_tries_the_archive(tmp_path: Path) -> None:
+    script = Flaky(("DELETE", "projects/77"), error=OSError("broken pipe"))
+    host, _ = make_flaky("gitlab", tmp_path, script)
+    script.on("POST", "projects", 201, gitlab_project())
+    throwaway = host.create_throwaway(NAME)
+    script.on("POST", "projects/77/archive", 201, {})
+    script.on("GET", "projects/77", 200, {"archived": True})
+    assert host.delete_or_archive(throwaway) == "archived"
+
+
+class FlakyHost:
+    """A host whose delete fails on the first call only."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def delete_or_archive(self, t: Any) -> str:
+        self.calls += 1
+        t.status = "left" if self.calls == 1 else "deleted"
+        return t.status
+
+
+def test_the_finalizer_retries_a_left_resource_once_and_the_fixture_pass_does_not() -> None:
+    from .live.hosts import Throwaway
+
+    ledger = Ledger()
+    host = FlakyHost()
+    throwaway = Throwaway("github", "github.com", NAME, "me-login", "me-login/x", "main", "")
+    ledger.register(host, throwaway)  # type: ignore[arg-type]
+    ledger.cleanup_all()
+    assert throwaway.status == "left" and host.calls == 1
+    ledger.cleanup_all()
+    assert host.calls == 1  # a plain pass leaves "left" alone
+    ledger.cleanup_all(retry_left=True)
+    assert throwaway.status == "deleted" and host.calls == 2
+    ledger.cleanup_all(retry_left=True)
+    assert host.calls == 2
+
+
+# Endpoint and scope hardening -------------------------------------------------------------------
+
+TRAVERSAL = [
+    "repos/a/%2e%2e/user",
+    "repos/a/%2E%2E/user",
+    "repos/a/./b",
+    "repos//a",
+    "repos/a//b",
+    "repos/a/.%2e/b",
+    "repos/a/..%2fb",
+    "repos/a/%252e%252e/b",
+    "repos/a/．．/b",
+    "repos/a\\b",
+    "repos/a/\x01",
+    "repos/a/",
+    "-repos/a",
+    "--hostname",
+    "repos/a/b%00",
+]
+
+
+@pytest.mark.parametrize("endpoint", TRAVERSAL)
+def test_traversal_in_any_encoding_is_refused(tmp_path: Path, endpoint: str) -> None:
+    host, script, _ = make("github", tmp_path)
+    host.api.scope.allow("repos/a")
+    with pytest.raises(LiveRefused):
+        host.api.request("GET", endpoint)
+    with pytest.raises(LiveRefused):
+        host.api.request("DELETE", endpoint)
+    assert not host.api.scope.permits("DELETE", endpoint)
+    assert script.calls == []
+
+
+def test_scope_compares_whole_segments_and_still_permits_the_created_resource() -> None:
+    scope = WriteScope("user/repos")
+    scope.allow("repos/me/x")
+    assert scope.permits("PUT", "repos/me/x/contents/a.txt?ref=b")
+    assert not scope.permits("PUT", "repos/me/x2")
+    assert not scope.permits("PUT", "repos/me")
+
+
+@pytest.mark.parametrize(
+    "key", ["namespace_id", "namespace_path", "organization", "org", "group_id", "Namespace_ID"]
+)
+def test_the_creation_call_may_not_carry_a_placement_key(tmp_path: Path, key: str) -> None:
+    host, script, _ = make("gitlab", tmp_path)
+    with pytest.raises(LiveRefused):
+        host.api.request("POST", "projects", {"name": NAME, key: 1})
+    assert script.calls == []
+    assert host.api.scope.permits("POST", "projects", {"name": NAME, "path": NAME})
+
+
+# Redaction before truncation ---------------------------------------------------------------------
+
+
+def straddling(token: str, position: int) -> str:
+    return "x" * (position - 4) + token + "y" * 40
+
+
+@pytest.mark.parametrize("where", ["stderr", "body", "expect"])
+def test_a_token_straddling_the_truncation_point_is_redacted_whole(
+    tmp_path: Path, where: str
+) -> None:
+    text = straddling(TOKEN, 300)
+
+    def runner(
+        argv: Sequence[str], env: Mapping[str, str], stdin: str | None, cwd: Path
+    ) -> RunResult:
+        if where == "stderr":
+            return RunResult(1, "", text)
+        return RunResult(0, f"HTTP/2.0 {'200' if where == 'body' else '500'} X\n\n{text}", "")
+
+    host, _ = make_flaky("github", tmp_path, Script())
+    host.api.runner = runner
+    if where == "body":
+        shown = str(host.api.request("GET", "user").data)
+    else:
+        with pytest.raises(LiveApiError) as caught:
+            host.api.expect("GET", "user", [200])
+        shown = str(caught.value)
+    assert "tok-" not in shown and TOKEN[-5:] not in shown

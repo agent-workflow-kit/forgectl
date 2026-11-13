@@ -287,3 +287,115 @@ def test_the_written_forgectl_config_is_valid_and_names_only_the_dedicated_varia
         assert loaded.config.hosts[host].token_env == f"FORGECTL_LIVE_{backend.upper()}_TOKEN"
         assert set(loaded.config.hosts) == {host}
         assert "tok-live" not in path.read_text(encoding="utf-8")
+
+
+# Round 1 review fixes ----------------------------------------------------------------------
+
+
+def test_the_sharp_s_is_not_an_ascii_case_variant_of_ss() -> None:
+    guards.require_account("SS", "ss")
+    for resolved in ("ß", "SSß"):
+        with pytest.raises(LiveRefused):
+            guards.require_account("SS", resolved)
+    with pytest.raises(LiveRefused):
+        guards.require_account("ß", "ss")
+    with pytest.raises(LiveRefused):
+        guards.require_owned_by("ß", "ss")
+
+
+def test_an_ambient_value_equal_to_the_live_token_is_refused_whatever_its_whitespace(
+    tmp_path: Path,
+) -> None:
+    dirs = dirs_for(tmp_path)
+    good = guards.child_env(cfg(), dirs, {"PATH": "/usr/bin"})
+    for ambient in ("tok-live-0001\n", " tok-live-0001", "tok-live-0001\t\n"):
+        with pytest.raises(LiveRefused):
+            guards.assert_env_safe(good, dirs, {"GITHUB_TOKEN": ambient})
+    with pytest.raises(LiveRefused):
+        guards.assert_env_safe(
+            {**good, "GH_TOKEN": "abc"}, dirs, {"GITHUB_TOKEN": "abc\n"}
+        )  # a short token equal to an ambient one
+
+
+def test_a_short_ambient_value_is_not_matched_inside_other_values(tmp_path: Path) -> None:
+    dirs = dirs_for(tmp_path)
+    good = guards.child_env(cfg(), dirs, {"PATH": "/usr/bin"})
+    guards.assert_env_safe(good, dirs, {"GH_HOST": "1", "GITLAB_HOST": "t", "GL_HOST": "/"})
+    long_value = "ambient-long-0001"
+    with pytest.raises(LiveRefused):
+        guards.assert_env_safe({**good, "OTHER": f"x{long_value}x"}, dirs, {"GH_REPO": long_value})
+
+
+@pytest.mark.parametrize(
+    "name", ["HTTPS_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "Https_Proxy"]
+)
+@pytest.mark.parametrize(
+    "value", ["http://user:pw@proxy.example.test:8080", "user:pw@proxy.example.test:8080"]
+)
+def test_a_proxy_with_credentials_is_refused(tmp_path: Path, name: str, value: str) -> None:
+    with pytest.raises(LiveRefused) as caught:
+        guards.child_env(cfg(), dirs_for(tmp_path), {"PATH": "/usr/bin", name: value})
+    assert "pw" not in str(caught.value)
+
+
+def test_a_proxy_without_credentials_is_passed(tmp_path: Path) -> None:
+    source = {"PATH": "/usr/bin", "HTTPS_PROXY": "http://proxy.example.test:8080"}
+    env = guards.child_env(cfg(), dirs_for(tmp_path), source)
+    assert env["HTTPS_PROXY"] == "http://proxy.example.test:8080"
+
+
+def test_a_half_configured_second_account_gives_a_reason() -> None:
+    env = {**settings_env(), "FORGECTL_LIVE_GITHUB_SECOND_TOKEN": "tok-live-0002"}
+    reason = guards.second_account_problem("github", env)
+    assert reason is not None and "half-configured" in reason
+    assert "tok-live-0002" not in reason
+    env = {**settings_env(), "FORGECTL_LIVE_GITHUB_SECOND_USER": "other"}
+    assert "half-configured" in (guards.second_account_problem("github", env) or "")
+    assert guards.second_account_problem("github", settings_env()) is None
+    both = {**env, "FORGECTL_LIVE_GITHUB_SECOND_TOKEN": "tok-live-0002"}
+    assert guards.second_account_problem("github", both) is None
+
+
+# forgectl command scope ------------------------------------------------------------------------
+
+OWN = "me-login/forgectl-live-20261112t101500z-ab12cd34"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["whoami", "--json", "--host", "github.com"],
+        ["show", f"https://github.com/{OWN}/pull/3"],
+        ["show", f"https://GitHub.com/{OWN}/pull/3/files?x=1"],
+        ["show", f"github.com/{OWN}#3"],
+        ["prs", "--repo", f"github.com/{OWN}"],
+        ["prs", f"--repo=github.com/{OWN}"],
+    ],
+)
+def test_forgectl_commands_on_the_throwaway_are_allowed(argv: list[str]) -> None:
+    guards.check_forgectl_argv(argv, cfg(), OWN)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["show", "https://github.com/someone/else/pull/3"],
+        ["show", f"https://github.com/{OWN}-sibling/pull/3"],
+        ["show", f"https://github.com/{OWN}x/pull/3"],
+        ["show", f"https://gitlab.com/{OWN}/pull/3"],
+        ["show", f"http://github.com/{OWN}/pull/3"],
+        ["show", f"https://user{'@'}github.com/{OWN}/pull/3"],
+        ["show", f"https://github.com/{OWN}/../x/pull/3"],
+        ["show", f"https://github.com/{OWN}%2f/pull/3"],
+        ["show", "github.com/someone/else#3"],
+        ["show", f"github.com/{OWN}-sibling#3"],
+        ["show", f"gitlab.com/{OWN}#3"],
+        ["prs", "--repo", "github.com/someone/else"],
+        ["prs", "--repo=github.com/someone/else"],
+        ["whoami", "--host", "ghe.example.test"],
+        ["whoami", "--host=gitlab.com"],
+    ],
+)
+def test_forgectl_commands_that_leave_the_throwaway_are_refused(argv: list[str]) -> None:
+    with pytest.raises(LiveRefused):
+        guards.check_forgectl_argv(argv, cfg(), OWN)

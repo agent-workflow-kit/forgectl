@@ -10,21 +10,34 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from tests.harness.scrub import Scrubber, check_tree, find_unscrubbed
 
-from .guards import NAME_PREFIX
+from .guards import BACKEND_HOSTS, NAME_PREFIX, LiveSettings
 
 RECORDINGS = Path(__file__).resolve().parent.parent / "recordings"
 
 
 class RecordingRefused(Exception):
     """The recording still holds something that must not enter the repository."""
+
+
+def live_secrets(environ: Mapping[str, str]) -> list[str]:
+    """The values of every ``FORGECTL_LIVE_*`` token setting, which must never be recorded."""
+    found = []
+    for backend in BACKEND_HOSTS:
+        names = LiveSettings.for_backend(backend)
+        for name in (names.token, names.second_token):
+            value = environ.get(name, "").strip()
+            if value:
+                found.append(value)
+    return found
 
 
 def scrub_recording(
@@ -78,7 +91,7 @@ def write_recording(
     return resolved
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Scrub a raw live recording into the repository.")
     parser.add_argument("recording", type=Path)
     parser.add_argument("--dest", type=Path, required=True)
@@ -87,7 +100,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     document = json.loads(args.recording.read_text(encoding="utf-8"))
     try:
-        path = write_recording(document, args.dest, logins=args.login, extra=args.extra)
+        secrets = live_secrets(os.environ if environ is None else environ)
+        path = write_recording(
+            document, args.dest, logins=args.login, extra=args.extra, secrets=secrets
+        )
     except RecordingRefused as exc:
         sys.stderr.write(f"refused: {exc}\n")
         return 1

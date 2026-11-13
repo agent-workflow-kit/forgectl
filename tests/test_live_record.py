@@ -10,7 +10,7 @@ import pytest
 
 from .harness.scrub import check_tree
 from .live import record
-from .live.record import RecordingRefused
+from .live.record import RECORDINGS, RecordingRefused
 
 THROWAWAY = "forgectl-live-20261112t101500z-ab12cd34"
 
@@ -82,3 +82,25 @@ def test_the_cli_writes_a_clean_file_and_refuses_a_dirty_destination(
     assert ok == 0 and (root / "a.json").exists()
     bad = record.main([str(source), "--dest", str(tmp_path / "a.json"), "--login", "me-login"])
     assert bad == 1 and "refused" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["tok-live-0001", "aB3dE6gH9jK2mN5pQ8sT", "0123456789abcdef" * 4],
+    ids=["short", "legacy20", "hex64"],
+)
+@pytest.mark.parametrize(
+    "name", ["FORGECTL_LIVE_GITLAB_TOKEN", "FORGECTL_LIVE_GITHUB_SECOND_TOKEN"]
+)
+def test_the_cli_refuses_a_recording_that_holds_a_live_token_value(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], token: str, name: str
+) -> None:
+    source = tmp_path / "raw.json"
+    source.write_text(json.dumps({"note": f"leaked {token} here"}), encoding="utf-8")
+    dest = RECORDINGS / "never-written.json"
+    code = record.main(
+        [str(source), "--dest", str(dest), "--login", "me-login"], environ={name: f" {token}\n"}
+    )
+    err = capsys.readouterr().err
+    assert code == 1 and "refused" in err and token not in err
+    assert not dest.exists()

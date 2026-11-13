@@ -52,8 +52,9 @@ Each backend gets one session fixture (`live_github`, `live_gitlab`, in `tests/l
 Nothing, or a declared leftover:
 
 - The throwaway is registered before any other step, so even a failed create check reaches the cleanup.
-- Cleanup runs in a `finally` of the session fixture, then again in the session finalizer (also after an interrupted run), one resource after another, whatever one of them raised.
-- Delete is verified by reading the repository back. If the delete is refused or the host still shows the repository, the harness archives it and reads that back too. A GitLab project that the host only schedules for deletion counts as handled and is declared.
+- Cleanup runs in a `finally` of the session fixture, also when a step after the creation raised, and before the private directories are removed. It runs again in the session finalizer (also after an interrupted run), which tries once more any throwaway an earlier pass left. One resource after another, whatever one of them raised.
+- A creation that succeeds on the host but fails here (a timeout, an unreadable answer) is registered before the request, then found by name and deleted, or declared.
+- Delete is verified by reading the repository back. If the delete is refused, times out or the host still shows the repository, the harness archives it and reads that back too. A GitLab project that the host only schedules for deletion counts as handled and is declared.
 - At the end of the run the terminal summary names, on the line `live harness: left for manual deletion`, every archived, scheduled or left throwaway by its name and host. Delete those by hand.
 - A run killed with SIGKILL cannot clean up. Its throwaway is found by the prefix: search your own repositories (or projects) for `forgectl-live-` and delete what is older than a day.
 
@@ -62,13 +63,13 @@ Nothing, or a declared leftover:
 Every `gh`, `glab` and forgectl process of a live run gets an environment built from scratch, not copied:
 
 - `HOME` and every XDG directory are private, empty, owner-only directories in a temporary directory that is removed afterwards. `GH_CONFIG_DIR` and `GLAB_CONFIG_DIR` are dedicated empty directories, so no stored login of yours is used and the session bus is unreachable.
-- Only `PATH` (absolute entries), the locale and the proxy and certificate variables come from your shell.
+- Only `PATH` (absolute entries), the locale and the proxy and certificate variables come from your shell. A proxy variable (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, in any case) whose value carries credentials (`user:password@`) stops the run: put the credentials elsewhere.
 - The one credential is the token of that backend: `GH_TOKEN` or `GITLAB_TOKEN` for the harness's own `gh api` and `glab api` calls, and `FORGECTL_LIVE_<HOST>_TOKEN` for forgectl, which a config file written into the private XDG directory names as `token_env`. The config declares only the built-in host, no hooks and no hidden repositories, so your real forgectl config is never read.
 - Each process runs in an empty private directory. Before every launch the harness checks the environment again and stops if a forbidden variable is present, a directory is not the private one, or the value of an ambient token appears anywhere in it.
 
 ### Why ambient tokens are unset
 
-`GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GITHUB_ACCESS_TOKEN`, `GITLAB_TOKEN`, `GITLAB_ACCESS_TOKEN`, `OAUTH_TOKEN` and the host selectors `GH_HOST`, `GH_REPO`, `GITLAB_HOST` and `GL_HOST` are never copied into a child. A shell that has a work token in one of them (many do) would otherwise send it to a test, which writes. If the live token itself equals an ambient value the run is refused: use a token that is only in the `FORGECTL_LIVE_*` settings.
+`GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GITHUB_ACCESS_TOKEN`, `GITLAB_TOKEN`, `GITLAB_ACCESS_TOKEN`, `OAUTH_TOKEN`, the host selectors `GH_HOST`, `GH_REPO`, `GITLAB_HOST` and `GL_HOST`, and `GIT_ASKPASS` and `SSH_AUTH_SOCK` (which could hand a stored credential to git) are never copied into a child. A shell that has a work token in one of them (many do) would otherwise send it to a test, which writes. If the live token itself equals an ambient value (ignoring surrounding whitespace) the run is refused, and so is any ambient value of eight or more characters that appears inside the child environment: use a token that is only in the `FORGECTL_LIVE_*` settings.
 
 ## Rate limits
 
@@ -76,7 +77,7 @@ Both hosts rate-limit by account. A live run makes tens of requests per test, pl
 
 ## A second account
 
-Tests of `approve` and of a non-writer's rights need a second, unrelated personal account on the same host. Create it the same way (it needs no access to the throwaway, which is public) and set the `..._SECOND_TOKEN` and `..._SECOND_USER` settings of that host. A test that needs it asks the `second_account` fixture, which skips when the settings are absent, so the row stays open until someone with a second account runs it. A paid tier is likewise optional input: a test that needs a merge queue, a merge train or an organization skips with its reason.
+Tests of `approve` and of a non-writer's rights need a second, unrelated personal account on the same host. Create it the same way (it needs no access to the throwaway, which is public) and set the `..._SECOND_TOKEN` and `..._SECOND_USER` settings of that host. A test that needs it asks the `second_account` fixture, which skips when the settings are absent. A second token without a second user, or the reverse, is half a second account: the fixture skips with a reason that says it is half-configured and names both settings. so the row stays open until someone with a second account runs it. A paid tier is likewise optional input: a test that needs a merge queue, a merge train or an organization skips with its reason.
 
 ## Recordings
 
@@ -90,7 +91,7 @@ Keep `RAW.json` outside the repository. The command scrubs identities and secret
 
 ## Writing a live test
 
-Mark the module `pytestmark = pytest.mark.live` (`tests/test_live_gate.py` fails otherwise), take `live_github` or `live_gitlab`, and use `session.host` for set-up and `session.forgectl` for the command under test. All writes go through the harness's `LiveApi`, which refuses any write outside the throwaway. `tests/live/test_lifecycle.py` is the smoke test to start from.
+Mark the module `pytestmark = pytest.mark.live` (`tests/test_live_gate.py` fails otherwise), take `live_github` or `live_gitlab`, and use `session.host` for set-up and `session.forgectl` for the command under test. All writes go through the harness's `LiveApi`, which refuses any write outside the throwaway: an endpoint with a `%`, a backslash, a `.` or `..` segment, an empty segment, a leading `-` or a non-ASCII character is refused whatever its encoding (so a GitLab branch name that needs percent-encoding, such as one with a `/`, cannot be used), and the creation call may not carry a namespace, organization or group key. `session.forgectl(argv)` refuses a command before a process starts unless every URL, `host/path#N` reference and `--repo` in it points at the session's own throwaway and `--host` is the session's host. The settings are read from a copy of the environment taken when pytest starts, because the suite's isolation fixture clears every `FORGECTL_*` variable before each test. `tests/live/test_lifecycle.py` is the smoke test to start from.
 
 ## Unverified until the first supervised run
 
@@ -101,3 +102,11 @@ The harness was written and tested against a scripted runner, not a host. Until 
 - GitHub answers a delete of a repository without `delete_repo` with 403 and 404 afterwards means deleted; GitLab answers a project delete with 202 and then 404 or a `marked_for_deletion_on` field.
 - A new protected-branch rule on GitLab needs the default branch's rule removed first.
 - The files an Actions workflow or a pipeline needs (a runner, a verified account on GitLab) exist for the account in use.
+- GitLab `POST /projects/:id/archive` answers 201, and `GET` then shows `archived: true`; GitHub `PATCH` with `archived` answers 200 and the read-back shows it.
+- The GitLab field that marks a project for deletion is `marked_for_deletion_on` (the harness also accepts `marked_for_deletion_at`).
+- GitLab answers a project delete synchronously or with a marker. If it answers 200 and an asynchronous delete leaves no marker, the harness archives a project that is about to disappear and declares it, which is harmless.
+- `forgectl whoami --json` exits 0 under the `token_env` config the harness writes.
+- `glab api` accepts `--hostname`, and `gh api` does too.
+- The user lookup answers `login` on GitHub and `username` on GitLab.
+- The `--include` output separates headers from body with a blank line (the harness splits on the first one).
+- `GET projects?owned=true&simple=true&search=<name>` lists a project by name (used to find a project whose creation answer was lost), and `GET repos/<login>/<name>` finds a repository.

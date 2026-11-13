@@ -9,6 +9,8 @@ the cleanup falls through to archiving rather than leaving a resource undeclared
 from __future__ import annotations
 
 import base64
+import contextlib
+import subprocess
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote
@@ -37,6 +39,10 @@ class Throwaway:
     status: str = "live"  # live, deleted, scheduled, archived, left
 
 
+# What a failed or timed-out call can raise; a timeout must still reach the archive fallback.
+CALL_ERRORS = (LiveApiError, subprocess.SubprocessError, OSError)
+
+
 class _Base:
     backend = ""
     creation = ""
@@ -55,6 +61,27 @@ class _Base:
     def _login(self, user: Any) -> str:  # pragma: no cover - overridden
         raise NotImplementedError
 
+    def _lookup(self, t: Throwaway) -> bool:  # pragma: no cover - overridden
+        """Fill ``ident`` from a lookup by name and allow writes to it; false when it is absent."""
+        raise NotImplementedError
+
+    def _resolve(self, t: Throwaway) -> None:
+        """A creation whose answer was lost: find the resource by name, or note it never existed."""
+        if t.ident:
+            return
+        if not self._lookup(t):
+            t.status = "deleted"  # the host never created it: nothing to clean up
+
+    def _creating(self, t: Throwaway) -> None:
+        """Called when the creation request failed after it may have reached the host."""
+        with contextlib.suppress(*CALL_ERRORS):
+            self._resolve(t)
+            if t.status == "live":
+                self.delete_or_archive(t)
+
+    def delete_or_archive(self, t: Throwaway) -> str:  # pragma: no cover - overridden
+        raise NotImplementedError
+
 
 class GitHubLive(_Base):
     backend = "github"
@@ -68,21 +95,34 @@ class GitHubLive(_Base):
         on a free plan; it holds nothing but what the tests push."""
         require_throwaway_name(name)
         body = {"name": name, "private": private, "auto_init": True, "description": DESCRIPTION}
-        data = self.api.expect("POST", "user/repos", [201], body)
-        owner = str(data["owner"]["login"])
-        throwaway = Throwaway(
-            "github",
-            self.cfg.host,
-            name,
-            owner,
-            f"{owner}/{name}",
-            str(data.get("default_branch", "main")),
-            str(data.get("html_url", "")),
-        )
-        self.api.scope.allow(f"repos/{throwaway.ident}")
-        self.ledger.register(self, throwaway)  # before any check, so cleanup always sees it
-        require_owned_by(owner, self.cfg.login)
+        throwaway = Throwaway("github", self.cfg.host, name, "", "", "main", "")
+        # Registered before the request: a creation that succeeds on the host but fails here
+        # (a timeout, an unreadable answer) is still found by name and cleaned up.
+        self.ledger.register(self, throwaway)
+        try:
+            data = self.api.expect("POST", "user/repos", [201], body)
+            throwaway.owner = str(data["owner"]["login"])
+            throwaway.ident = f"{throwaway.owner}/{name}"
+            throwaway.default_branch = str(data.get("default_branch", "main"))
+            throwaway.web_url = str(data.get("html_url", ""))
+            self.api.scope.allow(f"repos/{throwaway.ident}")
+        except Exception:
+            throwaway.ident = ""
+            self._creating(throwaway)
+            raise
+        require_owned_by(throwaway.owner, self.cfg.login)
         return throwaway
+
+    def _lookup(self, t: Throwaway) -> bool:
+        ident = f"{self.cfg.login}/{t.name}"
+        found = self.api.request("GET", f"repos/{ident}")
+        if found.status == 404:
+            return False
+        if not found.ok():
+            raise LiveApiError(f"lookup answered {found.status}", found.status)
+        t.owner, t.ident = self.cfg.login, ident
+        self.api.scope.allow(f"repos/{ident}")
+        return True
 
     def _repo(self, t: Throwaway) -> str:
         require_throwaway_name(t.name)
@@ -155,18 +195,22 @@ class GitHubLive(_Base):
     def delete_or_archive(self, t: Throwaway) -> str:
         """Delete; if the token cannot (no ``delete_repo`` scope), archive. Verified by reading."""
         try:
+            self._resolve(t)
+            if t.status != "live":
+                return t.status
             if self.api.request("DELETE", self._repo(t)).status == 204:
                 if self.exists(t).status == 404:
                     t.status = "deleted"
                     return t.status
-        except LiveApiError:
+        except CALL_ERRORS:
             pass
         try:
+            self._resolve(t)
             self.api.expect("PATCH", self._repo(t), [200], {"archived": True})
             seen = self.exists(t)
             archived = isinstance(seen.data, dict) and seen.data.get("archived") is True
             t.status = "archived" if archived else "left"
-        except LiveApiError:
+        except CALL_ERRORS:
             t.status = "left"
         return t.status
 
@@ -188,22 +232,32 @@ class GitLabLive(_Base):
             "initialize_with_readme": True,
             "description": DESCRIPTION,
         }
-        data = self.api.expect("POST", "projects", [201], body)
-        ident = str(data["id"])
-        self.api.scope.allow(f"projects/{ident}")
-        owner = str(data["namespace"]["full_path"])
-        throwaway = Throwaway(
-            "gitlab",
-            self.cfg.host,
-            name,
-            owner,
-            ident,
-            str(data.get("default_branch", "main")),
-            str(data.get("web_url", "")),
-        )
-        self.ledger.register(self, throwaway)  # before any check, so cleanup always sees it
-        require_owned_by(owner, self.cfg.login)
+        throwaway = Throwaway("gitlab", self.cfg.host, name, "", "", "main", "")
+        self.ledger.register(self, throwaway)  # before the request, see GitHubLive
+        try:
+            data = self.api.expect("POST", "projects", [201], body)
+            throwaway.ident = str(data["id"])
+            self.api.scope.allow(f"projects/{throwaway.ident}")
+            throwaway.owner = str(data["namespace"]["full_path"])
+            throwaway.default_branch = str(data.get("default_branch", "main"))
+            throwaway.web_url = str(data.get("web_url", ""))
+        except Exception:
+            self._creating(throwaway)
+            raise
+        require_owned_by(throwaway.owner, self.cfg.login)
         return throwaway
+
+    def _lookup(self, t: Throwaway) -> bool:
+        found = self.api.request("GET", f"projects?owned=true&simple=true&search={t.name}")
+        if not found.ok():
+            raise LiveApiError(f"lookup answered {found.status}", found.status)
+        rows = found.data if isinstance(found.data, list) else []
+        for row in rows:
+            if isinstance(row, dict) and row.get("path") == t.name and row.get("id"):
+                t.ident = str(row["id"])
+                self.api.scope.allow(f"projects/{t.ident}")
+                return True
+        return False
 
     def _project(self, t: Throwaway) -> str:
         require_throwaway_name(t.name)
@@ -285,6 +339,9 @@ class GitLabLive(_Base):
     def delete_or_archive(self, t: Throwaway) -> str:
         """Delete; a project that is scheduled for deletion counts, anything else is archived."""
         try:
+            self._resolve(t)
+            if t.status != "live":
+                return t.status
             if self.api.request("DELETE", self._project(t)).status in (202, 204):
                 seen = self.exists(t)
                 if seen.status == 404:
@@ -294,14 +351,15 @@ class GitLabLive(_Base):
                 if data.get("marked_for_deletion_on") or data.get("marked_for_deletion_at"):
                     t.status = "scheduled"
                     return t.status
-        except LiveApiError:
+        except CALL_ERRORS:
             pass
         try:
+            self._resolve(t)
             self.api.expect("POST", f"{self._project(t)}/archive", [201], {})
             seen = self.exists(t)
             archived = isinstance(seen.data, dict) and seen.data.get("archived") is True
             t.status = "archived" if archived else "left"
-        except LiveApiError:
+        except CALL_ERRORS:
             t.status = "left"
         return t.status
 
@@ -315,11 +373,14 @@ class Ledger:
     def register(self, host: GitHubLive | GitLabLive, throwaway: Throwaway) -> None:
         self.entries.append((host, throwaway))
 
-    def cleanup_all(self) -> list[Throwaway]:
-        """Idempotent: a resource already settled is skipped, a failing one never stops the rest."""
+    def cleanup_all(self, *, retry_left: bool = False) -> list[Throwaway]:
+        """Idempotent: a resource already settled is skipped, a failing one never stops the rest.
+        ``retry_left`` (the session finalizer) also tries once more what an earlier pass left."""
+        retry = ("live", "left") if retry_left else ("live",)
         for host, throwaway in reversed(self.entries):
-            if throwaway.status != "live":
+            if throwaway.status not in retry:
                 continue
+            throwaway.status = "live"
             try:
                 host.delete_or_archive(throwaway)
             except Exception:

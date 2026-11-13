@@ -73,6 +73,41 @@ def redact(text: str, secrets: Sequence[str]) -> str:
     return text
 
 
+# Body keys that would place a new repository or project outside the account's own namespace.
+PLACEMENT_KEYS = frozenset(
+    {
+        "namespace_id",
+        "namespace_path",
+        "namespace",
+        "organization",
+        "org",
+        "owner",
+        "group_id",
+        "parent_id",
+        "team_id",
+    }
+)
+PRINTABLE_ASCII = re.compile(r"[\x21-\x7e]+")
+
+
+def path_segments(endpoint: str) -> list[str] | None:
+    """The path segments of a plain relative API path, or ``None`` when it is anything else.
+
+    Refused: a leading ``/`` or ``-``, a URL, a ``%`` (so no percent-encoded dot or slash, however
+    often it is encoded), a backslash, a space, a control or non-ASCII character (fullwidth dots
+    included), an empty segment and a ``.`` or ``..`` segment. The query is checked for characters
+    only.
+    """
+    if not endpoint or endpoint.startswith(("/", "-")) or "://" in endpoint or "%" in endpoint:
+        return None
+    if "\\" in endpoint or not PRINTABLE_ASCII.fullmatch(endpoint):
+        return None
+    segments = endpoint.split("?", 1)[0].split("/")
+    if any(s in ("", ".", "..") for s in segments):
+        return None
+    return segments
+
+
 @dataclass
 class WriteScope:
     """Where this run may write: the creation endpoint, then the resources it created."""
@@ -83,11 +118,13 @@ class WriteScope:
     def allow(self, prefix: str) -> None:
         self.prefixes.append(prefix.strip("/"))
 
-    def permits(self, method: str, endpoint: str) -> bool:
-        path = endpoint.split("?", 1)[0].strip("/")
-        if method == "POST" and path == self.creation:
-            return True
-        return any(path == p or path.startswith(p + "/") for p in self.prefixes)
+    def permits(self, method: str, endpoint: str, body: Mapping[str, Any] | None = None) -> bool:
+        segments = path_segments(endpoint)
+        if segments is None:
+            return False
+        if method == "POST" and segments == self.creation.split("/"):
+            return not (body and PLACEMENT_KEYS & {str(k).lower() for k in body})
+        return any(segments[: len(p)] == p for p in (q.split("/") for q in self.prefixes))
 
 
 @dataclass(frozen=True)
@@ -100,13 +137,7 @@ class Response:
 
 
 def check_endpoint(endpoint: str) -> None:
-    if (
-        not endpoint
-        or "://" in endpoint
-        or endpoint.startswith("/")
-        or ".." in endpoint.split("?", 1)[0].split("/")
-        or any(c in endpoint for c in "\r\n\x00 ")
-    ):
+    if path_segments(endpoint) is None:
         raise LiveRefused(f"endpoint {endpoint!r} is not a plain relative API path")
 
 
@@ -137,7 +168,7 @@ class LiveApi:
         check_endpoint(endpoint)
         if method not in MUTATING | READ:
             raise LiveRefused(f"method {method!r} is not allowed")
-        if method in MUTATING and not self.scope.permits(method, endpoint):
+        if method in MUTATING and not self.scope.permits(method, endpoint, body):
             raise LiveRefused(f"{method} {endpoint.split('?', 1)[0]} is outside this run's scope")
         env = child_env(self.cfg, self.dirs, self.source_env, second=self.second)
         assert_env_safe(env, self.dirs, self.source_env)
@@ -156,7 +187,7 @@ class LiveApi:
         head, _sep, body = result.stdout.replace("\r\n", "\n").partition("\n\n")
         match = STATUS_LINE.match(head)
         if not match:
-            detail = redact(result.stderr.strip()[:300], secrets)
+            detail = redact(result.stderr.strip(), secrets)[:300]
             raise LiveApiError(f"no HTTP status in the answer (exit {result.returncode}): {detail}")
         status = int(match.group(1))
         text = body.strip()
@@ -165,14 +196,14 @@ class LiveApi:
             try:
                 data = json.loads(text)
             except ValueError:
-                data = redact(text[:300], secrets)
+                data = redact(text, secrets)[:300]
         return Response(status, data)
 
     def expect(self, method: str, endpoint: str, status: Sequence[int], body: Any = None) -> Any:
         """``request`` that raises ``LiveApiError`` unless the status is one of ``status``."""
         response = self.request(method, endpoint, body)
         if response.status not in status:
-            detail = redact(json.dumps(response.data)[:300], self.cfg.secrets())
+            detail = redact(json.dumps(response.data), self.cfg.secrets())[:300]
             raise LiveApiError(
                 f"{method} {endpoint.split('?', 1)[0]} answered {response.status}: {detail}",
                 response.status,

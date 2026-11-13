@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import re
 import secrets
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,6 +35,12 @@ EXTRA_FORBIDDEN = (
     "SSH_AUTH_SOCK",
 )
 FORBIDDEN_VARS = (*AMBIENT_TOKEN_VARS, *EXTRA_FORBIDDEN)
+TOKEN_VARS = frozenset(
+    {"GH_TOKEN", "GITLAB_TOKEN"}
+    | {f"FORGECTL_LIVE_{b}_{k}TOKEN" for b in ("GITHUB", "GITLAB") for k in ("", "SECOND_")}
+)
+MIN_SUBSTRING = 8
+PROXY_VARS = frozenset({"http_proxy", "https_proxy", "all_proxy"})
 PASSTHROUGH = (
     "LANG",
     "LC_ALL",
@@ -119,17 +125,22 @@ def throwaway_name(run_id: str) -> str:
     return require_throwaway_name(NAME_PREFIX + run_id)
 
 
+def same_login(a: str, b: str) -> bool:
+    """ASCII-only, case-insensitive: ``casefold`` would equate "SS" with a non-ASCII sharp s."""
+    return bool(a) and a.isascii() and b.isascii() and a.lower() == b.lower()
+
+
 def require_account(expected: str, resolved: str) -> None:
     """The token must belong to the account the user declared (case-insensitive logins)."""
     if not expected:
         raise LiveRefused("no expected login is configured")
-    if not resolved or resolved.casefold() != expected.casefold():
+    if not same_login(resolved, expected):
         raise LiveRefused("the token's account is not the declared live-test account")
 
 
 def require_owned_by(owner: str, login: str) -> None:
     """A created resource must live in the declared account's own namespace."""
-    if not owner or owner.casefold() != login.casefold():
+    if not same_login(owner, login):
         raise LiveRefused("a throwaway resource is not in the declared account's namespace")
 
 
@@ -231,6 +242,9 @@ def child_env(
         "GIT_CEILING_DIRECTORIES": str(dirs.cwd.parent),
         **FIXED_SETTINGS,
     }
+    for name, value in source.items():
+        if name.lower() in PROXY_VARS and re.search(r"^(?:[^/?#]*://)?[^/?#]*@", value):
+            raise LiveRefused(f"{name} carries credentials (user:password@): not passed on")
     for name in PASSTHROUGH:
         if name in source:
             env[name] = source[name]
@@ -288,7 +302,71 @@ def assert_env_safe(env: Mapping[str, str], dirs: PrivateDirs, source: Mapping[s
     for name, path in private.items():
         if env.get(name) != str(path):
             raise LiveRefused(f"{name} is not the dedicated private directory")
+    tokens = {v.strip() for n, v in env.items() if n in TOKEN_VARS and v.strip()}
     for name in FORBIDDEN_VARS:
-        value = source.get(name)
-        if value and any(value in v for v in env.values()):
+        value = (source.get(name) or "").strip()
+        if not value:
+            continue
+        # A short value (GH_HOST=1) is a substring of anything, so only a long one is matched
+        # inside other values; a live token equal to any ambient value is refused at any length.
+        if value in tokens or (
+            len(value) >= MIN_SUBSTRING and any(value in v for v in env.values())
+        ):
             raise LiveRefused(f"the ambient value of {name} reached the child environment")
+
+
+def second_account_problem(backend: str, environ: Mapping[str, str]) -> str | None:
+    """A skip reason when only one of the second account's two settings is set, else ``None``."""
+    names = LiveSettings.for_backend(backend)
+    token, user = _clean(environ.get(names.second_token)), _clean(environ.get(names.second_user))
+    if bool(token) != bool(user):
+        return (
+            f"the second {backend} account is half-configured: "
+            f"set both {names.second_token} and {names.second_user}"
+        )
+    return None
+
+
+def check_forgectl_argv(argv: Sequence[str], cfg: LiveConfig, full_name: str) -> None:
+    """Refuse a forgectl command that could reach anything but this run's throwaway.
+
+    ``full_name`` is the throwaway's full path (``owner/name``). A URL argument must be https on
+    ``cfg.host`` with a path that starts with it, segment by segment; a ``host/path#N`` reference
+    and a ``--repo`` must name it; ``--host`` must be ``cfg.host``. Raises before any process.
+    """
+    require_host(cfg.host)
+    own = [s for s in full_name.lower().split("/") if s]
+
+    def under(path: str) -> bool:
+        parts = path.lower().split("/")
+        if parts[-1] == "":
+            parts.pop()  # a trailing slash is accepted by forgectl
+        if any(p in ("", ".", "..") for p in parts):
+            return False
+        return len(parts) >= len(own) and parts[: len(own)] == own
+
+    def refuse(arg: str) -> LiveRefused:
+        return LiveRefused(f"forgectl argument {arg!r} does not point at the throwaway")
+
+    args = list(argv)
+    for index, arg in enumerate(args):
+        flag, eq, inline = arg.partition("=")
+        if flag in ("--host", "--repo"):
+            value = inline if eq else (args[index + 1] if index + 1 < len(args) else "")
+            if flag == "--host" and value.lower() != cfg.host:
+                raise refuse(arg)
+            if flag == "--repo" and not under_repo(value, cfg.host, own):
+                raise refuse(arg)
+        elif "://" in arg:
+            match = re.fullmatch(r"https://([a-z0-9.-]+)/([^?#@\\%\s]*)(?:[?#].*)?", arg.lower())
+            if not match or match.group(1) != cfg.host or not under(match.group(2)):
+                raise refuse(arg)
+        elif "#" in arg and not arg.startswith("-"):
+            if not under_repo(arg.split("#", 1)[0], cfg.host, own):
+                raise refuse(arg)
+
+
+def under_repo(value: str, host: str, own: list[str]) -> bool:
+    """``host/<full path>`` exactly (a ``--repo``, or the part of ``host/path#N`` before ``#``)."""
+    parts = value.lower().split("/")
+    return parts[0] == host and parts[1:] == own

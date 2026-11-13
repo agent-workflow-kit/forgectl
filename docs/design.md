@@ -167,6 +167,7 @@ Each has a conservative default in place.
 | Item | Default |
 |---|---|
 | A self-managed GitLab: version, `requested review from` wording, creation-time reviewers | version fallbacks; `instance: null` on no match, and a first sight starts once |
+| The live test harness (#30): the `gh api` and `glab api` behaviors, the delete and archive answers and the field names it assumes, never run against a host | each assumption falls back to a refusal or an archive; the list is in [live-tests.md](live-tests.md#unverified-until-the-first-supervised-run) and #30 stays open until a supervised live run checks it |
 | A two-account run: combined reviewer notes, `bulk_publish` not touching another account's drafts | the documented note form is parsed; forgectl compares draft ids before publishing |
 | `glab` with a private CA (`GLAB_CA_CERT`, `SSL_CERT_FILE`); a stored login under a custom config dir | environment passed per the mode; D-2's CA risk stays recorded |
 | GitLab child pipelines: the `/trigger_jobs` route (19.2), the deprecated `/bridges` route below it, and `downstream_pipeline` fields | one `(child) <name>` check per bridge, from `/trigger_jobs` on 19.2 and later and `/bridges` below or on an unreadable version; an unreadable or capped list is `complete: false`, a malformed answer `upstream_error` |
