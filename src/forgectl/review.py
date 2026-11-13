@@ -50,7 +50,7 @@ from .errors import ForgectlError, SignalExit, refused, usage
 from .humanactions import HumanContext, require_confirmation
 from .identifiers import PrRef
 from .merge import base_matches
-from .model import PR, LatestByReviewer, PrRead, not_before, same_account
+from .model import PR, LatestByReviewer, PrRead, ascii_lower, not_before, same_account
 from .neutralize import neutralize
 from .post import (
     GITHUB_COMMENT_LIMIT,
@@ -377,6 +377,7 @@ class ReviewRun:
             ) from None
         self.decision_ids: list[str] = list(self.human.decision_ids)
         self.escalated = False
+        self.self_allowed = False  # --allow-self skipped a self_approval that would have fired
         self.prep: Prepared | None = None
         self.head_sha: str | None = None
         self.expected_head: str | None = self.args.expected_head
@@ -527,9 +528,8 @@ class ReviewRun:
 
     def _check_self(self, pr: PR) -> None:
         """``self_approval`` (Post order step 2): the author is the authenticated account, or the
-        configured ``me``. ``--allow-self`` (human only) skips it; GitHub still refuses."""
-        if self.args.allow_self:
-            return
+        configured ``me``. ``--allow-self`` (human only) skips it, and the audit records it as an
+        override only when the check would have refused; GitHub still refuses."""
         author = pr.author
         basis: str | None = None
         if same_account(self._login, self._account, author):
@@ -539,15 +539,19 @@ class ReviewRun:
             if (
                 me is not None
                 and author.login is not None
-                and me.casefold() == author.login.casefold()
+                and ascii_lower(me) == ascii_lower(author.login)
             ):
                 basis = "configured_me"
-        if basis is not None:
-            raise refused(
-                "self_approval",
-                "the pull request's author is the account that would approve it",
-                details={"basis": basis},
-            )
+        if basis is None:
+            return
+        if self.args.allow_self:
+            self.self_allowed = True
+            return
+        raise refused(
+            "self_approval",
+            "the pull request's author is the account that would approve it",
+            details={"basis": basis},
+        )
 
     def _approval_state(self, read: PrRead, mine: LatestByReviewer | None) -> State:
         """Whether this account's approval already counts, and ``head_verified`` for it.
@@ -580,11 +584,13 @@ class ReviewRun:
 
     @staticmethod
     def _gitlab_verified(read: PrRead, mine: LatestByReviewer | None) -> bool:
+        """True only when this account's own approval was seen and nothing newer than it
+        retargeted the MR, with ``reset_approvals_on_push`` on and the walk completed."""
         if read.reset_on_push is not True or not read.retarget_known:
             return False
-        if read.retarget_at is None:
-            return True
-        return mine is not None and not_before(mine.at, read.retarget_at)
+        if mine is None or mine.state != "approved":
+            return False
+        return read.retarget_at is None or not_before(mine.at, read.retarget_at)
 
     def _positions(self, pr: PR) -> None:
         """Step 3: every inline comment is on a line of the diff, as read at this head."""
@@ -755,6 +761,8 @@ class ReviewRun:
         assert self.prep is not None
         prep = self.prep
         overrides = ["override_escalation"] if self.escalated else []
+        if self.self_allowed:
+            overrides.append("allow_self")
         inputs = audit.AuditInputs(
             config_hash=self.inv.config.config_hash,
             config_path=self.inv.config.config_path,
@@ -1093,7 +1101,7 @@ class ReviewRun:
                 prep.event == "approve" and err.code == "auth_required" and self._approved_now(pr)
             )
             if not seen:
-                if err.code == "stale_head" and not done.landed:
+                if err.reason == "stale_head" and not done.landed:
                     raise self._stale_head(err) from None
                 if done.landed:  # text landed: any failure of the state step is a partial outcome
                     done.result = "outcome_partial"

@@ -40,6 +40,7 @@ from .test_review_gitlab import (
 )
 
 OLD = "2026-10-01T08:00:00Z"
+STALE_READ = 3  # the MR read after the 409 (the run's own reads are the first two)
 
 
 @pytest.fixture
@@ -47,9 +48,9 @@ def gl(rig: Rig) -> Gl:  # noqa: F811
     return Gl(rig)
 
 
-def run_gl(gl_: Gl, *extra: str, body: str | None = None) -> Result:
+def run_gl(gl_: Gl, *extra: str, body: str | None = None, actor: str = "auto:bot") -> Result:
     argv = ["approve", GL_PR, "--json", "--config", str(gl_.base.config)]
-    argv += ["--expected-head", GL_HEAD, "--expected-base", "main", "--actor", "auto:bot", "--yes"]
+    argv += ["--expected-head", GL_HEAD, "--expected-base", "main", "--actor", actor, "--yes"]
     if body is not None:
         path = gl_.base.tmp / "approve-body.md"
         path.write_text(body, "utf-8")
@@ -296,3 +297,65 @@ def test_a_gitlab_dry_run_reads_and_writes_nothing(gl: Gl) -> None:
     done = run_gl(gl, "--dry-run", body="x\n")
     assert done.code == 0, done.err
     assert done.json["dry_run"] is True and gl.writes() == []
+
+
+def test_allow_self_on_my_own_merge_request_is_audited_as_an_override(gl: Gl) -> None:
+    set_mr_author(gl, 31, "user-4")
+    gl.approve_ok()
+    done = run_gl(gl, "--allow-self", actor="human:me")
+    assert done.code == 0, done.err
+    assert [r["override"] for r in gl.audit()] == [["allow_self"]] * 2
+
+
+def test_allow_self_on_someone_elses_merge_request_is_not_an_override(gl: Gl) -> None:
+    gl.approve_ok()
+    done = run_gl(gl, "--allow-self", actor="human:me")
+    assert done.code == 0, done.err
+    assert [r["override"] for r in gl.audit()] == [[]] * 2
+
+
+def test_a_dedupe_key_needs_a_body_file(gl: Gl) -> None:
+    done = run_gl(gl, "--dedupe-key", "key-1")
+    assert done.code == 2
+    assert gl.writes() == []
+
+
+def test_a_409_carries_the_head_sha_read_after_it(gl: Gl) -> None:
+    gl.forges.answer("glab", APPROVE, method="POST", status=409, body={"message": "SHA differs"})
+    done = run_gl(gl)
+    assert done.code == 20 and done.error["reason"] == "stale_head"
+    assert done.error["details"] == {"head_sha": GL_HEAD}
+
+
+def test_a_409_whose_head_read_fails_has_no_head_sha(gl: Gl) -> None:
+    gl.forges.answer("glab", APPROVE, method="POST", status=409, body={"message": "SHA differs"})
+    gl.forges.answer("glab", mr_path(), method="GET", nth=STALE_READ, status=404, body={})
+    _front(gl)
+    done = run_gl(gl)
+    assert done.code == 20 and done.error["reason"] == "stale_head"
+    assert "details" not in done.error or "head_sha" not in (done.error["details"] or {})
+
+
+def test_a_409_after_a_landed_note_stays_outcome_partial(gl: Gl) -> None:
+    note_ok(gl, "words\n")
+    gl.forges.answer("glab", APPROVE, method="POST", status=409, body={"message": "SHA differs"})
+    done = run_gl(gl, body="words\n")
+    assert done.code == 12 and done.error["code"] == "outcome_partial"
+    assert "head_sha" not in (done.error.get("details") or {})
+
+
+def test_user_has_approved_with_no_entry_for_this_account_is_not_verified(gl: Gl) -> None:
+    reset_on_push(gl, True)
+    set_approvals(gl, approvals_doc(has=True, approved_by=[]))
+    gl.notes([retarget_note("2026-10-02T09:00:00Z")])
+    done = run_gl(gl)
+    assert done.code == 0, done.err
+    assert done.json["already_posted"] is True and done.json["head_verified"] is False
+
+
+def test_user_has_approved_with_no_entry_and_no_retarget_is_not_verified(gl: Gl) -> None:
+    reset_on_push(gl, True)
+    set_approvals(gl, approvals_doc(has=True, approved_by=[]))
+    done = run_gl(gl)
+    assert done.code == 0, done.err
+    assert done.json["head_verified"] is False

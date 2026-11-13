@@ -16,7 +16,7 @@ import pytest
 
 from forgectl.cli import main
 
-from .harness import schemas
+from .harness import golden, schemas
 from .test_github_show import HEAD, recording
 from .test_post_github import ME as GH_ME
 from .test_post_github import (
@@ -43,9 +43,15 @@ def rv(rig: Rig) -> ReviewRig:  # noqa: F811
     return ReviewRig(rig)
 
 
-def run_gh(rig_: ReviewRig, *extra: str, body: str | None = None, config: str = "") -> Result:
+def run_gh(
+    rig_: ReviewRig,
+    *extra: str,
+    body: str | None = None,
+    config: str = "",
+    actor: str = "auto:bot",
+) -> Result:
     argv = ["approve", GH_PR, "--json", "--config", str(rig_.base.config(config))]
-    argv += ["--expected-head", HEAD, "--expected-base", "main", "--actor", "auto:bot", "--yes"]
+    argv += ["--expected-head", HEAD, "--expected-base", "main", "--actor", actor, "--yes"]
     if body is not None:
         path = rig_.tmp / "approve-body.md"
         path.write_text(body, "utf-8")
@@ -86,6 +92,7 @@ def test_a_bodyless_github_approve_sends_the_event_and_the_commit_only(rv: Revie
     assert out["action"] == "approve" and out["head_verified"] is None
     assert out["already_posted"] is False and out["review_id"] is not None
     schemas.validate_cli_output("approve", out)
+    golden.assert_golden("approve/github-posted", out, schema_id="forgectl/cli/approve.json")
     records = rv.audit()
     assert [r["result"] for r in records] == ["attempted", "approved"]
     assert records[0]["action"] == "approve" and records[0]["inputs"]["event"] is None
@@ -107,6 +114,7 @@ def test_a_dry_run_plan_has_the_body_hash_and_no_event(rv: ReviewRig) -> None:
     plan = done.json["plan"]
     assert plan["event"] is None and plan["inline_comments"] == 0
     assert plan["body_sha256"] == hashlib.sha256(b"looks good\n").hexdigest()
+    golden.assert_golden("approve/github-dry-run", done.json, schema_id="forgectl/cli/approve.json")
     assert rv.posts() == [] and rv.audit() == []
 
 
@@ -188,6 +196,9 @@ def test_a_self_approval_dry_run_reports_the_refusal(rv: ReviewRig) -> None:
     assert done.code == 20, done.err
     assert done.json["would_refuse"]["reason"] == "self_approval"
     assert done.json["action"] == "approve" and done.json["dry_run"] is True
+    golden.assert_golden(
+        "approve/github-dry-run-would-refuse", done.json, schema_id="forgectl/cli/approve.json"
+    )
 
 
 def test_review_with_an_approve_event_checks_self_approval_too(rv: ReviewRig) -> None:
@@ -197,6 +208,46 @@ def test_review_with_an_approve_event_checks_self_approval_too(rv: ReviewRig) ->
     done = rv.run()
     assert done.code == 20 and done.error["reason"] == "self_approval"
     assert rv.posts() == []
+
+
+def test_a_dismissed_approval_is_none_and_the_approval_is_sent_again(rv: ReviewRig) -> None:
+    older = my_review("APPROVED")
+    dismissed = {**my_review("DISMISSED"), "submittedAt": "2026-10-02T10:30:00Z"}
+    with_pr(rv, [older, dismissed])
+    arm_gh(rv)
+    done = run_gh(rv)
+    assert done.code == 0, done.err
+    assert rv.sent() == [{"commit_id": HEAD, "event": "APPROVE"}]
+    assert done.json["already_posted"] is False and done.json["head_verified"] is None
+
+
+def own_pr(rv_: ReviewRig) -> None:
+    author = {"__typename": "User", "databaseId": GH_ME, "login": "user-4"}
+    with_pr(rv_, [], author=author)
+
+
+def test_allow_self_on_my_own_pull_request_is_audited_as_an_override(rv: ReviewRig) -> None:
+    own_pr(rv)
+    arm_gh(rv)
+    done = run_gh(rv, "--allow-self", actor="human:me")
+    assert done.code == 0, done.err
+    assert [r["override"] for r in rv.audit()] == [["allow_self"]] * 2
+
+
+def test_allow_self_on_someone_elses_pull_request_is_not_an_override(rv: ReviewRig) -> None:
+    arm_gh(rv)
+    done = run_gh(rv, "--allow-self", actor="human:me")
+    assert done.code == 0, done.err
+    assert [r["override"] for r in rv.audit()] == [[]] * 2
+
+
+def test_allow_self_on_a_review_with_an_approve_event_is_audited(rv: ReviewRig) -> None:
+    own_pr(rv)
+    rv.input({"event": "approve", "body": "x"})
+    rv.posted()
+    done = rv.run("--allow-self", actor="human:me")
+    assert done.code == 0, done.err
+    assert rv.audit()[0]["override"] == ["allow_self"]
 
 
 def test_a_dedupe_key_needs_a_body_file(rv: ReviewRig) -> None:
