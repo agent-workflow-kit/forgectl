@@ -103,7 +103,9 @@ def two_origins(redirect_host: str = LOOPBACK) -> Iterator[Origins]:
             thread.join(timeout=10)
 
 
-def run_glab(procs: ProcessRegistry, root: Path, port: int, args: list[str]) -> tuple[int, str]:
+def run_glab(
+    procs: ProcessRegistry, root: Path, port: int, args: list[str]
+) -> tuple[int, str, str]:
     """Run the installed glab against origin A with a private config and the fake token."""
     config = root / "glab-config"
     config.mkdir(mode=0o700)
@@ -133,7 +135,7 @@ def run_glab(procs: ProcessRegistry, root: Path, port: int, args: list[str]) -> 
         "DBUS_SESSION_BUS_ADDRESS": "unix:path=/nonexistent/forgectl-no-bus",
     }
     done = procs.run(["glab", "api", *args], env=env, cwd=cwd, timeout=60)
-    return done.returncode, done.stdout
+    return done.returncode, done.stdout, done.stderr
 
 
 CASES = {
@@ -146,8 +148,8 @@ REDIRECT_HOSTS = {"other_port": LOOPBACK, "other_hostname": "localhost"}
 
 
 def fixed_upstream(b_requests: list[tuple[str, str, str | None]]) -> bool:
-    """True when glab no longer sends its token to origin B: B got nothing, or no token header."""
-    return not b_requests or b_requests[0][2] is None
+    """True when glab no longer sends its token to origin B: no request there carried it."""
+    return all(token is None for _, _, token in b_requests)
 
 
 def localhost_is_loopback() -> bool:
@@ -162,6 +164,24 @@ FIXED_MESSAGE = (
     "glab no longer repeats Private-Token across origins: update docs/interface.md "
     "(Residual risks), design.md D-2 and D-5, the upstream draft and this test"
 )
+
+
+def skip_message(code: int, stderr: str) -> str:
+    """The skip reason, with glab's exit code and stderr tail so an unrelated failure shows."""
+    tail = stderr.replace(FAKE_TOKEN, "<fake-token>")[-200:].strip()
+    return f"{FIXED_MESSAGE} (glab exit code {code}; stderr tail: {tail!r})"
+
+
+def test_skip_message_has_the_exit_code_and_a_redacted_stderr_tail() -> None:
+    message = skip_message(7, f"x{'y' * 300} dial failed {FAKE_TOKEN}")
+    assert "exit code 7" in message
+    assert "dial failed" in message
+    assert FAKE_TOKEN not in message
+    assert "x" + "y" * 300 not in message
+
+
+def test_a_later_request_at_b_with_the_token_is_not_fixed_upstream() -> None:
+    assert not fixed_upstream([("GET", "/a", None), ("GET", "/api/v4/projects/1", FAKE_TOKEN)])
 
 
 def test_no_requests_at_b_counts_as_fixed_upstream() -> None:
@@ -185,7 +205,7 @@ def test_glab_cross_origin_redirect_behavior_is_recorded(
     if redirect == "other_hostname" and not localhost_is_loopback():
         pytest.skip("localhost does not resolve to 127.0.0.1 here")
     with two_origins(REDIRECT_HOSTS[redirect]) as origins:
-        code, stdout = run_glab(procs, tmp_path, origins.port_a, CASES[case])
+        code, stdout, stderr = run_glab(procs, tmp_path, origins.port_a, CASES[case])
         a, b = list(origins.a.requests), list(origins.b.requests)
     # Invariants for any glab version: it sent its token to the origin it was configured for,
     # and the fake token never showed up anywhere but in the Private-Token header.
@@ -194,7 +214,7 @@ def test_glab_cross_origin_redirect_behavior_is_recorded(
     # The one thing that varies by version: what origin B was sent. Decide "fixed" first, so a
     # glab that stops at the redirect (non-zero exit, B empty) skips instead of failing.
     if fixed_upstream(b):
-        pytest.skip(FIXED_MESSAGE)
+        pytest.skip(skip_message(code, stderr))
     assert code == 0, "glab followed the redirect and printed the final answer"
     assert stdout.strip() == '{"id": 1}'
     assert len(b) == 1, "glab did not reach the redirect target exactly once"
