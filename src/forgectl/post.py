@@ -17,7 +17,7 @@ and exits 12 (``cli.py``) without hooks, and one after it stops the remaining ho
 Position validation (step 3) for ``review`` comments is ``positions.py``. ``review`` on GitHub is
 ``review.py`` (#26), and on GitLab ``review.py`` with ``backends/gitlab_review.py`` (#27); both
 share the limits and the marker of this module.
-TODO(#28): ``approve`` (self-approval, the state step, ``head_verified``).
+``approve`` (#28) is ``review.py``'s run with the action ``approve``.
 ``resolve`` and ``unresolve`` (``resolve.py``) reuse its audit, hook and signal helpers.
 """
 

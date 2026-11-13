@@ -122,7 +122,7 @@ def test_broken_pipe_keeps_exit_2(env: dict[str, str]) -> None:
     clean(result.stderr)
 
 
-def test_unimplemented_command_with_full_stdout_keeps_exit_1(env: dict[str, str]) -> None:
+def test_a_failing_command_with_full_stdout_keeps_its_own_exit_code(env: dict[str, str]) -> None:
     result = run(
         CLI,
         [
@@ -137,7 +137,7 @@ def test_unimplemented_command_with_full_stdout_keeps_exit_1(env: dict[str, str]
         env,
         ">/dev/full",
     )
-    assert result.returncode == 1
+    assert result.returncode == 12  # no credential for the host: auth_required
 
 
 def test_success_with_stdout_full_stays_exit_0(env: dict[str, str]) -> None:

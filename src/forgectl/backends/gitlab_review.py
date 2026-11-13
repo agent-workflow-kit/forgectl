@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .. import model as m
-from ..errors import ForgectlError
+from ..errors import ForgectlError, refused
 from ..gateway import Target
 from ..reads import ReadEnv
 from .gitlab_post import GitLabPoster
@@ -33,6 +33,7 @@ from .post_base import created_id, positive_int, same_text
 
 CREATED = frozenset({201})
 NO_CONTENT = frozenset({204})
+STALE = frozenset({409})
 _DISCUSSION = re.compile(r"[0-9a-f]{40}")
 
 _REQUEST_CHANGES = (
@@ -232,6 +233,20 @@ class GitLabReviewer:
                 "request changes: the answer does not name this merge request; it may have landed",
             )
 
+    def user_has_approved(self, pr: m.PR) -> bool:
+        """``GET /approvals``: whether the authenticated account has approved. Anything but a
+        boolean is ``upstream_error``, so the state step fails closed."""
+        target, base = self._base(pr)
+        response = self._env.call(
+            lambda: self._env.gateway.api(target, "GET", [*base, "approvals"], shape="object")
+        )
+        value = response.data.get("user_has_approved")
+        if not isinstance(value, bool):
+            raise ForgectlError(
+                "upstream_error", "approvals: user_has_approved is missing or not a boolean"
+            )
+        return value
+
     def approve(self, pr: m.PR, sha: str) -> None:
         """``POST /approve`` with ``sha`` (the expected head: GitLab refuses another head)."""
         target, base = self._base(pr)
@@ -243,7 +258,10 @@ class GitLabReviewer:
             write=True,
             shape="object",
             expect_status=CREATED,
+            passthrough=STALE,
         )
+        if response.status == 409:  # the host enforces ``sha``: the head moved
+            raise refused("stale_head", "the head moved: the host refused the approval")
         data = response.data
         # live-unverified: #34: the approvals object names the MR's iid; absent is accepted
         if "iid" in data and str(data.get("iid")) != base[-1]:

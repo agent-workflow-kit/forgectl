@@ -10,7 +10,8 @@ reported for it.
 protocol. ``ThreadPoster`` is the write side of ``resolve`` and ``unresolve``, in its own backend
 modules (``github_resolve``, ``gitlab_resolve``).
 
-TODO(#28): ``approve`` posts extend the protocol here, in its own backend module.
+``approve`` (#28) is ``review.py``'s run with the action ``approve``; its GitLab note is
+``post_comment``.
 """
 
 from __future__ import annotations

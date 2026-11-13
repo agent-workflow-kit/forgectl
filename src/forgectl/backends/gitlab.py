@@ -596,7 +596,15 @@ class GitLabBackend:
             reviewers=reviewer_rows,
             headers=(response.headers, reviewer_headers),
         )
-        return m.PrRead(pr=pr, ci=ci, latest_by_reviewer=entries), parts
+        read = m.PrRead(
+            pr=pr,
+            ci=ci,
+            latest_by_reviewer=entries,
+            retarget_at=retarget_at,
+            retarget_known=retarget_known,
+            reset_on_push=reset,
+        )
+        return read, parts
 
     # -- identity ------------------------------------------------------------------------------
 

@@ -811,7 +811,13 @@ class GitHubBackend:
             approvals_at_head=approvals_at_head,
             approvals_left=None,  # GitHub reports no required count in the model
         )
-        return m.PrRead(pr=built, ci=ci, latest_by_reviewer=table.entries)
+        return m.PrRead(
+            pr=built,
+            ci=ci,
+            latest_by_reviewer=table.entries,
+            retarget_at=retarget_at,
+            retarget_known=retarget_known,
+        )
 
     # -- parts ---------------------------------------------------------------------------------
 
