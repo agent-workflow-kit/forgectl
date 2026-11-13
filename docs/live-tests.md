@@ -7,7 +7,7 @@ How to run the `live` suite: the tests that call the real github.com and gitlab.
 - **Personal accounts on github.com and gitlab.com only.** The harness refuses every other host, in code, with no setting that changes it. Never use an employer, client or work account, organization, group, token or host, not even for a read. A work token in your shell can never reach a test (see [Why ambient tokens are unset](#why-ambient-tokens-are-unset)).
 - **A throwaway namespace only.** Every run creates its own repository (GitHub) or project (GitLab) in your own personal namespace, named `forgectl-live-<UTC time>-<8 hex digits>`, and writes only to that. A write anywhere else is refused before a process starts.
 - **You name the account.** The run stops unless the token resolves to the login you declared in `FORGECTL_LIVE_<HOST>_USER`. There is no default, so the harness cannot guess.
-- **Never in CI.** The marker is deselected by default, refused when a CI variable is present, and no workflow names it. A run needs `--run-live`, which `make live` passes.
+- **Never in CI.** The marker is deselected by default, skipped when a CI variable is present, and no workflow names it. A run needs `--run-live`, which `make live` passes.
 - **A human starts it.** The first run on a new setup is supervised: watch it create and delete the throwaway, and check both host UIs afterwards.
 
 ## Accounts and tokens
@@ -52,8 +52,8 @@ Each backend gets one session fixture (`live_github`, `live_gitlab`, in `tests/l
 Nothing, or a declared leftover:
 
 - The throwaway is registered before any other step, so even a failed create check reaches the cleanup.
-- Cleanup runs in a `finally` of the session fixture, also when a step after the creation raised, and before the private directories are removed. It runs again in the session finalizer (also after an interrupted run), which tries once more any throwaway an earlier pass left. One resource after another, whatever one of them raised.
-- A creation that succeeds on the host but fails here (a timeout, an unreadable answer) is registered before the request, then found by name and deleted, or declared. When the answer was lost (a timeout, no HTTP status) and the lookup finds nothing, the host may still finish the creation: the entry is declared "left" with a verify-by-name note instead of "deleted".
+- Cleanup runs in a `finally` of the session fixture, also when a step after the creation raised, and before the private directories are removed. It runs again in the session finalizer (also after an interrupted run), which tries once more any throwaway an earlier pass left; the private directories of a session with such a throwaway are kept until that retry has run, then removed. One resource after another, whatever one of them raised.
+- A creation that succeeds on the host but fails here (a timeout, an unreadable answer) is registered before the request, then found by name and deleted, or declared. When the outcome is open (a timeout, no HTTP status, a 5xx or 429 answer, or an interrupt) and the lookup finds nothing, the host may still finish the creation: the entry is declared "left" with a verify-by-name note instead of "deleted".
 - Delete is verified by reading the repository back. If the delete is refused, times out or the host still shows the repository, the harness archives it and reads that back too. A GitLab project that the host only schedules for deletion counts as handled and is declared.
 - At the end of the run the terminal summary names, on the line `live harness: left for manual deletion`, every archived, scheduled or left throwaway by its name and host. Delete those by hand.
 - A run killed with SIGKILL cannot clean up. Its throwaway is found by the prefix: search your own repositories (or projects) for `forgectl-live-` and delete what is older than a day.

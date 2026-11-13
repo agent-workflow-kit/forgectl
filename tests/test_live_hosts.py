@@ -387,7 +387,7 @@ def test_gitlab_archives_when_delete_is_refused(tmp_path: Path) -> None:
 class Flaky(Script):
     """A script whose chosen calls raise instead of answering (a timeout, a broken pipe)."""
 
-    def __init__(self, *raises: tuple[str, str], error: Exception | None = None) -> None:
+    def __init__(self, *raises: tuple[str, str], error: BaseException | None = None) -> None:
         super().__init__()
         self.raises = set(raises)
         self.error = error or subprocess.TimeoutExpired("gh", 120)
@@ -487,6 +487,39 @@ def test_a_lost_creation_the_lookup_cannot_find_stays_declared_left(
     assert [t.status for _, t in ledger.entries] == ["left"]
     (line,) = ledger.declarations()
     assert line.startswith(f"left: {NAME} on ") and "verify by name" in line
+
+
+@pytest.mark.parametrize("backend", ["github", "gitlab"])
+@pytest.mark.parametrize("status", [429, 502, 504])
+def test_a_creation_answered_with_a_server_error_is_unconfirmed_and_declared(
+    tmp_path: Path, backend: str, status: int
+) -> None:
+    script = Script()
+    host, ledger = make_flaky(backend, tmp_path, script)
+    script.on("POST", "user/repos", status, {"message": "gateway"})
+    script.on("POST", "projects", status, {"message": "gateway"})
+    script.on("GET", f"repos/me-login/{NAME}", 404)
+    script.on("GET", GITLAB_LOOKUP, 200, [])
+    with pytest.raises(LiveApiError):
+        host.create_throwaway(NAME)
+    assert [t.status for _, t in ledger.entries] == ["left"]
+    (line,) = ledger.declarations()
+    assert "verify by name" in line
+
+
+@pytest.mark.parametrize("backend", ["github", "gitlab"])
+def test_an_interrupt_during_the_creation_is_unconfirmed_and_declared(
+    tmp_path: Path, backend: str
+) -> None:
+    creation = ("POST", "user/repos" if backend == "github" else "projects")
+    script = Flaky(creation, error=KeyboardInterrupt())
+    host, ledger = make_flaky(backend, tmp_path, script)
+    script.on("GET", f"repos/me-login/{NAME}", 404)
+    script.on("GET", GITLAB_LOOKUP, 200, [])
+    with pytest.raises(KeyboardInterrupt):
+        host.create_throwaway(NAME)
+    assert [t.status for _, t in ledger.entries] == ["left"]
+    assert ledger.declarations()
 
 
 def test_a_lookup_that_itself_fails_leaves_the_entry_for_the_finalizer(tmp_path: Path) -> None:
