@@ -31,7 +31,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, overload
 
 from . import audit, hooks, jsonlog, output, registry
 from .backends.post_base import Anchor, Posted, Poster
@@ -188,6 +188,35 @@ def _poster(backend: str, env: ReadEnv) -> Poster:
     return GitLabPoster(env)
 
 
+class Settled(Protocol):
+    """What the shared write helpers need of an outcome (``post.Outcome``, ``review.Outcome``)."""
+
+    @property
+    def result(self) -> str: ...
+
+    @property
+    def error(self) -> ForgectlError | None: ...
+
+
+@overload
+def attempt_write(
+    write: Callable[[], Outcome],
+    log: Callable[[str, str, dict[str, Any]], None],
+    *,
+    what: str = "post",
+) -> Outcome: ...
+
+
+@overload
+def attempt_write[T: Settled](
+    write: Callable[[], T],
+    log: Callable[[str, str, dict[str, Any]], None],
+    *,
+    make: Callable[[str, ForgectlError], T],
+    what: str = "post",
+) -> T: ...
+
+
 def attempt_write(
     write: Callable[[], Any],
     log: Callable[[str, str, dict[str, Any]], None],
@@ -223,6 +252,29 @@ def attempt_write(
 
 def _posted_ids(outcome: Outcome) -> list[str]:
     return list(outcome.posted.ids) if outcome.posted else []
+
+
+@overload
+def audited_write(
+    directory: Path,
+    context: audit.AuditContext,
+    write: Callable[[], Outcome],
+    post_hooks: Callable[[Outcome], None],
+    *,
+    on_attempt: Callable[[audit.Attempt], None] | None = None,
+) -> Outcome: ...
+
+
+@overload
+def audited_write[T: Settled](
+    directory: Path,
+    context: audit.AuditContext,
+    write: Callable[[], T],
+    post_hooks: Callable[[T], None],
+    *,
+    ids: Callable[[T], list[str]],
+    on_attempt: Callable[[audit.Attempt], None] | None = None,
+) -> T: ...
 
 
 def audited_write(
