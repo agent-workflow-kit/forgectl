@@ -149,7 +149,7 @@ def test_an_interrupted_cleanup_keeps_the_directories_for_the_finalizer_retry(
     assert fake.deleted and not fake.cwd_missing and not root.exists()
 
 
-def test_a_second_interrupt_while_resolving_a_creation_keeps_the_directories(
+def test_a_second_interrupt_while_resolving_a_creation_is_settled_by_the_fixture_pass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake, ledger = Fake(), Ledger()
@@ -162,6 +162,26 @@ def test_a_second_interrupt_while_resolving_a_creation_keeps_the_directories(
         next(session)
     assert [t.status for _, t in ledger.entries] == ["deleted"]  # the fixture pass settled it
     assert fake.deleted and not fake.cwd_missing
+
+
+def test_a_creation_whose_lookup_and_delete_are_both_interrupted_keeps_the_directories(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake, ledger = Fake(), Ledger()
+    # the creation, the lookup that follows it, then the fixture pass's own delete
+    fake.interrupts = {("POST", "user/repos"): 1, ("GET", "repos/"): 1, ("DELETE", "repos/"): 1}
+    monkeypatch.setattr(live_conftest, "LEDGER", ledger)
+    monkeypatch.setattr(live_conftest, "KEPT_DIRS", [])
+    session = live_conftest._session("github", request(), env=ENV, runner=fake, ledger=ledger)
+    with pytest.raises(KeyboardInterrupt):
+        next(session)
+    assert not fake.deleted
+    assert len(live_conftest.KEPT_DIRS) == 1
+    root = Path(live_conftest.KEPT_DIRS[0].name)
+    assert root.is_dir()  # the finalizer's retry needs the directories
+    live_conftest.pytest_sessionfinish(None, 0)  # type: ignore[arg-type]
+    assert fake.deleted and not fake.cwd_missing
+    assert not root.exists() and live_conftest.KEPT_DIRS == []
 
 
 def test_a_session_only_keeps_its_directories_for_its_own_unsettled_entries(
