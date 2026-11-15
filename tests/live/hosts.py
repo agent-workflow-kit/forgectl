@@ -18,6 +18,7 @@ from urllib.parse import quote
 from .api import LiveApi, LiveApiError
 from .guards import (
     LiveConfig,
+    LiveRefused,
     require_account,
     require_host,
     require_owned_by,
@@ -80,11 +81,16 @@ class _Base:
         else:
             t.status = "deleted"  # the host refused or never created it: nothing to clean up
 
-    def _creating(self, t: Throwaway, error: Exception) -> None:
-        """Called when the creation request failed after it may have reached the host."""
-        t.unconfirmed = isinstance(error, subprocess.SubprocessError | OSError) or (
-            isinstance(error, LiveApiError) and error.status == 0
+    def _creating(self, t: Throwaway, error: BaseException) -> None:
+        """Called when the creation request failed after it may have reached the host. Only a
+        definite client refusal (a 4xx other than 429) or a refusal raised by this harness before
+        any request was sent means it was never created. Everything else leaves the outcome open:
+        a lost or unreadable answer, an unexpected status, a 5xx, a 429, an interrupt."""
+        never_sent = isinstance(error, LiveRefused)
+        clean_refusal = (
+            isinstance(error, LiveApiError) and 400 <= error.status < 500 and error.status != 429
         )
+        t.unconfirmed = not (never_sent or clean_refusal)
         with contextlib.suppress(*CALL_ERRORS):
             self._resolve(t)
             if t.status == "live":
@@ -117,7 +123,7 @@ class GitHubLive(_Base):
             throwaway.default_branch = str(data.get("default_branch", "main"))
             throwaway.web_url = str(data.get("html_url", ""))
             self.api.scope.allow(f"repos/{throwaway.ident}")
-        except Exception as error:
+        except BaseException as error:
             throwaway.ident = ""
             self._creating(throwaway, error)
             raise
@@ -252,7 +258,7 @@ class GitLabLive(_Base):
             throwaway.owner = str(data["namespace"]["full_path"])
             throwaway.default_branch = str(data.get("default_branch", "main"))
             throwaway.web_url = str(data.get("web_url", ""))
-        except Exception as error:
+        except BaseException as error:
             self._creating(throwaway, error)
             raise
         require_owned_by(throwaway.owner, self.cfg.login)
@@ -396,6 +402,9 @@ class Ledger:
                 host.delete_or_archive(throwaway)
             except Exception:
                 throwaway.status = "left"
+            except BaseException:
+                throwaway.status = "left"  # an interrupt: the finalizer's retry settles it
+                raise
         return [t for _, t in self.entries]
 
     def declarations(self) -> list[str]:
