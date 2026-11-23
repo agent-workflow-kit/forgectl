@@ -38,6 +38,8 @@ class LightItem:
     merge_status: str | None = None
     notes_count: int | None = None
     roles: tuple[str, ...] = ()
+    #: the host's word for the repository; read by ``skip``, never part of the output
+    archived: bool = field(default=False, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
         return {

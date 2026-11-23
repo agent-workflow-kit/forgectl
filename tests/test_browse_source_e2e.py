@@ -394,6 +394,7 @@ def test_a_hidden_gitlab_repo_gets_no_row_in_browse(
         web_url="https://gitlab.com/user-5/visible/-/merge_requests/31",
     )
     gitlab_route(forged, "merge_requests", recorded)
+    gitlab_route(forged, "projects/303", {"id": 303, "archived": False})
     forged.answer("gh", "graphql", method="POST", host="github.com", body=_empty_search(), times=2)
     cfg = gitlab_config(
         tmp_path, "me:\n  github: user-1\n  gitlab: user-1\nhidden_repos: ['gitlab.com/user-9/*']\n"

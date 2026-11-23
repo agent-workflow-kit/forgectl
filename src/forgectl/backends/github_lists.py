@@ -32,6 +32,7 @@ from ..gateway import Target, verify_identity
 from ..identifiers import RepoRef, bind_login
 from ..reads import ReadEnv
 from ..sanitize import sanitize_line
+from .base import RepoSkip, reads_archived
 from .github import (
     _ACTOR_FIELDS,
     _NODE_ID,
@@ -87,7 +88,7 @@ query ForgectlPrs($q: String!, $first: Int!, $after: String) {
         baseRefName
         headRepository { nameWithOwner }
         isCrossRepository
-        repository { id nameWithOwner }
+        repository { id nameWithOwner isArchived }
       }
     }
   }
@@ -214,6 +215,22 @@ def _matches(item: m.PrListItem, query: m.PrQuery) -> bool:
     return query.draft is None or item.draft == query.draft
 
 
+def archived_flag(repository: dict[str, Any]) -> bool:
+    """``isArchived`` of a result's repository: absent or null reads as not archived (the query
+    asks for it, so a host that omits it is not one that archives), anything but a boolean is
+    refused."""
+    value = repository.get("isArchived")
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise Malformed("the archived flag")
+    return value
+
+
+def _node_archived(node: dict[str, Any]) -> bool:
+    return archived_flag(_obj(node.get("repository"), "the repository"))
+
+
 def _node_repo(target: Target, node: dict[str, Any]) -> str:
     """The repo id of a search result, read the way ``_item`` reads it."""
     repository = _obj(node.get("repository"), "the repository")
@@ -270,7 +287,7 @@ def _item(env: ReadEnv, target: Target, node: dict[str, Any], *, more: bool) -> 
     )
 
 
-def list_prs(env: ReadEnv, query: m.PrQuery, skip: Callable[[str], bool] | None = None) -> m.PrPage:
+def list_prs(env: ReadEnv, query: m.PrQuery, skip: RepoSkip | None = None) -> m.PrPage:
     """``prs`` on one GitHub host: at most ``limit`` items, newest ``updated_at`` first. An item
     whose repo id ``skip`` accepts is left out before its label pages are read, and does not make
     the list incomplete."""
@@ -358,8 +375,9 @@ def _read_pages(
     search: str,
     need: int,
     floor: datetime | None,
-    skip: Callable[[str], bool] | None = None,
+    skip: RepoSkip | None = None,
 ) -> tuple[list[m.PrListItem], bool, bool, int, int]:
+    read = reads_archived(skip)  # the flag is read and checked only for a predicate that uses it
     items: list[m.PrListItem] = []
     seen: set[str] = set()
     skipped_ids: set[str] = set()  # left out on purpose: counted against the host's match count
@@ -376,7 +394,7 @@ def _read_pages(
             if node is None:
                 dropped = True  # not a pull request, or hidden from this account
                 continue
-            if skip is not None and skip(_node_repo(target, node)):
+            if skip is not None and skip(_node_repo(target, node), read and _node_archived(node)):
                 skipped_ids.add(_str(node.get("id"), "the id"))
                 continue  # before `_item` reads label pages: a skipped PR costs no request
             item = _item(env, target, node, more=True)

@@ -274,6 +274,11 @@
       "default": [],
       "description": "Repo ids (host/path) whose PRs no listing shows, `prs` and `browse` alike; * and ? are wildcards that also match /, everything else is literal, matched ASCII case-insensitively against the whole id. Commands naming one PR are not affected. Replaces on merge like any list."
     },
+    "hide_archived_repos": {
+      "type": "boolean",
+      "default": true,
+      "description": "Hide the PRs of repositories the host reports as archived from every listing, `prs` and `browse` alike, as `hidden_repos` does. Read live on every run, never stored. false lists them. Combines with `hidden_repos` as a union."
+    },
     "activity": {
       "type": "object",
       "properties": {

@@ -21,6 +21,34 @@ from .. import model as m
 from ..errors import ForgectlError
 from ..identifiers import PrRef, RepoRef
 
+
+class RepoSkip(Protocol):
+    """The predicate of ``hidden_repos`` and ``hide_archived_repos``: whether a PR of repo id
+    ``repo`` (`host/path`) is left out. ``archived`` is the host's word for that repository, false
+    where the caller does not know it."""
+
+    def __call__(self, repo: str, archived: bool = False, /) -> bool: ...
+
+
+def reads_archived(skip: RepoSkip | None) -> bool:
+    """Whether ``skip`` can use the archived state. A predicate that says ``hide_archived`` is
+    false never needs it, so an adapter does not read or validate the host's flag for it; any
+    other predicate is taken to use it."""
+    return skip is not None and getattr(skip, "hide_archived", True) is not False
+
+
+class RepoFilter:
+    """The ``RepoSkip`` of the configuration: ``hidden`` repo patterns, and archived repositories
+    when ``hide_archived`` is set. ``hide_archived`` is readable so adapters can tell."""
+
+    def __init__(self, matches: Callable[[str], bool], hide_archived: bool) -> None:
+        self._matches = matches
+        self.hide_archived = hide_archived
+
+    def __call__(self, repo: str, archived: bool = False, /) -> bool:
+        return (self.hide_archived and archived) or self._matches(repo)
+
+
 #: Every read an adapter provides; the protocol test keeps this equal to `Backend`.
 READ_METHODS: tuple[str, ...] = (
     "list_prs",
@@ -52,10 +80,10 @@ class Backend(Protocol):
     #: `github` or `gitlab`.
     name: m.BackendName
 
-    def list_prs(self, query: m.PrQuery, skip: Callable[[str], bool] | None = None) -> m.PrPage:
-        """`prs` on this backend's hosts. ``skip`` takes a repo id (`host/path`); an item it
-        accepts is left out right after it is parsed, before any further read for the item, and
-        does not make the list incomplete."""
+    def list_prs(self, query: m.PrQuery, skip: RepoSkip | None = None) -> m.PrPage:
+        """`prs` on this backend's hosts. ``skip`` takes a repo id (`host/path`) and whether the
+        host reports the repository archived; an item it accepts is left out right after it is
+        parsed, before any further read for the item, and does not make the list incomplete."""
         ...
 
     def get_pr(self, ref: PrRef, readiness: m.Readiness | None = None) -> m.PrRead:

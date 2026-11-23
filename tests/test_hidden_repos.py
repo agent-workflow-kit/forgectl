@@ -631,6 +631,7 @@ def test_gitlab_a_hidden_item_past_the_limit_keeps_the_list_complete(
     mixed_gitlab(fake_forges)
     gl_route(fake_forges, "projects/505", {"message": "404 Project Not Found"}, status=404)
     gl_route(fake_forges, "users/77", {"id": 77, "username": "user-1", "bot": False})
+    gl_route(fake_forges, "projects/303", {"id": 303, "archived": False})
     cfg = gl_config(tmp_path, "hidden_repos: ['gitlab.com/user-9/*']\n")
     done = run_forgectl(
         ["prs", "--json", "--config", str(cfg), "--host", "gitlab.com", "--state", "all"]

@@ -314,6 +314,7 @@ class Config(_Model):
     hosts: HostMap = Field(default_factory=_empty_map)
     repos: RepoMap = Field(default_factory=_empty_map)
     hidden_repos: HiddenRepos = ()
+    hide_archived_repos: Annotated[bool, Field(strict=True)] = True
     activity: Activity = Field(default_factory=Activity)
     browse: Browse = Field(default_factory=Browse)
     log: Log = Field(default_factory=Log)

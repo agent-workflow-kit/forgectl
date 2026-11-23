@@ -11,7 +11,6 @@ reported incomplete, and the caller reads the list with ``prs`` instead.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
@@ -21,6 +20,7 @@ from ..gateway import Target, verify_identity
 from ..hosts import Identity
 from ..reads import ReadEnv
 from ..sanitize import sanitize_line
+from .base import RepoSkip, reads_archived
 from .github import (
     _ACTOR_FIELDS,
     _NODE_ID,
@@ -37,7 +37,7 @@ from .github import (
     _str,
     parse_actor,
 )
-from .github_lists import build_search
+from .github_lists import archived_flag, build_search
 from .light_common import LightItem, LightPage
 
 PAGE_SIZE = 100
@@ -61,7 +61,7 @@ query ForgectlLight($q: String!, $first: Int!, $after: String) {
         headRefOid
         reviewDecision
         author { ...ActorFields }
-        repository { nameWithOwner }
+        repository { nameWithOwner isArchived }
         commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
       }
     }
@@ -82,7 +82,7 @@ def _state(node: dict[str, Any]) -> str | None:
     return _opt_str(rollup.get("state")) if rollup else None
 
 
-def _item(target: Target, node: dict[str, Any], role: str) -> LightItem:
+def _item(target: Target, node: dict[str, Any], role: str, read_archived: bool = True) -> LightItem:
     number = node.get("number")
     if isinstance(number, bool) or not isinstance(number, int) or number < 1:
         raise Malformed("the number")
@@ -112,6 +112,7 @@ def _item(target: Target, node: dict[str, Any], role: str) -> LightItem:
         ci_state=_state(node),
         review_decision=_opt_str(node.get("reviewDecision")),
         roles=(role,),
+        archived=archived_flag(repository) if read_archived else False,
     )
 
 
@@ -120,10 +121,11 @@ def _read_list(
     target: Target,
     search: str,
     role: str,
-    skip: Callable[[str], bool] | None,
+    skip: RepoSkip | None,
 ) -> tuple[list[LightItem], bool]:
     """One role's PRs and whether the list was read whole."""
     backend = GitHubBackend(env)
+    read = reads_archived(skip)  # the flag is read and checked only for a predicate that uses it
     items: list[LightItem] = []
     complete = True
     skipped = 0
@@ -155,7 +157,7 @@ def _read_list(
                 ):
                     dropped += 1
                     continue
-                found.append(_item(target, _obj(raw, "a result"), role))
+                found.append(_item(target, _obj(raw, "a result"), role, read))
             return found, count, more, cursor, dropped
 
         variables = {"q": search, "first": PAGE_SIZE, "after": after}
@@ -168,7 +170,7 @@ def _read_list(
             if item.pr in seen:
                 continue
             seen.add(item.pr)
-            if skip is not None and skip(item.repo):
+            if skip is not None and skip(item.repo, item.archived):
                 skipped += 1
             else:
                 items.append(item)
@@ -184,7 +186,7 @@ def read_light(
     env: ReadEnv,
     host: str,
     known: Identity | None,
-    skip: Callable[[str], bool] | None = None,
+    skip: RepoSkip | None = None,
 ) -> LightPage:
     """The authored and the review-requested open PRs of the account on ``host``."""
     target = env.hosts.target(host)
