@@ -41,7 +41,7 @@ class Stub:
             budget=SimpleNamespace(remaining=lambda: 100.0),
             rate_readings=[],
             config=SimpleNamespace(
-                config=SimpleNamespace(hosts={}, hidden_repos=()),
+                config=SimpleNamespace(hosts={}, hidden_repos=(), hide_archived_repos=True),
             ),
         )
         self.hosts = SimpleNamespace(
@@ -138,7 +138,7 @@ def test_github_hidden_repos_are_dropped() -> None:
         env,  # type: ignore[arg-type]
         "github.com",
         None,
-        lambda repo: repo.endswith("/secret"),
+        lambda repo, archived=False: repo.endswith("/secret"),
     )
     assert [i.number for i in page.items] == [1]
     assert page.complete is True  # a hidden PR does not make the list incomplete
@@ -324,7 +324,7 @@ def test_gitlab_hidden_repos_are_dropped(probed: None) -> None:
         env,  # type: ignore[arg-type]
         "gitlab.example.test",
         None,
-        lambda repo: repo.endswith("/secret"),
+        lambda repo, archived=False: repo.endswith("/secret"),
     )
     assert [i.number for i in page.items] == [1]
 

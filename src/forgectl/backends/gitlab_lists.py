@@ -41,6 +41,7 @@ from ..fanout import instant, sort_items
 from ..gateway import Target, path_int, verify_identity
 from ..hosts import User
 from ..identifiers import RepoRef, bind_login
+from .base import RepoSkip
 from .gitlab import (
     _MAX_NUMBER,
     MAX_PAGES,
@@ -51,6 +52,7 @@ from .gitlab import (
     _list,
     _obj,
     _opt_int_id,
+    _part_missing,
     _project_gid,
     _project_path,
     _req_line,
@@ -205,6 +207,46 @@ class _Parsed:
         self.reviewers = reviewers
 
 
+def _archived(
+    backend: GitLabBackend, target: Target, cache: dict[int, bool], project_id: int
+) -> bool:
+    """Whether the host reports project ``project_id`` archived: one ``GET /projects/:id`` per
+    project for the length of one ``prs`` call (``cache``), never kept between calls. The merge
+    request list does not carry the flag. A project that cannot be read (403, 404) counts as not
+    archived, so an unreadable project never hides work."""
+    if project_id not in cache:
+        try:
+            data = _obj(backend._get(target, ["projects", path_int(project_id)]).data, "project")
+        except ForgectlError as error:
+            if not _part_missing(error):
+                raise
+            backend._warn("a project could not be read; it is not treated as archived")
+            cache[project_id] = False
+        else:
+            flag = data.get("archived")
+            if flag is not None and not isinstance(flag, bool):
+                raise _bad("archived")
+            cache[project_id] = flag is True
+    return cache[project_id]
+
+
+def _skipped(
+    backend: GitLabBackend,
+    target: Target,
+    skip: RepoSkip | None,
+    cache: dict[int, bool],
+    parsed: _Parsed,
+) -> bool:
+    """Whether ``skip`` leaves the item out. The archived state costs a request, so it is read
+    only for an item the repo id alone does not already drop and that ``skip`` would drop were its
+    repository archived."""
+    if skip is None:
+        return False
+    if skip(parsed.item.repo, False):
+        return True
+    return skip(parsed.item.repo, True) and _archived(backend, target, cache, parsed.project_id)
+
+
 def _reviewers(raw: Any) -> frozenset[str] | None:
     """The listed reviewers' logins (lower case); None when the MR has no ``reviewers`` field."""
     if raw is None:
@@ -350,9 +392,7 @@ def _draft_name(backend: GitLabBackend, host: str) -> str:
     return "draft" if version is not None and version >= _DRAFT_FILTER_FROM else "wip"
 
 
-def list_prs(
-    backend: GitLabBackend, query: m.PrQuery, skip: Callable[[str], bool] | None = None
-) -> m.PrPage:
+def list_prs(backend: GitLabBackend, query: m.PrQuery, skip: RepoSkip | None = None) -> m.PrPage:
     """``prs`` on one GitLab host: at most ``limit`` items, newest ``updated_at`` first. An item
     whose repo id ``skip`` accepts is left out as soon as it is parsed, so its author and head
     project are never read, and does not make the list incomplete."""
@@ -369,6 +409,7 @@ def list_prs(
     items: list[_Parsed] = []
     seen: set[str] = set()
     dropped = False  # something the host listed was not kept: the list is not whole
+    archived_cache: dict[int, bool] = {}  # project id -> archived, for this call only
     more = False
     newest: datetime | None = None  # the previous item's time, for the order check
     scope_project: int | None = None
@@ -402,7 +443,7 @@ def list_prs(
                         "upstream_error", "gitlab: an item of another project in a project list"
                     )
                 scope.add((parsed.project_id, parsed.canonical))
-            if skip is not None and skip(parsed.item.repo):
+            if _skipped(backend, target, skip, archived_cache, parsed):
                 continue
             if parsed.item.pr_id in seen:
                 dropped = True  # the list moved between pages: something may be missing

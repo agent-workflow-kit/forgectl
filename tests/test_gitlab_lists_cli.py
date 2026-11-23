@@ -64,6 +64,7 @@ def script(forges: FakeForges, host: str = "gitlab.com", prefix: str = "") -> No
     project = lists("project")
     project["web_url"] = f"https://{host}{prefix}/user-9/proj"
     route(forges, "projects/user-9%2Fproj", project)
+    route(forges, "projects/101", {"id": 101, "archived": False})  # hide_archived_repos
     source = lists("source_project")
     source["web_url"] = f"https://{host}{prefix}/user-8/proj"
     route(forges, "projects/202", source)

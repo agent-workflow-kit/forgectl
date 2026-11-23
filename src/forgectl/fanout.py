@@ -166,14 +166,17 @@ def _check_logins(env: ReadEnv, host: str, args: PrsArgs) -> None:
 MAX_LIMIT = 1000  # `--limit` and both backends' search cap
 
 
-def list_visible(backend: Any, query: m.PrQuery, hidden: tuple[str, ...]) -> m.PrPage:
-    """``backend.list_prs`` without the PRs of ``config.hidden_repos``, which are dropped before
-    the limit counts. The backend is given a skip predicate and applies it while paging, so a
+def list_visible(
+    backend: Any, query: m.PrQuery, hidden: tuple[str, ...], hide_archived: bool = False
+) -> m.PrPage:
+    """``backend.list_prs`` without the PRs of ``config.hidden_repos`` and, with ``hide_archived``
+    (``config.hide_archived_repos``), of repositories the host reports archived, which are dropped
+    before the limit counts. The backend is given a skip predicate and applies it while paging, so a
     hidden PR costs no further request and never takes a place among the ``limit + 1`` visible
     items it fills; the filter here is a safety net. The ask is ``limit + 1`` (at most
     ``MAX_LIMIT``), so a hidden item past the limit cannot make the list incomplete, and there is
     never a second ask. A query for one hidden repo is an empty complete page without a call."""
-    if not hidden:
+    if not hidden and not hide_archived:
         return backend.list_prs(query)
     if query.repo is not None and matches_any(query.repo.id, hidden):
         return m.PrPage(
@@ -182,8 +185,8 @@ def list_visible(backend: Any, query: m.PrQuery, hidden: tuple[str, ...]) -> m.P
             rate_limit=m.RateLimit(host=query.host, remaining=None, reset_at=None),
         )
 
-    def skip(repo: str) -> bool:
-        return matches_any(repo, hidden)
+    def skip(repo: str, archived: bool = False) -> bool:
+        return (hide_archived and archived) or matches_any(repo, hidden)
 
     ask = min(query.limit + 1, MAX_LIMIT)
     page = backend.list_prs(replace(query, limit=ask), skip=skip)
@@ -282,7 +285,8 @@ def run_prs(env: ReadEnv, args: PrsArgs, *, now: datetime | None = None) -> dict
                 limit=args.limit,
             )
             backend = create_backend(env.hosts.backend(host), env)
-            pages.append((host, list_visible(backend, query, config.hidden_repos)))
+            hide = config.hide_archived_repos
+            pages.append((host, list_visible(backend, query, config.hidden_repos, hide)))
         except ForgectlError as error:
             failures.append((host, error))
     if failures and len(queried) == 1:

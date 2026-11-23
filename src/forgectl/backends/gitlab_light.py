@@ -14,7 +14,6 @@ page by page, up to ``MAX_PAGES``; beyond that the poll is incomplete.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
@@ -24,6 +23,7 @@ from ..reads import ReadEnv
 from ..sanitize import sanitize_line
 from . import gitlab as gl
 from . import gitlab_bulk
+from .base import RepoSkip
 from .gitlab import GitLabBackend
 from .light_common import LightItem, LightPage, LightUnsupported
 
@@ -59,6 +59,7 @@ fragment LightMr on MergeRequest {
   userNotesCount
   author { username }
   headPipeline { status }
+  project { archived }
 }
 """
 
@@ -103,6 +104,10 @@ def _item(backend: GitLabBackend, target: Target, node: object, role: str) -> Li
     draft = raw.get("draft")
     if not isinstance(draft, bool):
         raise _Bad("draft")
+    project = _opt(raw.get("project"))
+    archived = project.get("archived") if project else None
+    if archived is not None and not isinstance(archived, bool):
+        raise _Bad("archived")
     return LightItem(
         pr=f"{host}/{canonical}#{number}",
         pr_id=_text(raw.get("id"), "id"),
@@ -120,6 +125,7 @@ def _item(backend: GitLabBackend, target: Target, node: object, role: str) -> Li
         merge_status=sanitize_line(detailed) if isinstance(detailed, str) else None,
         notes_count=_int(raw.get("userNotesCount")),
         roles=(role,),
+        archived=archived is True,
     )
 
 
@@ -127,7 +133,7 @@ def read_light(
     env: ReadEnv,
     host: str,
     known: object = None,
-    skip: Callable[[str], bool] | None = None,
+    skip: RepoSkip | None = None,
 ) -> LightPage:
     reason = gitlab_bulk.probe(env, host)
     if reason is not None:
@@ -165,7 +171,7 @@ def read_light(
                         whole = False
                         continue
                     item = _item(backend, target, node, role)
-                    if skip is not None and skip(item.repo):
+                    if skip is not None and skip(item.repo, item.archived):
                         continue
                     have = merged.get(item.pr)
                     if have is None:

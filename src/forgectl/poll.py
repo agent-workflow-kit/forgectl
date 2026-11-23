@@ -10,7 +10,8 @@ Scope and failure rules are those of ``prs`` over every host (``fanout``): a fai
 ``errors`` entry and makes the list incomplete; with one host asked, its own error is raised. A
 host that cannot be polled lightly (an older GitLab) is listed in ``unsupported`` and reads
 nothing; a host whose list was cut is listed in ``truncated``; the caller then lists with ``prs``.
-``hidden_repos`` are dropped.
+``hidden_repos`` are dropped, and so are the PRs of archived repositories unless
+``hide_archived_repos`` is false; the host is asked again on every poll.
 """
 
 from __future__ import annotations
@@ -69,14 +70,15 @@ def run_poll(env: ReadEnv) -> dict[str, Any]:
     scope = host_scope(env, candidate_hosts(config), single_target=False)
     queried = [host for host, _ in scope]
     hidden = config.hidden_repos
+    hide_archived = config.hide_archived_repos
     items: list[LightItem] = []
     failures: list[tuple[str, ForgectlError]] = []
     unsupported: list[str] = []
     truncated: list[str] = []
     complete = True
 
-    def skip(repo: str) -> bool:
-        return bool(hidden) and matches_any(repo, hidden)
+    def skip(repo: str, archived: bool = False) -> bool:
+        return (hide_archived and archived) or (bool(hidden) and matches_any(repo, hidden))
 
     for host, known in scope:
         try:

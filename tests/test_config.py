@@ -1468,6 +1468,7 @@ def test_hash_is_sha256_of_sorted_key_json_of_the_merged_config_after_defaults(
         "hosts": {},
         "repos": {},
         "hidden_repos": [],
+        "hide_archived_repos": True,
         "activity": {"ignore_authors": []},
         "browse": {
             "refresh_interval": 120.0,

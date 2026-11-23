@@ -29,6 +29,7 @@ from ..identifiers import PrRef, RepoRef, bind_login
 from ..reads import SHOW_READINESS, ReadEnv
 from ..sanitize import sanitize_line, sanitize_text
 from . import gitlab_merge
+from .base import RepoSkip
 
 T = TypeVar("T")
 
@@ -1210,7 +1211,7 @@ class GitLabBackend:
 
     # -- the rest of the protocol (other issues) ---------------------------------------------------
 
-    def list_prs(self, query: m.PrQuery, skip: Callable[[str], bool] | None = None) -> m.PrPage:
+    def list_prs(self, query: m.PrQuery, skip: RepoSkip | None = None) -> m.PrPage:
         from . import gitlab_lists  # lazy: gitlab_lists imports this module
 
         return gitlab_lists.list_prs(self, query, skip)

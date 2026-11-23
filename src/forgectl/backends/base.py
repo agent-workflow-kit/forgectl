@@ -14,12 +14,20 @@ caller decides from a later read what happened.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Protocol, runtime_checkable
 
 from .. import model as m
 from ..errors import ForgectlError
 from ..identifiers import PrRef, RepoRef
+
+
+class RepoSkip(Protocol):
+    """The predicate of ``hidden_repos`` and ``hide_archived_repos``: whether a PR of repo id
+    ``repo`` (`host/path`) is left out. ``archived`` is the host's word for that repository, false
+    where the caller does not know it."""
+
+    def __call__(self, repo: str, archived: bool = False, /) -> bool: ...
+
 
 #: Every read an adapter provides; the protocol test keeps this equal to `Backend`.
 READ_METHODS: tuple[str, ...] = (
@@ -52,10 +60,10 @@ class Backend(Protocol):
     #: `github` or `gitlab`.
     name: m.BackendName
 
-    def list_prs(self, query: m.PrQuery, skip: Callable[[str], bool] | None = None) -> m.PrPage:
-        """`prs` on this backend's hosts. ``skip`` takes a repo id (`host/path`); an item it
-        accepts is left out right after it is parsed, before any further read for the item, and
-        does not make the list incomplete."""
+    def list_prs(self, query: m.PrQuery, skip: RepoSkip | None = None) -> m.PrPage:
+        """`prs` on this backend's hosts. ``skip`` takes a repo id (`host/path`) and whether the
+        host reports the repository archived; an item it accepts is left out right after it is
+        parsed, before any further read for the item, and does not make the list incomplete."""
         ...
 
     def get_pr(self, ref: PrRef, readiness: m.Readiness | None = None) -> m.PrRead:

@@ -70,6 +70,12 @@ hidden_repos: []
 #   - github.com/user-1/archived-repo
 #   - gitlab.example.com/old-group/*
 
+# Hide the PRs of repositories the host reports as archived (GitHub `isArchived`, GitLab `archived`)
+# from every listing, as hidden_repos does; the two combine. The state is read live on every run
+# (and on every refresh of `browse`) and never stored, so an unarchived repo reappears. Set false to
+# list archived repos again.
+hide_archived_repos: true
+
 # Authors whose comments and reviews the `activity` block of `snapshot` ignores: logins, with * and
 # ? as wildcards (everything else, brackets included, is literal). Your own login is never ignored.
 # `author.is_bot` never decides this; only this list does. A list replaces on merge.
