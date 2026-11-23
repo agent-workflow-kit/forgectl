@@ -16,17 +16,22 @@ from jsonschema import Draft202012Validator
 from forgectl import model as m
 from forgectl import poll
 from forgectl.backends import github_light, gitlab_bulk, gitlab_light
+from forgectl.backends.base import RepoFilter
 from forgectl.config import Config, config_hash, load_config
 from forgectl.errors import ForgectlError
 from forgectl.fanout import list_visible
+from forgectl.identifiers import RepoRef
 
 from .gitlab_support import FakeGitLab, make_backend
 from .harness import schemas
 from .test_github_lists import Harness, make, nodes_of, rated, recording
+from .test_github_show import TOKEN as SHOW_TOKEN
+from .test_github_show import recording as show_recording
 from .test_gitlab_lists import GLOBAL
 from .test_gitlab_lists import lists as gl_lists
 from .test_light_poll import SHA, Stub, by_search, gh_node, gl_node, gl_route
 from .test_lists_cli import prs
+from .test_snapshot_cli import PR
 
 __all__ = ["make"]  # the fixture of test_github_lists, used here
 
@@ -153,9 +158,7 @@ def archived_search(flags: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def hide_archived(harness: Harness, hide: bool, hidden: tuple[str, ...] = ()) -> m.PrPage:
-    def skip(repo: str, archived: bool = False) -> bool:
-        return (hide and archived) or repo in hidden
-
+    skip = RepoFilter(lambda repo: repo in hidden, hide)
     return harness.backend.list_prs(m.PrQuery(host="github.com", author="user-1"), skip=skip)
 
 
@@ -249,9 +252,7 @@ def gl_prs(
 ) -> Any:
     backend = make_backend(fake, tmp_path)
 
-    def skip(repo: str, archived: bool = False) -> bool:
-        return (hide and archived) or repo in hidden
-
+    skip = RepoFilter(lambda repo: repo in hidden, hide)
     return backend.list_prs(m.PrQuery(host="gitlab.com", author="user-1", state="open"), skip=skip)
 
 
@@ -352,7 +353,7 @@ def test_github_light_drops_an_archived_repo() -> None:
 def test_github_light_a_flag_that_is_not_a_boolean_is_an_error() -> None:
     env = Stub(by_search([with_archived(gh_node(1), "yes")], []), "github")
     with pytest.raises(ForgectlError):
-        github_light.read_light(env, "github.com", None)  # type: ignore[arg-type]
+        github_light.read_light(env, "github.com", None, RepoFilter(lambda repo: False, True))  # type: ignore[arg-type]
 
 
 @pytest.fixture
@@ -392,7 +393,12 @@ def test_gitlab_light_a_node_without_the_project_is_not_archived(probed: None) -
 def test_gitlab_light_a_flag_that_is_not_a_boolean_is_an_error(probed: None) -> None:
     env = Stub(gl_route([gl_with(gl_node(1), "yes")], []), "gitlab")
     with pytest.raises(ForgectlError) as caught:
-        gitlab_light.read_light(env, "gitlab.example.test", None)  # type: ignore[arg-type]
+        gitlab_light.read_light(
+            env,  # type: ignore[arg-type]
+            "gitlab.example.test",
+            None,
+            RepoFilter(lambda repo: False, True),
+        )
     assert caught.value.code == "upstream_error"
 
 
@@ -496,3 +502,162 @@ def test_prs_unions_the_archived_rule_with_hidden_repos(
     cfg = cli_config(tmp_path, "hidden_repos: ['github.com/user-7/example-repo']\n")
     out = cli_prs(run_forgectl, fake_forges, cfg, {"user-7/other-repo": True})
     assert out["items"] == [] and out["complete"] is True
+
+
+# --- round 1: the flag is read only when it is used --------------------------------------------
+
+
+def test_github_option_off_never_reads_a_malformed_flag(make: Callable[..., Harness]) -> None:
+    harness = make(rated(archived_search({"user-7/other-repo": "yes"})))
+    assert len(hide_archived(harness, False).items) == 3
+
+
+def test_github_option_off_with_hidden_repos_never_reads_a_malformed_flag(
+    make: Callable[..., Harness],
+) -> None:
+    harness = make(rated(archived_search({"user-7/other-repo": []})))
+    query = m.PrQuery(host="github.com", author="user-1")
+    page = list_visible(harness.backend, query, ("github.com/user-7/example-repo",), False)
+    assert [i.repo for i in page.items] == ["github.com/user-7/other-repo"]
+
+
+def test_github_light_option_off_never_reads_a_malformed_flag() -> None:
+    env = Stub(by_search([with_archived(gh_node(1), "yes")], []), "github")
+    page = github_light.read_light(env, "github.com", None, RepoFilter(lambda repo: False, False))  # type: ignore[arg-type]
+    assert [i.number for i in page.items] == [1]
+
+
+def test_poll_option_off_never_reads_a_malformed_github_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    nodes = [with_archived(gh_node(1), "yes"), with_archived(gh_node(2, repo="acme/old"), 7)]
+    assert sorted(poll_with(monkeypatch, nodes, hide=False)) == [1, 2]
+
+
+def test_poll_option_on_still_refuses_a_malformed_github_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ForgectlError):
+        poll_with(monkeypatch, [with_archived(gh_node(1), "yes")], hide=True)
+
+
+def test_poll_option_off_never_reads_a_malformed_gitlab_flag(
+    monkeypatch: pytest.MonkeyPatch, probed: None
+) -> None:
+    env = Stub(gl_route([gl_with(gl_node(1), "yes")], []), "gitlab")
+    env.gateway.config.config = SimpleNamespace(
+        hosts={}, hidden_repos=(), hide_archived_repos=False
+    )
+    monkeypatch.setattr(
+        poll, "host_scope", lambda env, hosts, **kw: [("gitlab.example.test", None)]
+    )
+    monkeypatch.setattr(poll, "_reader", lambda backend: gitlab_light)
+    out = poll.run_poll(env)  # type: ignore[arg-type]
+    assert [i["number"] for i in out["items"]] == [1]
+
+
+# --- round 1: more GitLab cases ------------------------------------------------------------------
+
+
+def test_gitlab_a_forbidden_project_is_not_treated_as_archived(tmp_path: Path) -> None:
+    fake = FakeGitLab()
+    gl_scene(fake, {101: False})
+    fake.on("projects/303", {"message": "403 Forbidden"}, status=403)
+    page = gl_prs(tmp_path, fake)
+    assert "gitlab.com/user-8/old" in {i.repo for i in page.items}
+
+
+def test_gitlab_a_server_error_on_the_project_read_fails_the_list(tmp_path: Path) -> None:
+    fake = FakeGitLab()
+    gl_scene(fake, {101: False})
+    fake.on("projects/303", {"message": "500 Internal Server Error"}, status=500)
+    with pytest.raises(ForgectlError):
+        gl_prs(tmp_path, fake)
+
+
+def test_gitlab_a_project_answer_for_another_project_is_an_upstream_error(tmp_path: Path) -> None:
+    fake = FakeGitLab()
+    gl_scene(fake, {101: False})
+    fake.on("projects/303", {"id": 999, "archived": False})
+    with pytest.raises(ForgectlError) as caught:
+        gl_prs(tmp_path, fake)
+    assert caught.value.code == "upstream_error"
+
+
+def test_gitlab_prs_through_the_config_hides_an_archived_project_by_default(
+    tmp_path: Path,
+) -> None:
+    config = load(tmp_path, "")
+    fake = FakeGitLab()
+    gl_scene(fake, {101: False, 303: True})
+    backend = make_backend(fake, tmp_path)
+    query = m.PrQuery(host="gitlab.com", author="user-1", state="open")
+    page = list_visible(backend, query, config.hidden_repos, config.hide_archived_repos)
+    assert {i.repo for i in page.items} == {"gitlab.com/user-9/proj"}
+    assert fake.count("projects/303") == 1
+
+
+def test_gitlab_prs_through_the_config_option_false_lists_it_and_asks_nothing(
+    tmp_path: Path,
+) -> None:
+    config = load(tmp_path, "hide_archived_repos: false\n")
+    fake = FakeGitLab()
+    gl_scene(fake, {101: False, 303: True})
+    backend = make_backend(fake, tmp_path)
+    query = m.PrQuery(host="gitlab.com", author="user-1", state="open")
+    page = list_visible(backend, query, config.hidden_repos, config.hide_archived_repos)
+    assert len(page.items) == 3
+    assert fake.count("projects/101") == fake.count("projects/303") == 0
+
+
+def test_gitlab_archived_items_ahead_of_the_limit_do_not_consume_it(tmp_path: Path) -> None:
+    fake = FakeGitLab()
+    gl_scene(fake, {101: True, 303: False})  # the newer items are archived; the old one is not
+    backend = make_backend(fake, tmp_path)
+    query = m.PrQuery(host="gitlab.com", author="user-1", state="open", limit=1)
+    page = list_visible(backend, query, (), True)
+    assert [i.number for i in page.items] == [77] and page.complete is True
+
+
+def test_github_archived_items_ahead_of_the_limit_do_not_consume_it(
+    make: Callable[..., Harness],
+) -> None:
+    harness = make(rated(archived_search({"user-7/example-repo": True})))
+    query = m.PrQuery(host="github.com", author="user-1", limit=1)
+    page = list_visible(harness.backend, query, (), True)
+    assert [i.repo for i in page.items] == ["github.com/user-7/other-repo"]
+    assert page.complete is True
+
+
+def test_gitlab_a_query_for_an_archived_repo_is_empty_after_asking_the_host(
+    tmp_path: Path,
+) -> None:
+    fake = FakeGitLab()
+    fake.on(
+        "projects/user-9%2Fproj/merge_requests", gl_lists("mrs")[:3], headers={"x-next-page": ""}
+    )
+    fake.on("projects/202", gl_lists("source_project"))
+    fake.on("projects/user-9%2Fproj", gl_lists("project"))
+    fake.on("projects/101", {"id": 101, "archived": True})
+    fake.on("version", {"version": "17.5.1", "revision": "abc"})
+    backend = make_backend(fake, tmp_path)
+    repo = RepoRef(host="gitlab.com", backend="gitlab", path="user-9/proj")
+    page = list_visible(backend, m.PrQuery(repo=repo, host="gitlab.com", state="all"), (), True)
+    assert page.items == () and page.complete is True
+    assert fake.count("projects/101") == 1
+
+
+def test_show_of_a_pr_is_unaffected_by_the_archived_rule(
+    run_forgectl: Any, fake_forges: Any, tmp_path: Path
+) -> None:
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text(
+        "hide_archived_repos: true\nhosts:\n  github.com:\n    token_env: SHOW_TOKEN\n",
+        encoding="utf-8",
+    )
+    fake_forges.answer("gh", "graphql", method="POST", body=show_recording())
+    done = run_forgectl(
+        ["show", PR, "--json", "--config", str(cfg)], env={"SHOW_TOKEN": SHOW_TOKEN}
+    )
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout)["pr"] == PR

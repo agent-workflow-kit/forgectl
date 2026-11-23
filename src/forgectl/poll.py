@@ -22,6 +22,7 @@ from typing import Any, Protocol
 
 from . import registry
 from .activity import ignored as matches_any
+from .backends.base import RepoFilter
 from .backends.light_common import LightItem, LightPage, LightUnsupported
 from .errors import ForgectlError
 from .fanout import (
@@ -77,8 +78,7 @@ def run_poll(env: ReadEnv) -> dict[str, Any]:
     truncated: list[str] = []
     complete = True
 
-    def skip(repo: str, archived: bool = False) -> bool:
-        return (hide_archived and archived) or (bool(hidden) and matches_any(repo, hidden))
+    skip = RepoFilter(lambda repo: bool(hidden) and matches_any(repo, hidden), hide_archived)
 
     for host, known in scope:
         try:

@@ -223,6 +223,8 @@ def _archived(
             backend._warn("a project could not be read; it is not treated as archived")
             cache[project_id] = False
         else:
+            if data.get("id") != project_id:
+                raise _bad("project id")  # the answer is not the project that was asked for
             flag = data.get("archived")
             if flag is not None and not isinstance(flag, bool):
                 raise _bad("archived")

@@ -32,7 +32,7 @@ from ..gateway import Target, verify_identity
 from ..identifiers import RepoRef, bind_login
 from ..reads import ReadEnv
 from ..sanitize import sanitize_line
-from .base import RepoSkip
+from .base import RepoSkip, reads_archived
 from .github import (
     _ACTOR_FIELDS,
     _NODE_ID,
@@ -377,6 +377,7 @@ def _read_pages(
     floor: datetime | None,
     skip: RepoSkip | None = None,
 ) -> tuple[list[m.PrListItem], bool, bool, int, int]:
+    read = reads_archived(skip)  # the flag is read and checked only for a predicate that uses it
     items: list[m.PrListItem] = []
     seen: set[str] = set()
     skipped_ids: set[str] = set()  # left out on purpose: counted against the host's match count
@@ -393,7 +394,7 @@ def _read_pages(
             if node is None:
                 dropped = True  # not a pull request, or hidden from this account
                 continue
-            if skip is not None and skip(_node_repo(target, node), _node_archived(node)):
+            if skip is not None and skip(_node_repo(target, node), read and _node_archived(node)):
                 skipped_ids.add(_str(node.get("id"), "the id"))
                 continue  # before `_item` reads label pages: a skipped PR costs no request
             item = _item(env, target, node, more=True)

@@ -32,6 +32,7 @@ from typing import Any
 from . import model as m
 from .activity import ignored as matches_any
 from .backends import create_backend
+from .backends.base import RepoFilter
 from .config import BUILT_IN_HOSTS, Config
 from .errors import EXIT_BY_CODE, REQUIRED_DETAILS_BY_CODE, ForgectlError
 from .hosts import Identity, redact_secrets
@@ -185,8 +186,7 @@ def list_visible(
             rate_limit=m.RateLimit(host=query.host, remaining=None, reset_at=None),
         )
 
-    def skip(repo: str, archived: bool = False) -> bool:
-        return (hide_archived and archived) or matches_any(repo, hidden)
+    skip = RepoFilter(lambda repo: matches_any(repo, hidden), hide_archived)
 
     ask = min(query.limit + 1, MAX_LIMIT)
     page = backend.list_prs(replace(query, limit=ask), skip=skip)

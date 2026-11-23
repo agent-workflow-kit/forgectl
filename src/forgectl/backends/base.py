@@ -14,6 +14,7 @@ caller decides from a later read what happened.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol, runtime_checkable
 
 from .. import model as m
@@ -27,6 +28,25 @@ class RepoSkip(Protocol):
     where the caller does not know it."""
 
     def __call__(self, repo: str, archived: bool = False, /) -> bool: ...
+
+
+def reads_archived(skip: RepoSkip | None) -> bool:
+    """Whether ``skip`` can use the archived state. A predicate that says ``hide_archived`` is
+    false never needs it, so an adapter does not read or validate the host's flag for it; any
+    other predicate is taken to use it."""
+    return skip is not None and getattr(skip, "hide_archived", True) is not False
+
+
+class RepoFilter:
+    """The ``RepoSkip`` of the configuration: ``hidden`` repo patterns, and archived repositories
+    when ``hide_archived`` is set. ``hide_archived`` is readable so adapters can tell."""
+
+    def __init__(self, matches: Callable[[str], bool], hide_archived: bool) -> None:
+        self._matches = matches
+        self.hide_archived = hide_archived
+
+    def __call__(self, repo: str, archived: bool = False, /) -> bool:
+        return (self.hide_archived and archived) or self._matches(repo)
 
 
 #: Every read an adapter provides; the protocol test keeps this equal to `Backend`.

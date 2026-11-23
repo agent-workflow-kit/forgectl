@@ -23,7 +23,7 @@ from ..reads import ReadEnv
 from ..sanitize import sanitize_line
 from . import gitlab as gl
 from . import gitlab_bulk
-from .base import RepoSkip
+from .base import RepoSkip, reads_archived
 from .gitlab import GitLabBackend
 from .light_common import LightItem, LightPage, LightUnsupported
 
@@ -84,7 +84,9 @@ def _int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
-def _item(backend: GitLabBackend, target: Target, node: object, role: str) -> LightItem:
+def _item(
+    backend: GitLabBackend, target: Target, node: object, role: str, read_archived: bool = True
+) -> LightItem:
     raw = _opt(node)
     if raw is None:
         raise _Bad("a merge request")
@@ -105,7 +107,7 @@ def _item(backend: GitLabBackend, target: Target, node: object, role: str) -> Li
     if not isinstance(draft, bool):
         raise _Bad("draft")
     project = _opt(raw.get("project"))
-    archived = project.get("archived") if project else None
+    archived = project.get("archived") if project and read_archived else None
     if archived is not None and not isinstance(archived, bool):
         raise _Bad("archived")
     return LightItem(
@@ -140,6 +142,7 @@ def read_light(
         raise LightUnsupported(reason)
     target = env.hosts.target(host)
     backend = GitLabBackend.from_env(env)
+    read = reads_archived(skip)  # the flag is read and checked only for a predicate that uses it
     merged: dict[str, LightItem] = {}
     whole = True  # false once a null node was skipped
     cursors: dict[str, str | None] = {"a": None, "r": None}
@@ -170,7 +173,7 @@ def read_light(
                     if node is None:
                         whole = False
                         continue
-                    item = _item(backend, target, node, role)
+                    item = _item(backend, target, node, role, read)
                     if skip is not None and skip(item.repo, item.archived):
                         continue
                     have = merged.get(item.pr)

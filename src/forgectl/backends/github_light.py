@@ -20,7 +20,7 @@ from ..gateway import Target, verify_identity
 from ..hosts import Identity
 from ..reads import ReadEnv
 from ..sanitize import sanitize_line
-from .base import RepoSkip
+from .base import RepoSkip, reads_archived
 from .github import (
     _ACTOR_FIELDS,
     _NODE_ID,
@@ -82,7 +82,7 @@ def _state(node: dict[str, Any]) -> str | None:
     return _opt_str(rollup.get("state")) if rollup else None
 
 
-def _item(target: Target, node: dict[str, Any], role: str) -> LightItem:
+def _item(target: Target, node: dict[str, Any], role: str, read_archived: bool = True) -> LightItem:
     number = node.get("number")
     if isinstance(number, bool) or not isinstance(number, int) or number < 1:
         raise Malformed("the number")
@@ -112,7 +112,7 @@ def _item(target: Target, node: dict[str, Any], role: str) -> LightItem:
         ci_state=_state(node),
         review_decision=_opt_str(node.get("reviewDecision")),
         roles=(role,),
-        archived=archived_flag(repository),
+        archived=archived_flag(repository) if read_archived else False,
     )
 
 
@@ -125,6 +125,7 @@ def _read_list(
 ) -> tuple[list[LightItem], bool]:
     """One role's PRs and whether the list was read whole."""
     backend = GitHubBackend(env)
+    read = reads_archived(skip)  # the flag is read and checked only for a predicate that uses it
     items: list[LightItem] = []
     complete = True
     skipped = 0
@@ -156,7 +157,7 @@ def _read_list(
                 ):
                     dropped += 1
                     continue
-                found.append(_item(target, _obj(raw, "a result"), role))
+                found.append(_item(target, _obj(raw, "a result"), role, read))
             return found, count, more, cursor, dropped
 
         variables = {"q": search, "first": PAGE_SIZE, "after": after}
